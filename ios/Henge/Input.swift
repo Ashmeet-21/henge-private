@@ -19,14 +19,31 @@ struct KeyboardCatcher: UIViewRepresentable {
         let listener = KeyListener()
         let typer = CatcherView()
         var typing = false
+        private var hiding: NSObjectProtocol?
 
         override init(frame: CGRect) {
             super.init(frame: frame)
             addSubview(listener)
             addSubview(typer)
+            hiding = NotificationCenter.default.addObserver(forName: UIResponder.keyboardWillHideNotification,
+                                                            object: nil, queue: .main) { [weak self] _ in
+                self?.keyboardHid()
+            }
         }
 
         required init?(coder: NSCoder) { fatalError("made in code") }
+
+        deinit {
+            if let hiding { NotificationCenter.default.removeObserver(hiding) }
+        }
+
+        /// iPadOS's own hide-keyboard key closes the keyboard without asking the app, which then went on
+        /// keeping the Mac small, with room for a keyboard that was gone. Stop typing as the row's button does.
+        /// A sheet taking the keyboard isn't that: it is handed back when the sheet closes.
+        private func keyboardHid() {
+            guard typing, let window, window.rootViewController?.presentedViewController == nil else { return }
+            typer.onHide()
+        }
 
         override func didMoveToWindow() {
             super.didMoveToWindow()
