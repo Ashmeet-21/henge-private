@@ -163,7 +163,11 @@ static void display_set_page(HvPvgLite *p, uint64_t pa) {
     PUTF(0x28, (float)height_mm);
     PUT32(0x208, 1); /* one mode: */
     PUT32(0x210, display_h << 16 | display_w);
-    PUT32(0x214, 60u << 16);
+    {   /* HV_HZ: the refresh rate the display offers (60). 30 halves what macOS draws, and so what is emulated. */
+        const char *hz = getenv("HV_HZ");
+        uint32_t rate = hz && atoi(hz) >= 20 && atoi(hz) <= 120 ? (uint32_t)atoi(hz) : 60;
+        PUT32(0x214, rate << 16);
+    }
     PUTF(0xa10, 1.0f); /* identity colour matrix */
     PUTF(0xa24, 1.0f);
     PUTF(0xa38, 1.0f);

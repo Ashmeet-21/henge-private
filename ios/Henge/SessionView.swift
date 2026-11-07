@@ -416,6 +416,7 @@ struct SessionView: View {
             List {
                 Section(phase) {
                     LabeledContent("CPUs on", value: "\(cpusOn) of \(cpus)")
+                    LabeledContent("Temperature", value: "\(ThermalGovernor.name(ProcessInfo.processInfo.thermalState)), CPUs at \(ThermalGovernor.percent)%")
                     LabeledContent("Translated blocks", value: String(format: "%.1f M/s", blocksPerSecond / 1e6))
                     LabeledContent("Network frames", value: "\(framesOut) out, \(framesIn) in")
                     LabeledContent("Up", value: "\(Int(Date().timeIntervalSince(started))) s")
@@ -479,6 +480,7 @@ struct SessionView: View {
             error = String(cString: buffer)
             return
         }
+        ThermalGovernor.start()
         started = Date()
         var used = mac
         used.lastUsed = started

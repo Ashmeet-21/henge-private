@@ -11,6 +11,8 @@ struct SettingsView: View {
     @AppStorage(EngineTuning.fastFlushKey) private var fastFlush = true
     @AppStorage(EngineTuning.wfiSpinKey) private var wfiSpin = false
     @AppStorage(EngineTuning.superblocksKey) private var superblocks = false
+    @AppStorage(ThermalGovernor.enabledKey) private var keepCool = true
+    @AppStorage(EngineTuning.refreshKey) private var refreshRate = 60
 
     var body: some View {
         NavigationStack {
@@ -32,10 +34,16 @@ struct SettingsView: View {
                 }
                 .listRowBackground(Desk.card)
                 Section("Performance") {
+                    Toggle("Keep the \(Device.name) cool", isOn: $keepCool)
+                    Picker("Mac refresh rate", selection: $refreshRate) {
+                        Text("60 Hz").tag(60)
+                        Text("30 Hz (cooler)").tag(30)
+                    }
+                    .pickerStyle(.segmented)
                     Toggle("Faster disk writes", isOn: $fastFlush)
                     Toggle("Quicker wake from idle", isOn: $wfiSpin)
                     Toggle("Superblocks (experimental)", isOn: $superblocks)
-                    Text("Faster disk writes keep them in order without waiting for a full sync; a sudden power loss could lose the last ones. Quicker wake keeps an idle CPU watching for work for 50 µs, at some battery cost. Superblocks let translated code run past conditional branches. Changes apply the next time a Mac starts.")
+                    Text("Keep cool lets each of the Mac's CPUs run less of the time as iOS reports the device warmer (85%, 60%, 40%): a little slower, but steady, instead of iOS slowing everything down. 30 Hz halves what macOS draws. Faster disk writes keep them in order without waiting for a full sync; a sudden power loss could lose the last ones. Quicker wake keeps an idle CPU watching for work for 50 µs, at some battery cost. Superblocks let translated code run past conditional branches. Changes apply the next time a Mac starts.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 .listRowBackground(Desk.card)

@@ -42,6 +42,30 @@ void hv_flush_blocks(HvMachine *m) {
     }
 }
 
+/* The duty cap (HV_K_DUTY): after each 10 ms of running, a CPU thread rests in proportion, parked so
+   that no other CPU waits for it meanwhile. Idle time (WFI) starts the count again. */
+static __thread uint64_t duty_since;
+static __thread uint32_t duty_count;
+
+static void park(HvCpu *cpu);
+static void unpark(HvCpu *cpu);
+
+static void duty_rest(HvCpu *cpu) {
+    int duty = hv_knob[HV_K_DUTY];
+    if (duty <= 0 || duty >= 100) { duty_since = 0; return; }
+    if ((++duty_count & 63) != 0) return; /* the clock every 64 passes */
+    uint64_t now = mach_absolute_time();
+    if (!duty_since) { duty_since = now; return; }
+    uint64_t ran = now - duty_since;
+    if (ran < 240000) return; /* 10 ms at 24 MHz */
+    uint64_t rest_us = ran / 24 * (uint64_t)(100 - duty) / (uint64_t)duty;
+    if (rest_us > 50000) rest_us = 50000;
+    park(cpu);
+    usleep((useconds_t)rest_us);
+    unpark(cpu);
+    duty_since = mach_absolute_time();
+}
+
 /* Parked: not running guest code, nor using its TLB, so other CPUs need not
    wait for it (TLBIs, a flush). It catches up with requests on the way back. */
 static void park(HvCpu *cpu) {
@@ -907,7 +931,8 @@ static int run_loop(HvCpu *cpu, int one) {
             last_reason = HV_EXIT_EXCEPTION;
             continue;
         }
-        /* Someone asked the CPU to leave (the 1 ms kicker, a device, an invalidation): service devices now. */
+        duty_rest(cpu);
+        /* Someone asked the CPU to leave (the kicker, a device, an invalidation): service devices now. */
         int kicked = __atomic_exchange_n(&cpu->exit_req, 0, __ATOMIC_RELAXED) != 0;
         if (kicked && m->big_lock_on) {
             /* Give another CPU its turn. Whatever it does in between may touch
@@ -1090,6 +1115,7 @@ static int run_loop(HvCpu *cpu, int one) {
             break;
         case HV_EXIT_WFI:
             if (wait_for_interrupt(cpu) != 0) return HV_EXIT_WFI;
+            duty_since = 0; /* it was idle: that counts as rest */
             break;
         default:
             return (int)cpu->exit_reason;

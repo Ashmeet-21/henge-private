@@ -111,6 +111,7 @@ int henge_vm_state(void) { return state; }
 const char *henge_vm_exit_reason(void) { return hv_vm_reason_name(exit_reason); }
 void henge_vm_stop(void) { if (state == 1) hv_vm_stop(); }
 void henge_vm_power_button(void) { if (state == 1) hv_vm_power_button(); }
+void henge_vm_set_duty(int percent) { __atomic_store_n(&hv_knob[HV_K_DUTY], percent >= 100 || percent <= 0 ? 0 : percent, __ATOMIC_RELAXED); }
 
 uint64_t henge_vm_blocks(void) { return state ? hv_vm_machine()->stats.blocks : 0; }
 uint64_t henge_vm_net_frames(int sent) { return sent ? hv_net_tx_frames : hv_net_rx_frames; }

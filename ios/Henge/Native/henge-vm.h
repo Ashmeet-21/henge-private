@@ -29,6 +29,8 @@ const char *henge_vm_exit_reason(void);
 void henge_vm_stop(void);
 /* Asks macOS to shut down, as the power button does. Blocks for about 0.2 s. */
 void henge_vm_power_button(void);
+/* Percent of the time each CPU may run, 1-100 (100: no limit). Takes effect at once. */
+void henge_vm_set_duty(int percent);
 
 /* Progress, for the session screen. */
 uint64_t henge_vm_blocks(void);            /* blocks the CPUs entered */
