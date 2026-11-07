@@ -40,6 +40,7 @@ int henge_vm_boot(const char *rom, const char *disk, const char *aux, uint64_t e
         snprintf(err, errlen, "Henge has no JIT region. Turn on JIT first.");
         return -1;
     }
+    if (getenv("HV_PROF_IOS") && atoi(getenv("HV_PROF_IOS"))) { extern void hv_prof_ios_start(void); hv_prof_ios_start(); } /* before the CPU threads start */
     HvVmConfig c = {.rom = rom, .disk = disk, .aux = aux, .ecid = ecid, .seed = seed, .ram_mb = ram_mb, .ncpus = cpus, .log = 1,
                     .jit_rx = jit->rx_addr, .jit_rw = jit->rw_addr, .jit_bytes = jit->size};
     fprintf(stderr, "henge: booting with %d CPUs, %llu MB RAM, a %zu MB JIT region\n", cpus, (unsigned long long)ram_mb,
