@@ -11,8 +11,6 @@ TROLLSTORE=false
 [ "$1" = "--trollstore" ] && TROLLSTORE=true
 OUT="$HOME/Desktop/Henge.ipa"
 [ "$TROLLSTORE" = true ] && OUT="$HOME/Desktop/Henge.tipa"
-# Between releases main does not build from source: one file comes with each release.
-[ -f "$IOS/Henge/ReleaseGate.swift" ] || { echo "Henge's main branch is between releases and does not build from source. Get the latest release: https://github.com/Leviidev/Henge/releases" >&2; exit 1; }
 [ -d "$IOS/deps/StikJIT.xcframework" ] || "$IOS/scripts/fetch_deps.sh"
 cd "$IOS"
 xcodegen generate >/dev/null
