@@ -3,6 +3,8 @@ import AVFAudio
 
 @main
 struct HengeApp: App {
+    /// Answers for external display scenes before iOS 27 (LegacyExternalDisplay.swift).
+    @UIApplicationDelegateAdaptor(HengeAppDelegate.self) private var appDelegate
     @Environment(\.scenePhase) private var scenePhase
 
     init() {

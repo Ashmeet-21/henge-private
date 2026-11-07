@@ -8,6 +8,8 @@ import QuartzCore
 struct BootDisplay: View {
     let display: DisplayRouter
     let role: DisplayTargetSelection.Role
+    /// The id this view's layer connects to the router under.
+    var surface = UUID()
 
     @State private var image: CGImage?
     @State private var gpuLive = false
@@ -29,7 +31,7 @@ struct BootDisplay: View {
                         .foregroundStyle(.white)
                 }
             }
-            GPUScreen(display: display, role: role).allowsHitTesting(false)
+            GPUScreen(display: display, role: role, surface: surface).allowsHitTesting(false)
         }
         .task {
             // Once macOS draws with the GPU the frames go straight to GPUScreen:
@@ -64,17 +66,19 @@ struct BootDisplay: View {
 private struct GPUScreen: UIViewRepresentable {
     let display: DisplayRouter
     let role: DisplayTargetSelection.Role
+    let surface: UUID
 
     final class Screen: UIView {
         override class var layerClass: AnyClass { CAMetalLayer.self }
 
-        private let id = UUID()
+        private let id: UUID
         private let display: DisplayRouter
         private let role: DisplayTargetSelection.Role
         private var attached = false
         private var lastSize: CGSize = .zero
 
-        init(display: DisplayRouter, role: DisplayTargetSelection.Role) {
+        init(display: DisplayRouter, role: DisplayTargetSelection.Role, surface: UUID) {
+            self.id = surface
             self.display = display
             self.role = role
             super.init(frame: .zero)
@@ -116,7 +120,17 @@ private struct GPUScreen: UIViewRepresentable {
         }
     }
 
-    func makeUIView(context: Context) -> Screen { Screen(display: display, role: role) }
+    func makeUIView(context: Context) -> Screen {
+        if ProcessInfo.processInfo.environment["HV_COLOR_PROBE"] != nil {
+            // What the screen itself is, for the colour probe (the engine logs the layer and the frames).
+            let s = UIScreen.main
+            let gamut = s.traitCollection.displayGamut == .P3 ? "P3" : s.traitCollection.displayGamut == .SRGB ? "sRGB" : "unspecified"
+            HengeLog.log("colorprobe", "colorprobe: v=1 src=swift event=screen gamut=\(gamut) scale=\(s.scale) nativeScale=\(s.nativeScale) "
+                       + "bounds=\(Int(s.bounds.width))x\(Int(s.bounds.height)) maxEDR=\(s.potentialEDRHeadroom) currentEDR=\(s.currentEDRHeadroom) "
+                       + "brightness=\(String(format: "%.2f", s.brightness)) refreshHz=\(s.maximumFramesPerSecond)")
+        }
+        return Screen(display: display, role: role, surface: surface)
+    }
     func updateUIView(_ view: Screen, context: Context) {}
     static func dismantleUIView(_ view: Screen, coordinator: ()) { view.detach() }
 }

@@ -174,6 +174,7 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
 - (BOOL)hasDisplayLayer;
 - (void)kickPresenter:(BOOL)fresh;
 - (void)present:(uint64_t)mapping;
+- (void)screenChanged;
 @end
 
 /* What Metal asks while it reads a serialized pipeline. */
@@ -188,6 +189,28 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
 static double now_seconds(void) {
     return (double)clock_gettime_nsec_np(CLOCK_MONOTONIC) * 1e-9;
 }
+
+/* How the half-float display surface is shown. WindowServer writes DISPLAY-ENCODED values there (extended sRGB: the guest's gray 128 is
+   0.502, measured with the colour probe), so mode 0 passes them through. Mode 1 treats them as LINEAR light and applies the sRGB encode,
+   which is what this code did before (and was only right for a linear display profile such as ACES CG Linear: with every other profile
+   it encodes twice and the screen looks pale). HV_PVG_HALF=linear selects mode 1 at start; with the colour probe on, a file named
+   mode-linear or mode-encoded in its folder switches it while running. */
+static _Atomic int hv_half_mode = -1;
+static int hv_half_mode_get(void) {
+    int m = atomic_load(&hv_half_mode);
+    if (m < 0) {
+        const char *e = getenv("HV_PVG_HALF");
+        m = e && !strcmp(e, "linear") ? 1 : 0;
+        atomic_store(&hv_half_mode, m);
+    }
+    return m;
+}
+static float hv_half_shown(float v, int mode) { /* what the screen shows for a half-float component */
+    v = v < 0 ? 0 : v > 1 ? 1 : v;
+    return mode == 1 ? (v <= 0.0031308f ? v * 12.92f : 1.055f * powf(v, 1.0f / 2.4f) - 0.055f) : v;
+}
+
+#include "pvg_colorprobe.h" /* HV_COLOR_PROBE: what the display is told and shown, for chasing colour problems */
 
 /* A contiguous view of a task's guest pages; holes are left as zero pages. */
 /* A range of task memory at one address, page by page. Metal pins a buffer's
@@ -1715,21 +1738,20 @@ typedef struct {
     return YES;
 }
 
-/* The surface is linear light in half floats: every possible value, to a display byte. */
+/* Every possible half-float value to a display byte, as the screen would show it in the current mode (see hv_half_mode). */
 static const uint8_t *half_to_byte(void) {
-    static uint8_t *table;
-    if (table) return table;
+    static uint8_t *tables[2];
+    int mode = hv_half_mode_get();
+    if (tables[mode]) return tables[mode];
     uint8_t *t = malloc(65536);
     for (uint32_t i = 0; i < 65536; i++) {
         uint16_t bits = (uint16_t)i;
         __fp16 h;
         memcpy(&h, &bits, 2);
         float v = h;
-        if (!(v > 0)) t[i] = 0;
-        else if (v >= 1) t[i] = 255;
-        else t[i] = (uint8_t)((v <= 0.0031308f ? v * 12.92f : 1.055f * powf(v, 1.0f / 2.4f) - 0.055f) * 255.0f + 0.5f);
+        t[i] = !(v > 0) ? 0 : v >= 1 ? 255 : (uint8_t)(hv_half_shown(v, mode) * 255.0f + 0.5f);
     }
-    table = t;
+    tables[mode] = t;
     return t;
 }
 
@@ -1817,10 +1839,10 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
     "  V o; o.at = float4(rect.xy + c * rect.zw, 0, 1); o.uv = float2(c.x, 1 - c.y); return o; }\n"
     "fragment float4 screen_plain(V v [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
     "  return float4(t.sample(s, v.uv).rgb, 1); }\n"
-    "fragment float4 screen_linear(V v [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
+    "fragment float4 screen_linear(V v [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant uint &mode [[buffer(0)]]) {\n"
     "  float3 c = saturate(t.sample(s, v.uv).rgb);\n"
-    "  float3 e = select(1.055 * powr(c, 1.0 / 2.4) - 0.055, c * 12.92, c <= 0.0031308);\n"
-    "  return float4(e, 1); }\n"
+    "  if (mode == 1) c = select(1.055 * powr(c, 1.0 / 2.4) - 0.055, c * 12.92, c <= 0.0031308);\n"
+    "  return float4(c, 1); }\n"
     "fragment float4 screen_cursor(V v [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
     "  return t.sample(s, v.uv); }\n";
 
@@ -1854,11 +1876,14 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
         [CATransaction setDisableActions:YES];
         target.device = device;
         target.pixelFormat = MTLPixelFormatBGRA8Unorm;
-        target.framebufferOnly = !getenv("HV_PVG_GPU_TEST");
+        target.framebufferOnly = !(getenv("HV_PVG_GPU_TEST") || getenv("HV_COLOR_PROBE")); /* the probe copies the drawable out */
         target.allowsNextDrawableTimeout = YES;
         target.maximumDrawableCount = 3;
         [CATransaction commit];
         prepared_layer = target;
+        fprintf(stderr, "hengevm: pvg-metal: half-float display surfaces are shown %s (HV_PVG_HALF=%s)\n",
+                hv_half_mode_get() == 1 ? "as LINEAR light with an sRGB encode" : "as display-encoded values, passed through", hv_half_mode_get() == 1 ? "linear" : "encoded/default");
+        if (cp.on) cp_log_layer(self, target);
     }
     return YES;
 }
@@ -2017,6 +2042,10 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
         [e setVertexBytes:rect length:sizeof rect atIndex:0];
         [e setFragmentTexture:tex atIndex:0];
         [e setFragmentSamplerState:screen_sampler atIndex:0];
+        if (half) {
+            uint32_t half_mode = (uint32_t)hv_half_mode_get();
+            [e setFragmentBytes:&half_mode length:sizeof half_mode atIndex:0];
+        }
         [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
         const uint8_t *page = hv_pvg_lite_display_page(lite);
         uint32_t where = page ? __atomic_load_n((const uint32_t *)(page + 0xe00), __ATOMIC_ACQUIRE) : 0xffffffff;
@@ -2031,6 +2060,7 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
             [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
         }
         [e endEncoding];
+        if (cp.on) cp_capture_post(self, drawable.texture, W, H, cb);
 #if !TARGET_OS_IPHONE
         if (getenv("HV_PVG_GPU_TEST")) { /* the same pixels for a screenshot: this is the path a phone runs */
             NSUInteger bytes = (NSUInteger)W * H * 4;
@@ -2167,6 +2197,7 @@ HvPvgMetal *hv_pvg_metal_create(HvPvgLite *lite) {
         r->surfaces = [NSMutableDictionary new];
         r->complaints = [NSMutableSet new];
         r->shot = getenv("HV_PVG_SHOT");
+        cp_start(r);
 #if !TARGET_OS_IPHONE
         if (getenv("HV_PVG_GPU_TEST")) r->layer = [CAMetalLayer layer];
 #endif
@@ -2213,6 +2244,7 @@ void hv_pvg_metal_submit(HvPvgMetal *m, HvPvgLite *lite, uint32_t ch, uint32_t *
                     hv_pvg_lite_command(lite, cmd, len);
                     if (op == 8 && n >= 16) {
                         if (r->tracing) fprintf(stderr, "trace: swap to %llu\n", (uint64_t)args[3] << 32 | args[2]);
+                        cp_note_swap(r, (uint64_t)args[3] << 32 | args[2], args, n);
                         [r present:(uint64_t)args[3] << 32 | args[2]];
                     }
                     if (op == 4) [r cursorGlyph:args length:n];
@@ -2307,9 +2339,7 @@ int hv_pvg_metal_snapshot(HvPvgMetal *m, uint8_t *bgra, uint32_t w, uint32_t h) 
                 }
                 const __fp16 *p = (const __fp16 *)(src + sx * 8);
                 for (int c = 0; c < 3; c++) {
-                    float v = (float)p[c];
-                    v = v < 0 ? 0 : v > 1 ? 1 : v;
-                    v = v <= 0.0031308f ? v * 12.92f : 1.055f * powf(v, 1 / 2.4f) - 0.055f; /* the surface is linear light */
+                    float v = hv_half_shown((float)p[c], hv_half_mode_get()); /* as the screen shows it */
                     sum[2 - c] += (uint32_t)(v * 255 + 0.5f);
                 }
             }

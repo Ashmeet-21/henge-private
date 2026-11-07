@@ -1,6 +1,7 @@
 #!/bin/zsh
 # Builds Henge for iOS and writes ~/Desktop/Henge.ipa (or ~/Desktop/Henge.tipa with --trollstore).
-# Unsigned build, then signed ad hoc inside out with Henge.entitlements, as Husk's
+# Unsigned build, then signed ad hoc inside out with the entitlements file named by the
+# HENGE_ENTITLEMENTS environment variable (default Henge/Henge.entitlements), as Husk's
 # package_ipa.sh does: the sideloader (SideStore, AltStore, Impactor) re-signs it
 # with the user's own certificate and keeps the entitlements it can.
 # --trollstore strips the entitlements TrollStore bans under PPL/TXM.
@@ -35,7 +36,8 @@ trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/Payload"
 cp -R "$APP" "$STAGE/Payload/"
 ENT="$STAGE/entitlements.plist"
-cp "$IOS/Henge/Henge.entitlements" "$ENT"
+# HENGE_ENTITLEMENTS picks another file, as for xcodebuild (Henge/Henge.personal.entitlements for a free team).
+cp "$IOS/${HENGE_ENTITLEMENTS:-Henge/Henge.entitlements}" "$ENT"
 BANNED_KEYS=("com.apple.private.cs.debugger" "dynamic-codesigning" "com.apple.private.skip-library-validation")
 if [ "$TROLLSTORE" = true ]; then for k in "${BANNED_KEYS[@]}"; do plutil -remove "$k" "$ENT" 2>/dev/null || true; done; fi
 SAPP="$STAGE/Payload/Henge.app"
@@ -51,7 +53,8 @@ for fw in "$SAPP"/Frameworks/*.framework; do [ -d "$fw" ] && sign "$fw"; done
 for ex in "$SAPP"/PlugIns/*.appex; do [ -d "$ex" ] && sign "$ex"; done
 sign --entitlements "$ENT" "$SAPP"
 EMBEDDED=$(codesign -d --entitlements - "$SAPP" 2>&1 || true)
-for k in get-task-allow increased-memory-limit extended-virtual-addressing; do
+# Every key the entitlements file asks for must be in the signature.
+for k in $(plutil -convert json -o - "$ENT" | python3 -I -c 'import json, sys; print(" ".join(json.load(sys.stdin)))'); do
     grep -q "$k" <<< "$EMBEDDED" || { echo "==> $k did not embed; refusing to package" >&2; exit 1; }
 done
 ( cd "$STAGE" && zip -qry "$STAGE/package.tmp" Payload )

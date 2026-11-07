@@ -116,7 +116,7 @@ struct SessionView: View {
             HardwareKeys.releaseAll()
             HardwareMouse.shared.stop()
         }
-        .modifier(ExternalMacDisplayModifier(display: display, aspect: mac.aspect))
+        .modifier(ExternalMacDisplayModifier(presentation: MacPresentation(display: display, aspect: mac.aspect)))
         .task { await run() }
         .task { await Sharing.followMacClipboard() }
     }

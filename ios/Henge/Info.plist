@@ -55,6 +55,28 @@
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Henge uses the local network to pair with this iPhone for JIT, without a computer.</string>
+	<!-- Before iOS 27 the system connects an external display (USB-C or AirPlay) as a scene only
+	     to apps that declare this role with a delegate class here; without it the display mirrors
+	     the phone, and the app delegate is never asked (tests/test_scene_manifest.swift pins this).
+	     ExternalDisplaySceneDelegate and LegacyExternalDisplay decide what it shows. iOS 27 offers
+	     the display only to the scene accessory and ignores this entry. -->
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>UIWindowSceneSessionRoleExternalDisplayNonInteractive</key>
+			<array>
+				<dict>
+					<key>UISceneConfigurationName</key>
+					<string>External Display</string>
+					<key>UISceneDelegateClassName</key>
+					<string>$(PRODUCT_MODULE_NAME).ExternalDisplaySceneDelegate</string>
+				</dict>
+			</array>
+		</dict>
+	</dict>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
