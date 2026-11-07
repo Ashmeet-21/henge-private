@@ -137,6 +137,8 @@ void hv_mmu_walk(HvCpu *cpu, uint64_t va, HvAccess acc, int el, HvWalk *out) {
     }
 }
 
+int hv_tlb_tmajor;
+
 void hv_tlb_flush(HvCpu *cpu) {
     if (cpu->m) cpu->m->stats.tlb_flushes++;
     if (cpu->m) cpu->m->stats.reset_why[0]++;
@@ -290,7 +292,7 @@ void hv_tlb_flush_user(HvCpu *cpu) {
     cpu->nuser_fills = 0;
     if (n <= HV_USER_FILLS) {
         for (uint32_t k = 0; k < n; k++) {
-            HvTlbEntry *e = &cpu->tlb[0][0] + cpu->user_fills[k];
+            HvTlbEntry *e = &cpu->tlb[0] + cpu->user_fills[k];
             uint64_t tag = e->read_tag != HV_TLB_INVALID ? e->read_tag + HV_TLB_ADJ : e->exec_tag != HV_TLB_INVALID ? hv_exec_key(e->exec_tag, e->addend) : e->write_tag + HV_TLB_ADJ;
             if (e->read_tag != HV_TLB_INVALID || e->exec_tag != HV_TLB_INVALID || e->write_tag != HV_TLB_INVALID) if (!((tag >> 55) & 1)) memset(e, 0x80, sizeof *e); /* the slot may hold a kernel page by now */
         }
@@ -298,7 +300,7 @@ void hv_tlb_flush_user(HvCpu *cpu) {
     }
     for (int t = 0; t < 3; t++)
         for (uint32_t i = 0; i < HV_TLB_SIZE; i++) {
-            HvTlbEntry *e = &cpu->tlb[i][t];
+            HvTlbEntry *e = hv_tlb_ent(cpu, i, t);
             uint64_t tag = e->read_tag != HV_TLB_INVALID ? e->read_tag + HV_TLB_ADJ : e->exec_tag != HV_TLB_INVALID ? hv_exec_key(e->exec_tag, e->addend) : e->write_tag + HV_TLB_ADJ;
             if (e->read_tag != HV_TLB_INVALID || e->exec_tag != HV_TLB_INVALID || e->write_tag != HV_TLB_INVALID) if (!((tag >> 55) & 1)) memset(e, 0x80, sizeof *e);
         }
@@ -315,7 +317,7 @@ void hv_tlb_flush_user_range(HvCpu *cpu, uint64_t va, uint64_t len) {
     if (cpu->m) if (cpu->m->stats_interval) cpu->m->stats.tlb_range_flushes++;
     uint64_t lo = va & 0x00ffffffffffffffull;
     for (uint32_t k = 0; k < n; k++) {
-        HvTlbEntry *e = &cpu->tlb[0][0] + cpu->user_fills[k];
+        HvTlbEntry *e = &cpu->tlb[0] + cpu->user_fills[k];
         if (e->read_tag == HV_TLB_INVALID && e->exec_tag == HV_TLB_INVALID && e->write_tag == HV_TLB_INVALID) continue;
         uint64_t tag = e->read_tag != HV_TLB_INVALID ? e->read_tag + HV_TLB_ADJ : e->exec_tag != HV_TLB_INVALID ? hv_exec_key(e->exec_tag, e->addend) : e->write_tag + HV_TLB_ADJ;
         if ((tag >> 55) & 1) continue; /* the slot holds a kernel page by now */
@@ -344,7 +346,7 @@ void hv_tlb_protect_code_page(HvCpu *cpu, HvRam *ram, uint64_t pg) {
     for (int k = 0; k < 3; k++) {
         uint64_t c = h >> (16 * k) & 0xffff;
         if (!c) continue;
-        HvTlbEntry *e = &cpu->tlb[0][0] + (c - 1);
+        HvTlbEntry *e = &cpu->tlb[0] + (c - 1);
         if (maps_writable(e, host_page)) e->write_tag = HV_TLB_INVALID;
     }
 }
@@ -352,7 +354,7 @@ void hv_tlb_protect_code_page(HvCpu *cpu, HvRam *ram, uint64_t pg) {
 void hv_tlb_protect_code(HvCpu *cpu, const uint8_t *host_page) {
     for (int t = 0; t < 3; t++)
         for (uint32_t i = 0; i < HV_TLB_SIZE; i++) {
-            HvTlbEntry *e = &cpu->tlb[i][t];
+            HvTlbEntry *e = hv_tlb_ent(cpu, i, t);
             if (e->write_tag != HV_TLB_INVALID && (const uint8_t *)(uintptr_t)(e->write_tag + HV_TLB_ADJ + e->addend) == host_page)
                 e->write_tag = HV_TLB_INVALID;
         }
@@ -397,8 +399,9 @@ static int ijc_drop_va(HvCpu *cpu, uint64_t va, int asid, int remote) {
            xnu remaps data all the time and its code hardly ever. For a process only if it is the
            one running: a switch forgets the returns of the others anyway. */
         uint64_t page = va & ~((1ull << HV_TLB_PAGE_BITS) - 1);
-        const HvTlbEntry *t = cpu->tlb[(va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1)];
-        int some = kernel ? t[1].exec_tag == hv_exec_key(page, t[1].addend) || t[2].exec_tag == hv_exec_key(page, t[2].addend) : asid < 0 || asid == current_asid(cpu) || current_asid(cpu) < 0;
+        uint32_t sl = (uint32_t)(va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1);
+        const HvTlbEntry *t1 = hv_tlb_ent(cpu, sl, 1), *t2 = hv_tlb_ent(cpu, sl, 2);
+        int some = kernel ? t1->exec_tag == hv_exec_key(page, t1->addend) || t2->exec_tag == hv_exec_key(page, t2->addend) : asid < 0 || asid == current_asid(cpu) || current_asid(cpu) < 0;
         if (some) {
             if (!remote) ret_new(cpu, kernel);
             else if (!ret_new_remote(cpu, kernel)) return 0;
@@ -438,7 +441,7 @@ void hv_tlb_flush_va_asid(HvCpu *cpu, uint64_t va, int asid) {
     hv_ijc_drop_va(cpu, va, asid);
     if (!((va >> 55) & 1)) hv_tlb_stash_drop(cpu, asid);
     for (int el = 0; el < 3; el++) {
-        HvTlbEntry *e = &cpu->tlb[idx][el];
+        HvTlbEntry *e = hv_tlb_ent(cpu, idx, el);
         memset(e, 0x80, sizeof *e);
     }
 }
@@ -514,7 +517,7 @@ static void write_guard(HvCpu *cpu, HvRam *ram, uint64_t pg, uint32_t code, HvTl
         for (int k = 0; k < 3; k++) {
             uint64_t c = old >> (16 * k) & 0xffff;
             if (c == mine) have = 1;
-            else if (place < 0 && (!c || !maps_writable(&cpu->tlb[0][0] + (c - 1), host_page))) place = k;
+            else if (place < 0 && (!c || !maps_writable(&cpu->tlb[0] + (c - 1), host_page))) place = k;
         }
         if (!have) now = place >= 0 ? (old & ~(0xffffull << (16 * place))) | mine << (16 * place) : HV_WHINT_MANY;
         if (now != old) __atomic_store_n(hint, now, __ATOMIC_RELAXED);
@@ -533,9 +536,9 @@ static void tlb_fill(HvCpu *cpu, uint64_t va, int el, const HvWalk *w) {
     uint64_t page_va = va & ~PAGE_MASK;
     int table = hv_tlb_table(cpu, el);
     uint32_t slot = (uint32_t)(va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1);
-    HvTlbEntry *e = &cpu->tlb[slot][table];
+    HvTlbEntry *e = hv_tlb_ent(cpu, slot, table);
     if (!((page_va >> 55) & 1)) {
-        if (cpu->nuser_fills < HV_USER_FILLS) cpu->user_fills[cpu->nuser_fills] = (uint16_t)(slot << 2 | table);
+        if (cpu->nuser_fills < HV_USER_FILLS) cpu->user_fills[cpu->nuser_fills] = (uint16_t)hv_tlb_code(slot, table);
         if (cpu->nuser_fills <= HV_USER_FILLS) cpu->nuser_fills++;
     }
     e->addend = (int64_t)((uint64_t)(uintptr_t)(ram->host + (page_pa - ram->pa)) - page_va);
@@ -547,7 +550,7 @@ static void tlb_fill(HvCpu *cpu, uint64_t va, int el, const HvWalk *w) {
         e->write_tag = HV_TLB_INVALID;
     if (cpu->m->watch_pa && (cpu->m->watch_pa & ~PAGE_MASK) == page_pa) e->write_tag = HV_TLB_INVALID;
     e->exec_tag = w->x ? hv_exec_key(page_va, e->addend) : HV_TLB_INVALID;
-    if (e->write_tag != HV_TLB_INVALID) write_guard(cpu, ram, pg, slot << 2 | table, e);
+    if (e->write_tag != HV_TLB_INVALID) write_guard(cpu, ram, pg, hv_tlb_code(slot, table), e);
 }
 
 /* Walks that may fill the TLB are bracketed by the CPU's walk_seq (odd while
@@ -582,7 +585,7 @@ int hv_tlbi_drop_remote_va(HvCpu *target, uint64_t va, int asid) {
     uint32_t idx = (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1);
     int fetched = 0; /* the target may be running code from the page: it must leave and look again */
     for (int t = 0; t < 3; t++) { /* the slot whatever its tag byte, as hv_tlb_flush_va_asid does */
-        HvTlbEntry *e = &target->tlb[idx][t];
+        HvTlbEntry *e = hv_tlb_ent(target, idx, t);
         uint64_t x = __atomic_load_n(&e->exec_tag, __ATOMIC_RELAXED);
         if (x != HV_TLB_INVALID && ((hv_exec_key(x, e->addend) ^ va) & 0x00ffffffffffc000ull) == 0) fetched = 1;
         __atomic_store_n(&e->read_tag, HV_TLB_INVALID, __ATOMIC_RELAXED);
@@ -610,7 +613,7 @@ const uint32_t *hv_mmu_fetch(HvCpu *cpu, uint64_t va, uint64_t *pa, uint32_t *av
         hv_raise_sync(cpu, HV_EC_PC_ALIGN, 0, va, va);
         return NULL;
     }
-    HvTlbEntry *t = &cpu->tlb[(va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1)][hv_tlb_table(cpu, cpu->el)];
+    HvTlbEntry *t = hv_tlb_ent(cpu, (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), hv_tlb_table(cpu, cpu->el));
     if (t->exec_tag == hv_exec_key(va & ~PAGE_MASK, t->addend)) {
         uint8_t *host = (uint8_t *)(uintptr_t)(va + t->addend);
         for (int i = 0; i < cpu->m->nram; i++) {
@@ -665,7 +668,7 @@ int hv_tlb_refill(HvCpu *cpu, uint64_t va, uint32_t flags) {
     if (!w.fsc) tlb_fill(cpu, va, el, &w);
     walk_end(cpu);
     if (w.fsc) return 1;
-    HvTlbEntry *e = &cpu->tlb[(va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1)][table];
+    HvTlbEntry *e = hv_tlb_ent(cpu, (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), table);
     uint64_t tag = write ? e->write_tag : e->read_tag;
     if (cpu->m->stats_interval) cpu->m->stats.refills++;
     return tag != HV_TLB_INVALID && tag + HV_TLB_ADJ == (va & ~(uint64_t)PAGE_MASK) ? 0 : 1;
@@ -725,7 +728,7 @@ void hv_ijc_fill(HvCpu *cpu, HvBlock *b) {
 /* Does this CPU's TLB (the table for flags) map b's page where b came from? */
 static int tlb_maps_block(HvCpu *cpu, const HvBlock *b) {
     int table = !(b->flags & HV_BLOCK_EL1) ? 0 : (b->flags & HV_BLOCK_PAN) ? 2 : 1;
-    const HvTlbEntry *e = &cpu->tlb[(b->va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1)][table];
+    const HvTlbEntry *e = hv_tlb_ent(cpu, (b->va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), table);
     uint64_t page_va = b->va & ~(uint64_t)PAGE_MASK, page_pa = b->pa & ~(uint64_t)PAGE_MASK;
     return __atomic_load_n(&e->exec_tag, __ATOMIC_RELAXED) == hv_exec_key(page_va, e->addend) &&
            (uint64_t)e->addend == (uint64_t)(uintptr_t)(b->ram->host + (page_pa - b->ram->pa)) - page_va;
@@ -761,7 +764,7 @@ static void *ijc_resolve(HvCpu *cpu, uint64_t va, uint32_t flags) {
     if (!m->chain || va == m->stop_pc || va == m->stop_pc2 || (int)((va >> 55) & 1) != kernel || (va & 3)) FAIL(0);
     if (pcs->ijc_keyed_count >= (1u << 17) || pcs->ucode_count + 1 >= (1u << HV_UCODE_BITS) / 2) FAIL(1);
     int table = !kernel ? 0 : (flags & HV_BLOCK_PAN) ? 2 : 1;
-    HvTlbEntry *e = &cpu->tlb[(va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1)][table];
+    HvTlbEntry *e = hv_tlb_ent(cpu, (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), table);
     if (e->exec_tag != hv_exec_key(va & ~(uint64_t)PAGE_MASK, e->addend)) {
         /* Not in the TLB (a process switch, or another page took the slot):
            walk for it here, as hv_tlb_refill does for data. A fault is for the
@@ -874,7 +877,7 @@ void hv_tlb_switch_user(HvCpu *cpu, uint64_t old, uint64_t now) {
     if (n <= HV_USER_FILLS) {
         for (uint32_t i = 0; i < n; i++) {
             uint16_t code = cpu->user_fills[i];
-            HvTlbEntry *e = &cpu->tlb[0][0] + code;
+            HvTlbEntry *e = &cpu->tlb[0] + code;
             if (!user_entry(e)) continue; /* the slot may hold a kernel page by now */
             if (s) {
                 s->slot[k] = code;
@@ -885,7 +888,7 @@ void hv_tlb_switch_user(HvCpu *cpu, uint64_t old, uint64_t now) {
     } else {
         for (uint32_t i = 0; i < HV_TLB_SIZE; i++)
             for (int t = 0; t < 3; t++)
-                if (user_entry(&cpu->tlb[i][t])) memset(&cpu->tlb[i][t], 0x80, sizeof cpu->tlb[i][t]);
+                if (user_entry(hv_tlb_ent(cpu, i, t))) memset(hv_tlb_ent(cpu, i, t), 0x80, sizeof(HvTlbEntry));
     }
     if (s) s->n = k;
 
@@ -896,7 +899,7 @@ void hv_tlb_switch_user(HvCpu *cpu, uint64_t old, uint64_t now) {
         __atomic_store_n(&r->ttbr0, 0, __ATOMIC_SEQ_CST); /* used up either way: the live TLB has them now */
         if (!fresh) break;
         for (uint32_t j = 0; j < r->n; j++) {
-            HvTlbEntry *e = &cpu->tlb[0][0] + r->slot[j];
+            HvTlbEntry *e = &cpu->tlb[0] + r->slot[j];
             *e = r->ent[j];
             cpu->user_fills[cpu->nuser_fills++] = r->slot[j];
             if (e->write_tag != HV_TLB_INVALID) {

@@ -16,6 +16,12 @@
 #include "translate.h"
 
 void hv_flush_blocks(HvMachine *m) {
+    /* Every other CPU is parked (stop_the_world): the one moment the TLB layout can change. */
+    if ((hv_knob[HV_K_TLBT] != 0) != hv_tlb_tmajor) {
+        hv_tlb_tmajor = hv_knob[HV_K_TLBT] != 0;
+        for (int i = 0; i < m->ncpus; i++)
+            if (m->cpus[i]) hv_tlb_flush(m->cpus[i]);
+    }
     m->stats.block_flushes++;
     __atomic_add_fetch(&m->jit_gen, 1, __ATOMIC_SEQ_CST);
     for (int i = 0; i < m->ncpus; i++)
@@ -216,7 +222,7 @@ static uint32_t wfe(HvCpu *cpu) {
     if (spin < 0) spin = getenv("HV_WFE_SPIN") != NULL;
     uint64_t va = cpu->excl_addr;
     uint32_t size = cpu->excl_size;
-    const HvTlbEntry *e = &cpu->tlb[(va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1)][hv_tlb_table(cpu, cpu->el)];
+    const HvTlbEntry *e = hv_tlb_ent(cpu, (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), hv_tlb_table(cpu, cpu->el));
     uint64_t page = va & ~((1ull << HV_TLB_PAGE_BITS) - 1);
     if (spin || va == ~0ull || (size != 1 && size != 2 && size != 4 && size != 8) || (va & (size - 1)) ||
         e->read_tag == HV_TLB_INVALID || e->read_tag + HV_TLB_ADJ != page) {

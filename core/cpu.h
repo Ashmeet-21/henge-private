@@ -93,7 +93,7 @@ typedef struct HvCpu {
     /* 0x580: [0] EL0 and unprivileged accesses, [1] EL1, [2] EL1 with PSTATE.PAN set,
        so toggling PAN (the kernel does it around every user copy) flushes nothing.
        [slot][EL0, EL1, EL1 with PAN, unused]: a slot's three in one 128-byte cache line. */
-    HvTlbEntry tlb[HV_TLB_SIZE][4] __attribute__((aligned(128)));
+    HvTlbEntry tlb[HV_TLB_SIZE * 4] __attribute__((aligned(128))); /* four tables; where an entry is: hv_tlb_code */
     /* Each flags value's return table: {tag, host address} of the code after a call, by the
        return address's low bits (see put_call). At a multiple of 4 KB from the HvCpu, as the
        translated code adds it with one ADD. */
@@ -269,5 +269,15 @@ enum {
 static inline int hv_tlb_table(const HvCpu *cpu, int el) {
     return el == 0 ? 0 : (cpu->pstate_extra & HV_PSTATE_PAN) ? 2 : 1;
 }
+
+/* Where slot `slot` of TLB table `table` is in cpu->tlb. The old layout keeps a slot's four tables side by side, so a
+   lookup's 128-byte cache line holds one useful entry; table-major (HV_TLBT) keeps each table's entries together, so
+   the line holds those of four neighbouring pages. Changed only during a stop-the-world flush, which empties every TLB
+   (dispatch.c), and translated code is emitted for the layout in force (put_tlb_slot). */
+extern int hv_tlb_tmajor;
+static inline uint32_t hv_tlb_code(uint32_t slot, int table) {
+    return hv_tlb_tmajor ? (uint32_t)table << HV_TLB_BITS | slot : slot << 2 | (uint32_t)table;
+}
+static inline HvTlbEntry *hv_tlb_ent(HvCpu *cpu, uint32_t slot, int table) { return &cpu->tlb[hv_tlb_code(slot, table)]; }
 
 #endif
