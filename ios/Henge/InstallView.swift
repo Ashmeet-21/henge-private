@@ -68,17 +68,23 @@ struct InstallView: View {
                 .padding(.horizontal, 17)
                 .padding(.vertical, 14)
             Rectangle().fill(Desk.hairline).frame(height: 0.5)
-            HStack {
-                Text("Memory").font(.system(size: 16))
-                Spacer()
-                Picker("Memory", selection: $ramGB) {
-                    ForEach([4, 6, 8], id: \.self) { Text("\($0) GB").tag($0) }
+            Stepper(value: $ramGB, in: Device.memoryChoices) {
+                HStack {
+                    Text("Memory").font(.system(size: 16))
+                    Spacer()
+                    Text("\(ramGB) GB").font(.system(size: 16, weight: .semibold))
                 }
-                .pickerStyle(.segmented)
-                .frame(width: 190)
             }
             .padding(.horizontal, 17)
             .padding(.vertical, 10)
+            if let note = Device.memoryNote(ramGB) {
+                Text(note)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Desk.dim)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 17)
+                    .padding(.bottom, 10)
+            }
             Rectangle().fill(Desk.hairline).frame(height: 0.5)
             Toggle("Delete the download after", isOn: $deleteAfter)
                 .font(.system(size: 16))

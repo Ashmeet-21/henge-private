@@ -41,6 +41,16 @@ enum Device {
         return mb >= 14_000 ? 8 : mb >= 10_000 ? 6 : 4
     }
 
+    /// The choices for a Mac's memory, in GB.
+    static let memoryChoices = 1...16
+
+    /// What a choice risks on this device, if anything. An install always gets at least 2 GB (Installer.install).
+    static func memoryNote(_ gb: Int) -> String? {
+        if gb < 4 { return "macOS has little room under 4 GB, so it can be very slow." }
+        if gb > suggestedRAMGB { return "More than \(suggestedRAMGB) GB is a lot for this \(name): iOS may close Henge when macOS gets busy." }
+        return nil
+    }
+
     /// The virtual CPU offers Armv8.5 instructions (core/sysreg.c), and macOS uses them. They run as
     /// they are, so the chip needs them too: A14, M1 and later, which is iPhone13,x and iPad13,x up.
     static let chipTooOld: Bool = {
