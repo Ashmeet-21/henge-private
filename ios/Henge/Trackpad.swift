@@ -9,6 +9,15 @@ struct Trackpad: UIViewRepresentable {
     /// Three fingers tapped together: the session shows its hidden controls.
     static let threeFingerTap = Notification.Name("henge.trackpad.threeFingerTap")
 
+    /// Settings' "Scroll speed" for two fingers: it scales the wheel units, and macOS moves a page by about their
+    /// square, so 0.2 scrolls about a twenty-fifth as far as 1 (what Henge did before: too fast even at macOS's
+    /// slowest Scrolling Speed).
+    static let scrollSpeedKey = "henge.trackpad.scrollSpeed"
+    static let defaultScrollSpeed = 0.2
+    static var scrollSpeed: CGFloat {
+        CGFloat(UserDefaults.standard.object(forKey: scrollSpeedKey) as? Double ?? defaultScrollSpeed)
+    }
+
     func makeUIView(context: Context) -> Surface { Surface() }
     func updateUIView(_ view: Surface, context: Context) {}
 
@@ -25,6 +34,7 @@ struct Trackpad: UIViewRepresentable {
         private var holdTimer: Timer?
         private var scrollX: CGFloat = 0
         private var scrollY: CGFloat = 0
+        private var lastScroll: CFTimeInterval = 0
         private let buzz = UIImpactFeedbackGenerator(style: .medium)
 
         override init(frame: CGRect) {
@@ -129,8 +139,13 @@ struct Trackpad: UIViewRepresentable {
             scrollY += dy
             // Mostly one way is that way only: a page shouldn't drift sideways, or a browser go back.
             if abs(scrollY) > 2 * abs(scrollX) { scrollX = 0 } else if abs(scrollX) > 2 * abs(scrollY) { scrollY = 0 }
+            // At most 60 wheel events a second, the rest gathered into the next: macOS speeds a wheel up more the
+            // faster its events come, and touches arrive at 120 Hz. The distance per point stays the same.
+            let now = CACurrentMediaTime()
+            guard now - lastScroll >= 1.0 / 60 else { return }
             let unitsX = wheelUnits(scrollX), unitsY = wheelUnits(scrollY)
             guard unitsX != 0 || unitsY != 0 else { return }
+            lastScroll = now
             if unitsX != 0 { scrollX = 0 }
             if unitsY != 0 { scrollY = 0 }
             henge_vm_mouse_scroll(-unitsX, unitsY)
@@ -138,7 +153,7 @@ struct Trackpad: UIViewRepresentable {
 
         private func wheelUnits(_ points: CGFloat) -> Int32 {
             guard abs(points) >= 0.25 else { return 0 } // less than this is a finger resting
-            let units = (6 * abs(points).squareRoot()).rounded()
+            let units = (6 * Trackpad.scrollSpeed * abs(points).squareRoot()).rounded()
             return Int32(points < 0 ? -units : units)
         }
     }

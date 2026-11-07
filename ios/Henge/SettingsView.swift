@@ -5,6 +5,7 @@ struct SettingsView: View {
     @AppStorage(JITCoordinator.autoEnableKey) private var jitAtLaunch = false
     @AppStorage(HardwareMouse.speedKey) private var mouseSpeed = 1.0
     @AppStorage(HardwareMouse.reverseKey) private var reverseScrolling = false
+    @AppStorage(Trackpad.scrollSpeedKey) private var trackpadScroll = Trackpad.defaultScrollSpeed
     @AppStorage(Device.smallCodeRegionKey) private var smallCodeRegion = Device.hasLittleMemory
     @AppStorage(Device.ramOnStorageKey) private var ramOnStorage = Device.hasLittleMemory
     @AppStorage(EngineTuning.fastFlushKey) private var fastFlush = true
@@ -51,6 +52,15 @@ struct SettingsView: View {
                     Text(Entitlements.increasedMemory
                          ? "A Mac's memory is kept out of this limit once JIT is on. If iOS refuses that, it uses free storage instead."
                          : "This install isn't signed with the increased memory limit entitlement. Reinstall Henge with a certificate that has it. Export your Mac first if the reinstall replaces the app's data.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                .listRowBackground(Desk.card)
+                Section("On-screen trackpad") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Scroll speed")
+                        Slider(value: $trackpadScroll, in: 0.05...1)
+                    }
+                    Text("How far two fingers scroll the Mac. Applies straight away.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 .listRowBackground(Desk.card)
