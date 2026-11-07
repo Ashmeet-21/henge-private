@@ -136,9 +136,10 @@ enum PointerLock {
     }
 
     /// iPadOS only locks the pointer to an app that fills the screen: in a window (Stage Manager, or iPadOS 26's windows)
-    /// the request is ignored and the system pointer stays separate from the Mac's (#18).
+    /// the request is ignored and the system pointer stays separate from the Mac's (#18). An iPhone never locks it, and
+    /// its apps are always full screen, so the hint is for iPad only.
     static var refused: Bool {
-        guard wanted, GCMouse.current != nil else { return false }
+        guard Device.isPad, wanted, GCMouse.current != nil else { return false }
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.filter { $0.activationState == .foregroundActive }
         return !scenes.isEmpty && !scenes.contains { $0.pointerLockState?.isLocked == true }
     }
