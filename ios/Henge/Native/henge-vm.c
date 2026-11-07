@@ -167,6 +167,19 @@ int henge_vm_boot_display(const uint8_t **pixels, int *width, int *height, int *
 
 size_t henge_available_memory(void) { return os_proc_available_memory(); }
 
+/* The most address space this app can reserve in one piece, in GB (measuring, for a fastmem window): PROT_NONE
+   reservations cost no memory, and each is given back at once. */
+uint64_t henge_largest_reservation_gb(void) {
+    for (uint64_t gb = 4096; gb >= 4; gb /= 2) {
+        void *p = mmap(NULL, gb << 30, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (p != MAP_FAILED) {
+            munmap(p, gb << 30);
+            return gb;
+        }
+    }
+    return 0;
+}
+
 uint64_t henge_largest_mapping_mb(void) {
     for (uint64_t mb = 16896; mb >= 1024; mb -= 512) { /* 16 GB, the most a Mac can ask for, plus what the caller keeps back */
         void *p = mmap(NULL, mb << 20, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
