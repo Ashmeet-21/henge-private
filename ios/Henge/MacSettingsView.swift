@@ -51,14 +51,14 @@ struct MacSettingsView: View {
                 .padding(.vertical, 10)
                 .deskCard()
 
-                if Device.isPad {
+                if Device.fittingScreen.height != 1080 {
                     DeskHeading("Screen")
                     VStack(alignment: .leading, spacing: 12) {
                         Picker("Screen", selection: Binding(get: { mac.screen.height == 1080 }, set: { wide in
                             (mac.screenWidth, mac.screenHeight) = wide ? (1920, 1080) : Device.fittingScreen
                             save()
                         })) {
-                            Text("Fit this iPad").tag(false)
+                            Text("Fit this \(Device.name)").tag(false)
                             Text("16:9").tag(true)
                         }
                         .pickerStyle(.segmented)

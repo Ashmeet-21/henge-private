@@ -158,7 +158,9 @@ struct SessionView: View {
                 // Room to keep the controls off the Mac's menu bar, and the Mac above the on-screen keyboard.
                 let bar: CGFloat = 62
                 let room = typing ? full.height - insets.bottom - insets.top - bar - 8 : full.height
-                let height = max(min(room, (full.width - 2 * max(insets.leading, insets.trailing)) / aspect), 200)
+                // An iPad keeps clear of its side insets; a big iPhone (iPhone Duo) fills edge to edge.
+                let side = Device.isPad ? 2 * max(insets.leading, insets.trailing) : 0
+                let height = max(min(room, (full.width - side) / aspect), 200)
                 let width = height * aspect
                 let y = typing ? insets.top + bar : (full.height - height) / 2
                 screen = CGRect(x: (full.width - width) / 2, y: y, width: width, height: height)
@@ -168,7 +170,9 @@ struct SessionView: View {
                 pad = .zero
                 if y - insets.top >= 54 { barY = insets.top + (y - insets.top) / 2 }
             } else if landscape {
-                let height = min(full.height, (full.width - 2 * max(insets.leading, insets.trailing)) / aspect)
+                // Edge to edge. Phones wider than the Mac fill the height with room to spare beside the
+                // Dynamic Island; a squarer phone (iPhone Duo) fills all of it, island and corners included.
+                let height = min(full.height, full.width / aspect)
                 let width = height * aspect
                 screen = CGRect(x: (full.width - width) / 2, y: (full.height - height) / 2, width: width, height: height)
                 touch = CGRect(origin: .zero, size: full)
