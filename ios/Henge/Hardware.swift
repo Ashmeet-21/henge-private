@@ -44,7 +44,10 @@ enum Device {
         UserDefaults.standard.object(forKey: key) as? Bool ?? hasLittleMemory
     }
     /// Half the code region: the translator flushes more often, which is slower but holds 512 MB less.
-    static var smallCodeRegion: Bool { setting(smallCodeRegionKey) }
+    /// Off by default: a running 3 GB Mac filled 512 MB about once a minute on an iPhone 15 Plus (each time
+    /// every translation is thrown away and redone), and had over 2 GB to spare below Henge's limit.
+    /// Turn it on for an install of a 4 GB Mac, which is what ran out of memory before (#13).
+    static var smallCodeRegion: Bool { UserDefaults.standard.object(forKey: smallCodeRegionKey) as? Bool ?? false }
     /// During a restore only: the Mac's memory in a file iOS can write out, instead of memory only its compressor can squeeze.
     static var ramOnStorage: Bool { setting(ramOnStorageKey) }
 
