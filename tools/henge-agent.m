@@ -120,6 +120,16 @@ static void keepMounted(void) {
 
 int main(void) {
     @autoreleasepool {
+        // The optional Swift companion owns CoreHID, so old guests keep the original helper.
+        NSString *companion = [NSBundle.mainBundle.executablePath.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"henge-touch-agent"];
+        if (@available(macOS 15.0, *)) {
+            if ([NSFileManager.defaultManager isExecutableFileAtPath:companion]) {
+                NSTask *touch = [NSTask new];
+                touch.executableURL = [NSURL fileURLWithPath:companion];
+                touch.arguments = @[[NSString stringWithFormat:@"%d", getpid()]];
+                [touch launchAndReturnError:NULL];
+            }
+        }
         lastChange = NSPasteboard.generalPasteboard.changeCount;
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ followDevice(); });
         keepMounted();

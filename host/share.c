@@ -5,10 +5,12 @@
    10.0.2.4:80 to a Unix socket in the app's own storage: no TCP port is open, so other apps can't reach this.
 
    /.henge/ is not part of the folder. It has the clipboard, where the helper inside macOS (tools/henge-agent.m)
-   waits for the device's clipboard and sends the guest's, and what it takes to install that helper.
+   waits for the device's clipboard and sends the guest's, what installs the helpers, and the
+   optional native-touch companion's input/status exchange.
 
    Locks are accepted but not enforced: macOS only writes to a server that offers them, and there is one client. */
 #include "share.h"
+#include "native_touch.h"
 
 #include <copyfile.h>
 #include <dirent.h>
@@ -588,6 +590,7 @@ static const char install_script[] =
     "launchctl bootout \"gui/$(id -u)/com.henge.agent\" 2>/dev/null\n"
     "curl -fsS http://" HV_SHARE_ADDR "/.henge/agent | gunzip > \"$D/henge-agent\" || { echo 'Could not reach Henge.'; exit 1; }\n"
     "chmod 755 \"$D/henge-agent\"\n"
+    "if curl -fsS http://" HV_SHARE_ADDR "/.henge/touch-agent | gunzip > \"$D/henge-touch-agent.new\"; then mv \"$D/henge-touch-agent.new\" \"$D/henge-touch-agent\"; chmod 755 \"$D/henge-touch-agent\"; else rm -f \"$D/henge-touch-agent.new\"; fi\n"
     "cat > \"$P\" <<EOF\n"
     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
     "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
@@ -602,9 +605,16 @@ static const char install_script[] =
     "launchctl bootstrap \"gui/$(id -u)\" \"$P\"\n"
     "echo 'Henge is set up. You can close this window.'\n";
 
-static int serve_agent(Conn *c, Request *r) {
+static int serve_agent(Conn *c, Request *r, int touch) {
     if (body_discard(c, r) != 0) return -1;
-    int fd = agent_path[0] ? open(agent_path, O_RDONLY) : -1;
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "%s", agent_path);
+    if (touch) {
+        char *slash = strrchr(path, '/');
+        if (!slash || (size_t)(slash-path)+32 >= sizeof path) return respond_empty(c, r, 404, "Not Found");
+        strcpy(slash+1, "henge-touch-agent.gz");
+    }
+    int fd = path[0] ? open(path, O_RDONLY) : -1;
     struct stat st;
     if (fd < 0 || fstat(fd, &st) != 0) {
         if (fd >= 0) close(fd);
@@ -662,7 +672,25 @@ static int serve_henge(Conn *c, Request *r) {
         if (body_discard(c, r) != 0) return -1;
         return respond(c, r, 200, "OK", "Content-Type: text/plain\r\n", install_script, sizeof install_script - 1);
     }
-    if (!strcmp(what, "agent") && !strcmp(r->method, "GET")) return serve_agent(c, r);
+    if (!strcmp(what, "agent") && !strcmp(r->method, "GET")) return serve_agent(c, r, 0);
+    if (!strcmp(what, "touch-agent") && !strcmp(r->method, "GET")) return serve_agent(c, r, 1);
+    if (!strcmp(what, "native-touch") && !strcmp(r->method, "GET")) {
+        if (body_discard(c, r) != 0) return -1;
+        char json[1024]; size_t n = hv_native_touch_next(json, sizeof json);
+        return respond(c, r, 200, "OK", "Content-Type: application/json\r\n", json, n);
+    }
+    if (!strcmp(what, "native-touch") && !strcmp(r->method, "PUT")) {
+        if (r->chunked || r->length < 0 || r->length > 64) { r->close = 1; return respond_empty(c, r, 400, "Bad Request"); }
+        size_t length; char *body = body_small(c, r, &length);
+        unsigned generation; int state; char extra;
+        if (!body) return -1;
+        int valid = sscanf(body, "%u %d %c", &generation, &state, &extra) == 2 &&
+                    state >= HV_TOUCH_READY && state <= HV_TOUCH_DEVICE;
+        free(body);
+        if (!valid) return respond_empty(c, r, 400, "Bad Request");
+        hv_native_touch_report(generation, state);
+        return respond_empty(c, r, 204, "No Content");
+    }
     if (!strcmp(what, "clipboard") && !strcmp(r->method, "GET")) return clipboard_get(c, r);
     if (!strcmp(what, "clipboard") && !strcmp(r->method, "PUT")) return clipboard_put(c, r);
     if (body_discard(c, r) != 0) return -1;

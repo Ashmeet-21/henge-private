@@ -51,15 +51,27 @@ $(B)/henge-agent: tools/henge-agent.m
 	env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET xcrun --sdk macosx clang -arch arm64 -mmacosx-version-min=12.0 -fobjc-arc -Wall -Wextra -O2 -framework AppKit $< -o $@
 	codesign -f -s - $@
 
+# Guest-side CoreHID companion for native touch.
+$(B)/henge-touch-agent: tools/henge-touch-agent.swift tools/native-touch/*.swift tools/native-touch.entitlements
+	@mkdir -p $(B)
+	env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET xcrun --sdk macosx swiftc -parse-as-library -target arm64-apple-macos15.0 -O tools/henge-touch-agent.swift tools/native-touch/*.swift -o $@
+	codesign -f -s - --entitlements tools/native-touch.entitlements $@
+
+$(B)/henge-touch-agent.gz: $(B)/henge-touch-agent
+	gzip -9 -n -c $< > $@
+
+$(B)/native_touch.o: host/native_touch.c host/native_touch.h | $(B)
+	$(CC) $(CFLAGS) -c $< -o $@
+
 # Compressed in the app: tools that sign an IPA would try to sign a bare Mach-O too.
 $(B)/henge-agent.gz: $(B)/henge-agent
 	gzip -9 -n -c $< > $@
 
-$(B)/share.o: host/share.c host/share.h
+$(B)/share.o: host/share.c host/share.h host/native_touch.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(B)/hengevm: host/main.c $(ENGINE) $(DEV) $(B)/pvg_mac.o $(B)/net_slirp.o $(B)/share.o $(B)/audio_mac.o $(B)/vm.o $(B)/usb_host.o $(B)/mac-restore/libhengerestore.a
-	$(CC) $(CFLAGS) host/main.c $(ENGINE) $(DEV) $(B)/pvg_mac.o $(B)/net_slirp.o $(B)/share.o $(B)/audio_mac.o $(B)/vm.o $(B)/usb_host.o $(B)/mac-restore/libhengerestore.a -lz -framework Foundation -framework CFNetwork -framework Security -framework SystemConfiguration -framework IOKit $(SLIRP_LIBS) -framework AudioToolbox -framework ParavirtualizedGraphics -framework Metal -framework IOSurface \
+$(B)/hengevm: host/main.c $(ENGINE) $(DEV) $(B)/pvg_mac.o $(B)/net_slirp.o $(B)/share.o $(B)/native_touch.o $(B)/audio_mac.o $(B)/vm.o $(B)/usb_host.o $(B)/mac-restore/libhengerestore.a
+	$(CC) $(CFLAGS) host/main.c $(ENGINE) $(DEV) $(B)/pvg_mac.o $(B)/net_slirp.o $(B)/share.o $(B)/native_touch.o $(B)/audio_mac.o $(B)/vm.o $(B)/usb_host.o $(B)/mac-restore/libhengerestore.a -lz -framework Foundation -framework CFNetwork -framework Security -framework SystemConfiguration -framework IOKit $(SLIRP_LIBS) -framework AudioToolbox -framework ParavirtualizedGraphics -framework Metal -framework IOSurface \
 	    -framework Foundation -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers -framework CoreFoundation \
 	    -framework AppKit -framework QuartzCore -o $@
 
@@ -112,7 +124,7 @@ IOS_CC = xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=17.0 -isy
 IOS_DEPS ?= $(HOME)/Documents/Coding/Husk/build/ios-arm64/sysroot
 IOS_CFLAGS = -std=c11 -Wall -Wextra -O2 -g -Icore -Ihost -Idevices -I$(IOS_DEPS)/include/slirp
 IB = build/ios
-IOS_SRC = $(wildcard core/*.c) host/prof_ios.c host/jit_region.c host/disk.c host/vm.c host/net_slirp.c host/share.c host/audio_mac.c host/hvsparse.c host/usb_host.c \
+IOS_SRC = $(wildcard core/*.c) host/prof_ios.c host/jit_region.c host/disk.c host/vm.c host/net_slirp.c host/share.c host/native_touch.c host/audio_mac.c host/hvsparse.c host/usb_host.c \
           $(filter-out devices/pvg_mac.m,$(wildcard devices/*.c))
 IOS_OBJ = $(patsubst %.c,$(IB)/%.o,$(IOS_SRC)) $(IB)/host/enter.o $(IB)/devices/pvg_metal.o
 
@@ -158,6 +170,17 @@ $(B)/install.o: host/install.c host/*.h devices/*.h | $(B)
 	$(CC) $(CFLAGS) $(RESTORE_CFLAGS) -c $< -o $@
 restore-objs: $(RESTORE_OBJ)
 .PHONY: restore-objs
+
+$(B)/test_native_touch: tests/test_native_touch.c host/native_touch.c host/native_touch.h host/share.c host/share.h | $(B)
+	$(CC) $(CFLAGS) tests/test_native_touch.c host/native_touch.c host/share.c -o $@
+
+$(B)/test_native_touch_session: tests/test_native_touch_session.swift ios/Henge/NativeTouchSession.swift $(B)/native_touch.o
+	xcrun --sdk macosx swiftc -parse-as-library -import-objc-header host/native_touch.h tests/test_native_touch_session.swift ios/Henge/NativeTouchSession.swift $(B)/native_touch.o -o $@
+
+test-native-touch: $(B)/test_native_touch $(B)/test_native_touch_session
+	./$(B)/test_native_touch
+	./$(B)/test_native_touch_session
+.PHONY: test-native-touch
 
 # Session-owned display routing, independent of JIT, Metal and a connected monitor.
 $(B)/test_display_targets: ios/Henge/DisplayTargetSelection.swift tests/test_display_targets.swift | $(B)
