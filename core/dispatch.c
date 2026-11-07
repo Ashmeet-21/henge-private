@@ -29,6 +29,11 @@ void hv_flush_blocks(HvMachine *m) {
     m->nblocks = 0;
     m->nslots = 0;
     m->nxchained = 0;
+    for (int i = 0; i < m->nram; i++) {
+        HvRam *r = &m->ram[i];
+        size_t pages = (r->size + (1u << HV_TLB_PAGE_BITS) - 1) >> HV_TLB_PAGE_BITS;
+        memset(r->chain_heads, 0, pages * sizeof *r->chain_heads);
+    }
     hv_jit_reset(&m->jit);
     /* HV_JIT_POISON: nothing old is left to run, so a stale pointer faults where it is used. */
     static int poison = -1;
@@ -669,6 +674,9 @@ static void print_stats(HvCpu *cpu, int force) {
         fprintf(stderr, "  new code pages %.0f/s; waits: tlbi acks %.0f/s %.1f%%, device lock %.0f/s %.1f%%, translation lock %.0f/s %.1f%% (of one CPU)\n",
                 RATE(code_protects), RATE(syncs), RATE(sync_ticks) / 240000.0, RATE(dev_waits), RATE(dev_wait_ticks) / 240000.0,
                 RATE(tr_waits), RATE(tr_wait_ticks) / 240000.0);
+        fprintf(stderr, "  SMC links: %u live, examined %.0f/s, unlinked %.0f/s; lock wait %.2f%% held %.2f%% (of one CPU)\n",
+                m->nxchained, RATE(smc_link_checks), RATE(smc_link_drops), RATE(smc_lock_ticks) / 240000.0,
+                RATE(smc_hold_ticks) / 240000.0);
         fprintf(stderr, "  light lookups failed/s: odd %.0f, filters full %.0f, no mapping %.0f, no block yet %.0f; walked %.0fK/s\n",
                 RATE(light_fail[0]), RATE(light_fail[1]), RATE(light_fail[2]), RATE(light_fail[3]), RATE(light_walks) / 1e3);
         fprintf(stderr, "  big user-range TLBIs/s: %.0f TLB only in the range, %.0f with no cached targets to drop\n",
@@ -766,7 +774,9 @@ static void chain(HvMachine *m, uint64_t *slot, HvBlock *b) {
             return;
         }
         m->slot_xpa[idx] = page_pa | 1;
-        m->xchained[m->nxchained++] = idx;
+        m->slot_xnext[idx] = b->ram->chain_heads[b->pg];
+        b->ram->chain_heads[b->pg] = idx + 1;
+        m->nxchained++;
         __atomic_store_n(slot, (uint64_t)(uintptr_t)b->code, __ATOMIC_RELEASE);
         uint32_t *site = m->slot_site[idx];
         int64_t off = site ? b->code - site : 0;

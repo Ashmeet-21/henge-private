@@ -71,8 +71,8 @@ static int init_rest(HvMachine *m) {
     m->slot_cond = calloc(m->max_slots, sizeof *m->slot_cond);
     m->slot_xa = calloc(m->max_slots, sizeof *m->slot_xa);
     m->slot_xpa = calloc(m->max_slots, sizeof *m->slot_xpa);
-    m->xchained = calloc(m->max_slots, sizeof *m->xchained);
-    if (!m->slots || !m->slot_site || !m->slot_stub || !m->slot_cond || !m->slot_xa || !m->slot_xpa || !m->xchained) return -1;
+    m->slot_xnext = calloc(m->max_slots, sizeof *m->slot_xnext);
+    if (!m->slots || !m->slot_site || !m->slot_stub || !m->slot_cond || !m->slot_xa || !m->slot_xpa || !m->slot_xnext) return -1;
     pthread_mutex_init(&m->big_mu, NULL);
     pthread_cond_init(&m->big_cv, NULL);
     pthread_mutexattr_t ra;
@@ -264,6 +264,7 @@ void hv_machine_free(HvMachine *m) {
     for (int i = 0; i < m->nram; i++) {
         free(m->ram[i].code_pages);
         free(m->ram[i].page_gen);
+        free(m->ram[i].chain_heads);
     }
     free(m->blocks);
     for (int i = 0; i < HV_MAX_CPUS; i++) {
@@ -276,7 +277,7 @@ void hv_machine_free(HvMachine *m) {
     free(m->slot_cond);
     free(m->slot_xa);
     free(m->slot_xpa);
-    free(m->xchained);
+    free(m->slot_xnext);
 }
 
 int hv_machine_add_ram(HvMachine *m, uint64_t pa, uint64_t size, void *host, int readonly) {
@@ -294,7 +295,8 @@ int hv_machine_add_ram(HvMachine *m, uint64_t pa, uint64_t size, void *host, int
     if (!m->main_ram || size > m->main_ram->size) m->main_ram = r;
     r->page_gen = calloc(pages, sizeof *r->page_gen);
     r->whint = calloc(pages * HV_MAX_CPUS, sizeof *r->whint);
-    return r->code_pages && r->page_gen && r->whint ? 0 : -1;
+    r->chain_heads = calloc(pages, sizeof *r->chain_heads);
+    return r->code_pages && r->page_gen && r->whint && r->chain_heads ? 0 : -1;
 }
 
 int hv_machine_add_mmio(HvMachine *m, uint64_t pa, uint64_t size, void *opaque,
@@ -338,14 +340,17 @@ void hv_invalidate_code(HvMachine *m, uint64_t pa) {
     /* Exits from other pages chained into the stale blocks go back to their stub
        (whose next chain finds the new translation). Under the translation lock,
        as chaining them is: one that saw the old generation is done by now. */
+    uint64_t wait_start = m->stats_interval ? mach_absolute_time() : 0;
     pthread_mutex_lock(&m->tr_mu);
-    uint64_t tpa = (r->pa + (pg << HV_TLB_PAGE_BITS)) | 1;
-    for (uint32_t k = 0; k < m->nxchained;) {
-        uint32_t idx = m->xchained[k];
-        if (m->slot_xpa[idx] != tpa) {
-            k++;
-            continue;
-        }
+    uint64_t hold_start = m->stats_interval ? mach_absolute_time() : 0;
+    if (m->stats_interval) m->stats.smc_lock_ticks += hold_start - wait_start;
+    uint32_t link = r->chain_heads[pg];
+    r->chain_heads[pg] = 0;
+    while (link) {
+        uint32_t idx = link - 1;
+        link = m->slot_xnext[idx];
+        m->slot_xnext[idx] = 0;
+        if (m->stats_interval) m->stats.smc_link_checks++;
         m->slot_xpa[idx] = 0;
         __atomic_store_n(&m->slots[idx], 0, __ATOMIC_RELEASE);
         uint32_t *site = m->slot_site[idx];
@@ -354,8 +359,10 @@ void hv_invalidate_code(HvMachine *m, uint64_t pa) {
             hv_jit_write(&m->jit, site, &insn, 4);
             hv_jit_finish(&m->jit, site, 1);
         }
-        m->xchained[k] = m->xchained[--m->nxchained];
+        m->nxchained--;
+        if (m->stats_interval) m->stats.smc_link_drops++;
     }
+    if (m->stats_interval) m->stats.smc_hold_ticks += mach_absolute_time() - hold_start;
     pthread_mutex_unlock(&m->tr_mu);
     /* The indirect-branch cache may lead into the stale blocks: start it over,
        here at once and on the other CPUs before they next leave a block (their

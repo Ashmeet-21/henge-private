@@ -21,6 +21,8 @@ typedef struct HvRam {
        were more. When the page becomes code only those are dropped, not a whole
        TLB scanned. */
     uint64_t *whint;
+    /* Incoming cross-page chains, slot index + 1 (0 is empty). Protected by tr_mu. */
+    uint32_t *chain_heads;
 } HvRam;
 
 typedef struct HvMmio {
@@ -103,6 +105,7 @@ typedef struct HvStats {
     uint64_t helper[12];      /* by HV_OP_* */
     uint64_t tlb_flushes, fetch_walks, exceptions, interrupts;
     uint64_t wfi, wfi_ticks;  /* WFI exits, host ticks spent asleep */
+    uint64_t smc_link_checks, smc_link_drops, smc_lock_ticks, smc_hold_ticks;
 } HvStats;
 
 #define HV_MAX_CPUS 8
@@ -229,9 +232,10 @@ typedef struct HvMachine {
     /* Exits to another page (see put_branch_exit): the host addend the target
        page's TLB entry must hold for the exit to go straight to the chained
        block (0: a same-page exit), and once chained, the target's physical page
-       (| 1) so that invalidating its code can unchain it. xchained lists them. */
+       (| 1) so that invalidating its code can unchain it. Each RAM page lists
+       only its incoming slots through chain_heads and slot_xnext. */
     uint64_t *slot_xa, *slot_xpa;
-    uint32_t *xchained, nxchained;
+    uint32_t *slot_xnext, nxchained;
     uint32_t nslots;
     HvCpu *cpu;              /* CPU 0: the one that polls devices */
     HvCpu *cpus[HV_MAX_CPUS]; /* every CPU, so device and invalidation code can ask them to leave */

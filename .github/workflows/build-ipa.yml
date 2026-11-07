@@ -49,3 +49,14 @@ jobs:
           path: ~/Desktop/Henge.ipa
           if-no-files-found: error
           retention-days: 30
+      # The engine's own tests, on this Mac runner: the same core/ code the IPA runs, checked on arm64.
+      - name: Engine tests
+        if: always()
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          for t in test_classify test_operands test_mmu test_code_links; do
+            echo "::group::$t"
+            make "build/$t" >/dev/null && "./build/$t" 2>&1 | tail -15 && echo "PASS $t" || echo "::error::FAIL $t"
+            echo "::endgroup::"
+          done
