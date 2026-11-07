@@ -552,17 +552,22 @@ static void write_guard(HvCpu *cpu, HvRam *ram, uint64_t pg, uint32_t code, HvTl
 
 /* HV_KVA_HIST (measuring, for a kernel fastmem window): which kernel VAs get TLB fills, per GB from the bottom of xnu's
    kernel VA space, and how many distinct 16 KB pages. hv_kva_hist_dump writes it out. */
-#define KVA_BASE 0xfffffe0000000000ull
-#define KVA_GBS 2048 /* 2 TB */
+#define KVA_GBS 2048 /* buckets: 2048 of 1 GB from 0xfffffe0000000000 by default; HV_KVA_BASE (hex) and HV_KVA_SHIFT move and widen them */
+static uint64_t KVA_BASE = 0xfffffe0000000000ull;
+static int kva_shift = 30;
 static uint64_t kva_fills[KVA_GBS], kva_pages_n[KVA_GBS], kva_below, kva_above;
 static uint8_t *kva_seen; /* one bit per page */
 static int kva_on = -1;
 static void kva_note(uint64_t va) {
-    if (kva_on < 0) kva_on = getenv("HV_KVA_HIST") != NULL;
+    if (kva_on < 0) {
+        kva_on = getenv("HV_KVA_HIST") != NULL;
+        if (getenv("HV_KVA_BASE")) KVA_BASE = strtoull(getenv("HV_KVA_BASE"), NULL, 16);
+        if (getenv("HV_KVA_SHIFT")) kva_shift = atoi(getenv("HV_KVA_SHIFT"));
+    }
     if (!kva_on) return;
-    if (!kva_seen) kva_seen = calloc((size_t)KVA_GBS << (30 - HV_TLB_PAGE_BITS - 3), 1);
+    if (!kva_seen) kva_seen = calloc((size_t)KVA_GBS << (kva_shift - HV_TLB_PAGE_BITS - 3), 1);
     if (va < KVA_BASE) { __atomic_add_fetch(&kva_below, 1, __ATOMIC_RELAXED); return; }
-    uint64_t off = va - KVA_BASE, gb = off >> 30;
+    uint64_t off = va - KVA_BASE, gb = off >> kva_shift;
     if (gb >= KVA_GBS) { __atomic_add_fetch(&kva_above, 1, __ATOMIC_RELAXED); return; }
     __atomic_add_fetch(&kva_fills[gb], 1, __ATOMIC_RELAXED);
     uint64_t pg = off >> HV_TLB_PAGE_BITS;
@@ -572,7 +577,7 @@ static void kva_note(uint64_t va) {
 
 void hv_kva_hist_dump(FILE *f) {
     if (kva_on <= 0) return;
-    fprintf(f, "kva below %llu above %llu (fills outside the 2 TB from %llx)\n", (unsigned long long)kva_below, (unsigned long long)kva_above, (unsigned long long)KVA_BASE);
+    fprintf(f, "kva below %llu above %llu (outside %d buckets of 2^%d bytes from %llx)\n", (unsigned long long)kva_below, (unsigned long long)kva_above, KVA_GBS, kva_shift, (unsigned long long)KVA_BASE);
     for (int g = 0; g < KVA_GBS; g++)
         if (kva_fills[g]) fprintf(f, "kva gb %d fills %llu pages %llu\n", g, (unsigned long long)kva_fills[g], (unsigned long long)kva_pages_n[g]);
 }
