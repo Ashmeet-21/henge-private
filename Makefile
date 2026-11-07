@@ -85,6 +85,8 @@ $(B)/test_mmu: tests/test_mmu.c $(ENGINE)
 	$(CC) $(CFLAGS) tests/test_mmu.c $(ENGINE) -o $@
 $(B)/test_code_links: tests/test_code_links.c $(ENGINE)
 	$(CC) $(CFLAGS) tests/test_code_links.c $(ENGINE) -o $@
+$(B)/test_pvg_decode: tests/test_pvg_decode.c devices/pvg_decode.h | $(B)
+	$(CC) $(CFLAGS) tests/test_pvg_decode.c -o $@
 
 $(B)/hvsparse: tools/hvsparse_main.c host/hvsparse.c host/hvsparse.h | $(B)
 	$(CC) $(CFLAGS) tools/hvsparse_main.c host/hvsparse.c -o $@

@@ -40,6 +40,7 @@ static int cursor_scale(void) {
 #include <string.h>
 
 #include "pvg_lite.h"
+#include "pvg_decode.h"
 
 #if !TARGET_OS_IPHONE
 #import <CoreGraphics/CoreGraphics.h>
@@ -130,6 +131,11 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     BOOL tess_factors; /* so is a tessellation factor buffer */
     uint32_t pre_raster_samples, pre_imageblock, pre_threadgroup, pre_tile_w, pre_tile_h; /* for the next pass */
     BOOL tracing; /* HV_PVG_TRACE_FILE exists: say what each exec draws */
+    BOOL diagnostics; /* HV_PVG_DIAGNOSTICS: metadata only, bounded for the session */
+    uint32_t diag_details, diag_warnings, diag_summaries;
+    uint64_t diag_records, diag_invalid, diag_missing, diag_unsupported, diag_suppressed;
+    uint64_t diag_tags[512];
+    double diag_last_summary;
     /* The newest frame, BGRA, for hv_pvg_metal_frame, and the same without the pointer on it. */
     uint8_t *frame, *base;
     uint32_t frame_w, frame_h;
@@ -169,6 +175,7 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     dispatch_source_t shot_timer;
 }
 - (void)complain:(NSString *)what;
+- (void)gpuDiagnostic:(NSString *)message warning:(BOOL)warning;
 - (HvObject *)object:(uint32_t)ref task:(uint32_t)task;
 - (void)drawCursor;
 - (BOOL)hasDisplayLayer;
@@ -251,6 +258,7 @@ static void refresh_pages(HvReplay *r, uint32_t task, HvObject *o) {
     o->guest_copy = nil;
     if (o->plain_buffer) o->object = buffer_over_mapping(r, o);
     r->remaps++;
+    if (r->diagnostics && r->diag_warnings < 128) [r gpuDiagnostic:[NSString stringWithFormat:@"buffer remap task=%u generation=%u bytes=%llu exported GPU addresses may need renewal", task, o->generation, (unsigned long long)o->length] warning:YES];
 }
 
 static void set_framebuffer_only(MTLTextureDescriptor *t, BOOL on) {
@@ -339,6 +347,36 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
 
 @implementation HvReplay
 
+/* Budgets are separate: startup draw traffic cannot consume warning capacity.
+   No guest memory, shader code, buffer contents or host pointers are logged. */
+- (void)gpuDiagnostic:(NSString *)message warning:(BOOL)warning {
+    if (!diagnostics) return;
+    uint32_t *used = warning ? &diag_warnings : &diag_details;
+    uint32_t limit = warning ? 128 : 384;
+    if (*used >= limit) { diag_suppressed++; return; }
+    (*used)++;
+    fprintf(stderr, "pvgdiag: %s%s\n", warning ? "warning: " : "", message.UTF8String);
+}
+
+- (void)gpuSummary {
+    if (!diagnostics || diag_summaries >= 32) return;
+    double now = now_seconds();
+    if (diag_last_summary && now - diag_last_summary < 10) return;
+    diag_last_summary = now;
+    diag_summaries++;
+    NSMutableString *tags = [NSMutableString new];
+    unsigned shown = 0;
+    for (unsigned i = 0; i < 512 && shown < 32; i++) {
+        if (!diag_tags[i]) continue;
+        [tags appendFormat:@" %u:%llu", i, (unsigned long long)diag_tags[i]];
+        shown++;
+    }
+    fprintf(stderr, "pvgdiag: summary execs=%llu records=%llu draws=%llu invalid=%llu missing=%llu unsupported=%llu remaps=%llu gpu-failures=%llu suppressed=%llu tags%s\n",
+            (unsigned long long)execs, (unsigned long long)diag_records, (unsigned long long)draws,
+            (unsigned long long)diag_invalid, (unsigned long long)diag_missing, (unsigned long long)diag_unsupported,
+            (unsigned long long)remaps, (unsigned long long)failed, (unsigned long long)diag_suppressed, tags.UTF8String);
+}
+
 - (void)complain:(NSString *)what {
     if ([complaints containsObject:what]) return;
     [complaints addObject:what];
@@ -357,14 +395,25 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
         [self complain:[NSString stringWithFormat:@"library: %@", err.localizedDescription]];
         return nil;
     }
+    if (diagnostics && diag_details < 384) [self gpuDiagnostic:[NSString stringWithFormat:@"shader library functions=%lu (existing first-function selection)", (unsigned long)library.functionNames.count] warning:NO];
     return [library newFunctionWithName:library.functionNames.firstObject];
 }
 
 - (id)makeSerialized:(uint64_t)at length:(uint32_t)size task:(uint32_t)task {
     NSMutableData *all = [NSMutableData dataWithLength:size];
     if (hv_pvg_lite_task_read(lite, task, at, all.mutableBytes, size)) return nil;
+    if (size < 4) { if (diagnostics) { diag_invalid++; if (diag_warnings < 128) [self gpuDiagnostic:@"truncated serialized object header" warning:YES]; } return nil; }
     const uint32_t *w = all.bytes;
     uint32_t tag = w[0];
+    if ((tag == 0xe || tag == 0x33 || tag == 0xb) &&
+        (size < 16 || !hv_pvg_buffer_span_valid(size, 16, w[3], 1))) {
+        if (diagnostics) { diag_invalid++; if (diag_warnings < 128) [self gpuDiagnostic:@"serialized pipeline length exceeds object" warning:YES]; }
+        return nil;
+    }
+    if ((tag == 3 && size < 28) || (tag == 4 && size < 16)) {
+        if (diagnostics) { diag_invalid++; if (diag_warnings < 128) [self gpuDiagnostic:@"truncated sampler/depth descriptor" warning:YES]; }
+        return nil;
+    }
     if (tag == 0xe || tag == 0x33) { /* render or tile pipeline: {tag, size, ref, length, data} */
         id<HvMetalSPI> spi = (id)device;
         HvContext *ctx = [HvContext new];
@@ -380,6 +429,17 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
         id state = tag == 0xe ? [device newRenderPipelineStateWithDescriptor:descriptor error:&err]
                               : [device newRenderPipelineStateWithTileDescriptor:descriptor options:MTLPipelineOptionNone reflection:nil error:&err];
         if (!state) [self complain:[NSString stringWithFormat:@"pipeline %u: %@", tag, err.localizedDescription]];
+        if (state && tag == 0xe && diagnostics && diag_details < 384) {
+            MTLRenderPipelineDescriptor *rp = descriptor;
+            [self gpuDiagnostic:[NSString stringWithFormat:@"pipeline render formats=%lu depth=%lu stencil=%lu samples=%lu", (unsigned long)rp.colorAttachments[0].pixelFormat, (unsigned long)rp.depthAttachmentPixelFormat, (unsigned long)rp.stencilAttachmentPixelFormat, (unsigned long)rp.rasterSampleCount] warning:NO];
+            for (NSUInteger i = 0; i < 31 && diag_details < 384; i++) {
+                MTLVertexAttributeDescriptor *a = rp.vertexDescriptor.attributes[i];
+                if (a.format == MTLVertexFormatInvalid) continue;
+                if (a.bufferIndex >= 31) { if (diag_warnings < 128) [self gpuDiagnostic:@"pipeline vertex attribute has invalid buffer index" warning:YES]; continue; }
+                MTLVertexBufferLayoutDescriptor *l = rp.vertexDescriptor.layouts[a.bufferIndex];
+                [self gpuDiagnostic:[NSString stringWithFormat:@"vertex layout attribute=%lu format=%lu buffer=%lu offset=%lu stride=%lu step=%lu rate=%lu", (unsigned long)i, (unsigned long)a.format, (unsigned long)a.bufferIndex, (unsigned long)a.offset, (unsigned long)l.stride, (unsigned long)l.stepFunction, (unsigned long)l.stepRate] warning:NO];
+            }
+        }
         if (state && tag == 0xe && getenv("HV_PVG_TRACE_FILE")) {
             MTLRenderPipelineDescriptor *rp = descriptor;
             objc_setAssociatedObject(state, "hvname", [NSString stringWithFormat:@"%@ / %@ -> fmt %lu blend %d", rp.vertexFunction.name, rp.fragmentFunction.name, (unsigned long)rp.colorAttachments[0].pixelFormat, (int)rp.colorAttachments[0].blendingEnabled], OBJC_ASSOCIATION_RETAIN);
@@ -433,6 +493,10 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
         d.depthWriteEnabled = (f >> 3) & 1;
         for (int side = 0; side < 2; side++) {
             if (!((f >> (4 + side)) & 1)) continue;
+            if (size < 16 + (uint32_t)(side + 1) * 12) {
+                if (diagnostics) { diag_invalid++; if (diag_warnings < 128) [self gpuDiagnostic:@"truncated stencil descriptor" warning:YES]; }
+                return nil;
+            }
             const uint32_t *t = w + 4 + side * 3;
             MTLStencilDescriptor *sd = [MTLStencilDescriptor new];
             sd.stencilCompareFunction = (MTLCompareFunction)(t[0] & 7);
@@ -484,6 +548,7 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
     o->parent = parent;
     o->object = [heap newBufferWithLength:(NSUInteger)h.length options:MTLResourceStorageModePrivate offset:(NSUInteger)h.offset];
     if (!o->object) {
+        if (diagnostics && diag_warnings < 128) [self gpuDiagnostic:[NSString stringWithFormat:@"placement buffer fallback heap=%u offset=%llu bytes=%llu; independent fallback does not alias heap contents", h.heap, (unsigned long long)h.offset, (unsigned long long)h.length] warning:YES];
         [self complain:[NSString stringWithFormat:@"heap buffer: %llu bytes at %llu of ref %u failed", h.length, h.offset, h.heap]];
         o->object = [device newBufferWithLength:(NSUInteger)h.length options:MTLResourceStorageModePrivate];
     }
@@ -899,7 +964,52 @@ typedef struct {
 #define U16(off) (*(const uint16_t *)(r.p + (off)))
 #define U64(off) ({ uint64_t _v; memcpy(&_v, r.p + (off), 8); _v; })
 
+/* Reject only provably invalid spans. Indirect argument values are GPU-owned;
+   validate their storage, never read them on the CPU before queued work finishes. */
+- (id<MTLBuffer>)drawBuffer:(uint32_t)ref task:(uint32_t)task offset:(uint64_t)offset count:(uint64_t)count stride:(uint64_t)stride {
+    id b = [self get:ref task:task];
+    if (!b || ![b conformsToProtocol:@protocol(MTLBuffer)]) {
+        if (diagnostics) { diag_missing++; if (diag_warnings < 128) [self gpuDiagnostic:[NSString stringWithFormat:@"invalid draw buffer task=%u ref=%u", task, ref] warning:YES]; }
+        return nil;
+    }
+    if (!hv_pvg_buffer_span_valid([(id<MTLBuffer>)b length], offset, count, stride) || (offset % stride)) {
+        if (diagnostics) { diag_invalid++; if (diag_warnings < 128) [self gpuDiagnostic:[NSString stringWithFormat:@"draw buffer bounds task=%u ref=%u length=%lu offset=%llu count=%llu element=%llu", task, ref, (unsigned long)[(id<MTLBuffer>)b length], (unsigned long long)offset, (unsigned long long)count, (unsigned long long)stride] warning:YES]; }
+        return nil;
+    }
+    return b;
+}
+
+- (BOOL)bindingRecord:(Rec)r element:(uint32_t)element limit:(uint32_t)limit tag:(uint32_t)tag {
+    if (r.size >= 8 && hv_pvg_payload_array_valid(r.size, 8, element, U32(0), U32(4), limit)) return YES;
+    if (diagnostics) { diag_invalid++; if (diag_warnings < 128) [self gpuDiagnostic:[NSString stringWithFormat:@"invalid binding tag=%u payload=%u element=%u limit=%u", tag, r.size, element, limit] warning:YES]; }
+    return NO;
+}
+
+- (void)diagnoseDraw:(uint32_t)tag rec:(Rec)r task:(uint32_t)task {
+    if (!diagnostics) return;
+    if (diag_details >= 384) { diag_suppressed++; return; }
+    uint64_t start = 0, count = 0, offset = 0, instances = 1, baseInstance = 0;
+    int64_t baseVertex = 0;
+    uint32_t ref = 0, primitive = 0, indexType = 0;
+    BOOL indexed = NO;
+    switch (tag) {
+    case 0: primitive = U32(0); start = U64(4); count = U64(12); break;
+    case 1: primitive = U32(0); start = U16(4); count = U16(6); break;
+    case 2: case 4: start = U64(0); count = U64(8); instances = U64(16); primitive = U16(tag == 4 ? 32 : 24); if (tag == 4) baseInstance = U64(24); break;
+    case 3: case 5: start = U16(0); count = U16(2); instances = U16(4); primitive = U16(tag == 5 ? 8 : 6); if (tag == 5) baseInstance = U16(6); break;
+    case 6: case 8: indexed = YES; primitive = U16(0); indexType = U16(2); ref = U32(4); count = U64(8); offset = U64(16); if (tag == 8) instances = U64(24); break;
+    case 7: case 9: indexed = YES; primitive = U16(0); indexType = U16(2); ref = U32(4); count = U16(8); offset = U16(10); if (tag == 9) instances = U16(12); break;
+    case 10: case 28: indexed = YES; primitive = U16(0); indexType = U16(2); ref = U32(4); offset = U64(8); count = U64(16); instances = U64(24); baseVertex = (int64_t)U64(32); baseInstance = U64(40); break;
+    case 11: case 29: indexed = YES; primitive = U16(0); indexType = U16(2); ref = U32(4); offset = U16(8); count = U16(10); instances = U16(12); baseVertex = tag == 29 ? (int16_t)U16(14) : U16(14); baseInstance = U16(16); break;
+    case 16: [self gpuDiagnostic:[NSString stringWithFormat:@"draw indirect tag=16 task=%u ref=%u primitive=%u argument-offset=%llu (GPU values not sampled)", task, U32(0), U16(4), (unsigned long long)U64(8)] warning:NO]; return;
+    case 17: [self gpuDiagnostic:[NSString stringWithFormat:@"draw indexed indirect tag=17 task=%u index-ref=%u index-type=%u index-offset=%llu argument-ref=%u argument-offset=%llu (GPU values not sampled)", task, U32(4), U16(2), (unsigned long long)U64(12), U32(8), (unsigned long long)U64(20)] warning:NO]; return;
+    default: [self gpuDiagnostic:[NSString stringWithFormat:@"draw patch/tile tag=%u payload=%u task=%u", tag, r.size, task] warning:NO]; return;
+    }
+    [self gpuDiagnostic:[NSString stringWithFormat:@"draw tag=%u task=%u primitive=%u indexed=%d ref=%u index-type=%u start=%llu count=%llu index-offset=%llu instances=%llu base-vertex=%lld base-instance=%llu", tag, task, primitive, indexed, ref, indexType, (unsigned long long)start, (unsigned long long)count, (unsigned long long)offset, (unsigned long long)instances, (long long)baseVertex, (unsigned long long)baseInstance] warning:NO];
+}
+
 - (id<MTLRenderCommandEncoder>)beginPass:(Rec)r task:(uint32_t)task commandBuffer:(id<MTLCommandBuffer>)cb {
+    if (r.size < 0x48) { if (diagnostics) { diag_invalid++; if (diag_warnings < 128) [self gpuDiagnostic:@"truncated render pass" warning:YES]; } return nil; }
     MTLRenderPassDescriptor *d = [MTLRenderPassDescriptor renderPassDescriptor];
 #define ATTACH(a, o)                                                 \
     do {                                                             \
@@ -953,15 +1063,17 @@ typedef struct {
     if (tracing) {
         id<MTLTexture> c0 = d.colorAttachments[0].texture;
         MTLClearColor cc = d.colorAttachments[0].clearColor;
-        HvObject *co = [self object:U32(0x4c) task:task];
-        fprintf(stderr, "trace: pass c0 ref %u %lux%lu fmt %lu load %lu store %lu clear %.2f %.2f %.2f %.2f surface %s heap %d\n", U32(0x4c), (unsigned long)c0.width, (unsigned long)c0.height, (unsigned long)c0.pixelFormat, (unsigned long)d.colorAttachments[0].loadAction, (unsigned long)d.colorAttachments[0].storeAction, cc.red, cc.green, cc.blue, cc.alpha, co && co->surface ? "yes" : "no", c0.heap != nil);
+        uint32_t color_ref = r.size >= 0x50 ? U32(0x4c) : 0;
+        HvObject *co = [self object:color_ref task:task];
+        fprintf(stderr, "trace: pass c0 ref %u %lux%lu fmt %lu load %lu store %lu clear %.2f %.2f %.2f %.2f surface %s heap %d\n", color_ref, (unsigned long)c0.width, (unsigned long)c0.height, (unsigned long)c0.pixelFormat, (unsigned long)d.colorAttachments[0].loadAction, (unsigned long)d.colorAttachments[0].storeAction, cc.red, cc.green, cc.blue, cc.alpha, co && co->surface ? "yes" : "no", c0.heap != nil);
     }
     id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:d];
     if (!e) {
         NSMutableString *m = [NSMutableString stringWithString:@"no render encoder:"];
         for (int i = 0; i < 8; i++) {
             MTLRenderPassColorAttachmentDescriptor *c = d.colorAttachments[i];
-            uint32_t ref = U32(0x4c + (uint32_t)i * 0x3c);
+            uint32_t off = 0x4c + (uint32_t)i * 0x3c;
+            uint32_t ref = off + 4 <= r.size ? U32(off) : 0;
             if (ref) [m appendFormat:@" c%d ref %u %s %lux%lu fmt %lu load %lu store %lu usage %lu", i, ref, c.texture ? "ok" : "MISSING", (unsigned long)c.texture.width, (unsigned long)c.texture.height, (unsigned long)c.texture.pixelFormat, (unsigned long)c.loadAction, (unsigned long)c.storeAction, (unsigned long)c.texture.usage];
         }
         [m appendFormat:@" depth ref %u stencil ref %u", U32(0), U32(0x28)];
@@ -988,8 +1100,18 @@ typedef struct {
 }
 
 - (void)render:(id<MTLRenderCommandEncoder>)e tag:(uint32_t)tag rec:(Rec)r task:(uint32_t)task {
+    uint32_t minimum = hv_pvg_draw_payload_min(tag);
+    if (diagnostics) { diag_records++; diag_tags[tag < 512 ? tag : 511]++; }
+    if (minimum && r.size < minimum) {
+        if (diagnostics) { diag_invalid++; if (diag_warnings < 128) [self gpuDiagnostic:[NSString stringWithFormat:@"truncated draw tag=%u payload=%u required=%u", tag, r.size, minimum] warning:YES]; }
+        return;
+    }
     BOOL draw = tag <= 19 || tag == 28 || tag == 29 || tag == 155 || tag == 162;
-    if (!pipeline_set && draw) return;
+    if (!pipeline_set && draw) {
+        if (diagnostics) { diag_missing++; if (diag_warnings < 128) [self gpuDiagnostic:[NSString stringWithFormat:@"draw without pipeline tag=%u", tag] warning:YES]; }
+        return;
+    }
+    if (minimum && diagnostics) [self diagnoseDraw:tag rec:r task:task];
     if (tracing && draw) fprintf(stderr, "trace:  draw tag %u\n", tag);
     switch (tag) {
     case 24: { /* {fence, stages} */
@@ -1016,15 +1138,21 @@ typedef struct {
         break;
     }
     case 125: case 110: case 157: { /* vertex, fragment, tile buffers: {index, count}, {ref, offset}... */
+        if (![self bindingRecord:r element:12 limit:31 tag:tag]) break;
         uint32_t index = U32(0), count = U32(4);
-        if (count > 31) break;
         __unsafe_unretained id<MTLBuffer> buffers[31];
         id strong[31];
         NSUInteger offsets[31];
         for (uint32_t i = 0; i < count; i++) {
             strong[i] = [self get:U32(8 + i * 12) task:task];
             buffers[i] = strong[i];
+            if (diagnostics && U32(8 + i * 12) && !buffers[i]) { diag_missing++; if (diag_warnings < 128) [self gpuDiagnostic:[NSString stringWithFormat:@"missing binding resource tag=%u ref=%u", tag, U32(8 + i * 12)] warning:YES]; }
             offsets[i] = (NSUInteger)U64(12 + i * 12);
+            if (buffers[i] && (![buffers[i] conformsToProtocol:@protocol(MTLBuffer)] || offsets[i] > buffers[i].length)) {
+                if (diagnostics) { diag_invalid++; if (diag_warnings < 128) [self gpuDiagnostic:[NSString stringWithFormat:@"invalid buffer binding tag=%u slot=%u ref=%u offset=%lu", tag, index + i, U32(8 + i * 12), (unsigned long)offsets[i]] warning:YES]; }
+                return;
+            }
+            if (diagnostics && diag_details < 384) [self gpuDiagnostic:[NSString stringWithFormat:@"buffer binding tag=%u slot=%u ref=%u offset=%lu length=%lu stride=pipeline", tag, index + i, U32(8 + i * 12), (unsigned long)offsets[i], (unsigned long)buffers[i].length] warning:NO];
         }
         NSRange range = NSMakeRange(index, count);
         if (tag == 125) [e setVertexBuffers:buffers offsets:offsets withRange:range];
@@ -1032,8 +1160,13 @@ typedef struct {
         else [e setTileBuffers:buffers offsets:offsets withRange:range];
         break;
     }
-    case 126: [e setVertexBufferOffset:(NSUInteger)U64(4) atIndex:U32(0)]; break;
-    case 111: [e setFragmentBufferOffset:(NSUInteger)U64(4) atIndex:U32(0)]; break;
+    case 126:
+        if (r.size < 12 || U32(0) >= 31) { if (diagnostics) { diag_invalid++; if (diag_warnings < 128) [self gpuDiagnostic:@"invalid vertex offset record" warning:YES]; } break; }
+        if (diagnostics && diag_details < 384) [self gpuDiagnostic:[NSString stringWithFormat:@"vertex offset slot=%u offset=%llu stride=pipeline", U32(0), (unsigned long long)U64(4)] warning:NO];
+        [e setVertexBufferOffset:(NSUInteger)U64(4) atIndex:U32(0)]; break;
+    case 111:
+        if (r.size < 12 || U32(0) >= 31) { if (diagnostics) { diag_invalid++; if (diag_warnings < 128) [self gpuDiagnostic:@"invalid fragment offset record" warning:YES]; } break; }
+        [e setFragmentBufferOffset:(NSUInteger)U64(4) atIndex:U32(0)]; break;
     case 114: case 161: { /* fragment, tile textures */
         uint32_t index = U32(0), count = U32(4);
         if (count > 128) break;
@@ -1173,21 +1306,30 @@ typedef struct {
         break;
     }
     case 165: { /* vertex buffers with stride: {index, count}, {ref, offset, stride}... */
+        if (![self bindingRecord:r element:20 limit:31 tag:tag]) break;
         uint32_t index = U32(0), count = U32(4);
-        if (count > 31 || r.size < 8 + count * 20ull) break;
         __unsafe_unretained id<MTLBuffer> buffers[31];
         id strong[31];
         NSUInteger offsets[31], strides[31];
         for (uint32_t i = 0; i < count; i++) {
             strong[i] = [self get:U32(8 + i * 20) task:task];
             buffers[i] = strong[i];
+            if (diagnostics && U32(8 + i * 20) && !buffers[i]) { diag_missing++; if (diag_warnings < 128) [self gpuDiagnostic:[NSString stringWithFormat:@"missing dynamic vertex resource ref=%u", U32(8 + i * 20)] warning:YES]; }
             offsets[i] = (NSUInteger)U64(12 + i * 20);
             strides[i] = (NSUInteger)U64(20 + i * 20);
+            if (buffers[i] && (![buffers[i] conformsToProtocol:@protocol(MTLBuffer)] || offsets[i] > buffers[i].length)) {
+                if (diagnostics) { diag_invalid++; if (diag_warnings < 128) [self gpuDiagnostic:[NSString stringWithFormat:@"invalid dynamic vertex binding slot=%u ref=%u offset=%lu", index + i, U32(8 + i * 20), (unsigned long)offsets[i]] warning:YES]; }
+                return;
+            }
+            if (diagnostics && diag_details < 384) [self gpuDiagnostic:[NSString stringWithFormat:@"vertex binding tag=165 slot=%u ref=%u offset=%lu length=%lu stride=%lu", index + i, U32(8 + i * 20), (unsigned long)offsets[i], (unsigned long)buffers[i].length, (unsigned long)strides[i]] warning:NO];
         }
         [e setVertexBuffers:buffers offsets:offsets attributeStrides:strides withRange:NSMakeRange(index, count)];
         break;
     }
-    case 166: [e setVertexBufferOffset:(NSUInteger)U64(4) attributeStride:(NSUInteger)U64(12) atIndex:U32(0)]; break;
+    case 166:
+        if (r.size < 20 || U32(0) >= 31) { if (diagnostics) { diag_invalid++; if (diag_warnings < 128) [self gpuDiagnostic:@"invalid dynamic vertex offset record" warning:YES]; } break; }
+        if (diagnostics && diag_details < 384) [self gpuDiagnostic:[NSString stringWithFormat:@"vertex offset slot=%u offset=%llu stride=%llu", U32(0), (unsigned long long)U64(4), (unsigned long long)U64(12)] warning:NO];
+        [e setVertexBufferOffset:(NSUInteger)U64(4) attributeStride:(NSUInteger)U64(12) atIndex:U32(0)]; break;
     case 101: {
         float c[4];
         memcpy(c, r.p, sizeof c);
@@ -1249,25 +1391,29 @@ typedef struct {
         draws++;
         break;
     case 7: { /* {primitive, index type, ref, count, offset} */
-        id<MTLBuffer> b = [self get:U32(4) task:task];
+        if (U16(2) > 1) { if (diagnostics) { diag_invalid++; if (diag_warnings < 128) [self gpuDiagnostic:@"invalid index type" warning:YES]; } break; }
+        id<MTLBuffer> b = [self drawBuffer:U32(4) task:task offset:U16(10) count:U16(8) stride:U16(2) ? 4 : 2];
         if (b) [e drawIndexedPrimitives:(MTLPrimitiveType)U16(0) indexCount:U16(8) indexType:(MTLIndexType)U16(2) indexBuffer:b indexBufferOffset:U16(10)];
         draws++;
         break;
     }
     case 6: {
-        id<MTLBuffer> b = [self get:U32(4) task:task];
+        if (U16(2) > 1) { if (diagnostics) { diag_invalid++; if (diag_warnings < 128) [self gpuDiagnostic:@"invalid index type" warning:YES]; } break; }
+        id<MTLBuffer> b = [self drawBuffer:U32(4) task:task offset:U64(16) count:U64(8) stride:U16(2) ? 4 : 2];
         if (b) [e drawIndexedPrimitives:(MTLPrimitiveType)U16(0) indexCount:(NSUInteger)U64(8) indexType:(MTLIndexType)U16(2) indexBuffer:b indexBufferOffset:(NSUInteger)U64(16)];
         draws++;
         break;
     }
     case 9: { /* {primitive, index type, ref, count 16, offset 16, instances 16} */
-        id<MTLBuffer> b = [self get:U32(4) task:task];
+        if (U16(2) > 1) { if (diagnostics) { diag_invalid++; if (diag_warnings < 128) [self gpuDiagnostic:@"invalid index type" warning:YES]; } break; }
+        id<MTLBuffer> b = [self drawBuffer:U32(4) task:task offset:U16(10) count:U16(8) stride:U16(2) ? 4 : 2];
         if (b) [e drawIndexedPrimitives:(MTLPrimitiveType)U16(0) indexCount:U16(8) indexType:(MTLIndexType)U16(2) indexBuffer:b indexBufferOffset:U16(10) instanceCount:U16(12)];
         draws++;
         break;
     }
     case 8: { /* {primitive, index type, ref, count 64, offset 64, instances 64} */
-        id<MTLBuffer> b = [self get:U32(4) task:task];
+        if (U16(2) > 1) { if (diagnostics) { diag_invalid++; if (diag_warnings < 128) [self gpuDiagnostic:@"invalid index type" warning:YES]; } break; }
+        id<MTLBuffer> b = [self drawBuffer:U32(4) task:task offset:U64(16) count:U64(8) stride:U16(2) ? 4 : 2];
         if (b) [e drawIndexedPrimitives:(MTLPrimitiveType)U16(0) indexCount:(NSUInteger)U64(8) indexType:(MTLIndexType)U16(2) indexBuffer:b indexBufferOffset:(NSUInteger)U64(16) instanceCount:(NSUInteger)U64(24)];
         draws++;
         break;
@@ -1289,14 +1435,16 @@ typedef struct {
         draws++;
         break;
     case 10: case 28: { /* {primitive, index type, ref, offset 64, count 64, instances 64, base vertex 64, base instance 64} */
-        id<MTLBuffer> b = [self get:U32(4) task:task];
+        if (U16(2) > 1) { if (diagnostics) { diag_invalid++; if (diag_warnings < 128) [self gpuDiagnostic:@"invalid index type" warning:YES]; } break; }
+        id<MTLBuffer> b = [self drawBuffer:U32(4) task:task offset:U64(8) count:U64(16) stride:U16(2) ? 4 : 2];
         if (b) [e drawIndexedPrimitives:(MTLPrimitiveType)U16(0) indexCount:(NSUInteger)U64(16) indexType:(MTLIndexType)U16(2) indexBuffer:b indexBufferOffset:(NSUInteger)U64(8)
                           instanceCount:(NSUInteger)U64(24) baseVertex:(NSInteger)U64(32) baseInstance:(NSUInteger)U64(40)];
         draws++;
         break;
     }
     case 11: case 29: { /* {primitive, index type, ref, offset 16, count 16, instances 16, base vertex 16, base instance 16}; 29's base vertex can be negative */
-        id<MTLBuffer> b = [self get:U32(4) task:task];
+        if (U16(2) > 1) { if (diagnostics) { diag_invalid++; if (diag_warnings < 128) [self gpuDiagnostic:@"invalid index type" warning:YES]; } break; }
+        id<MTLBuffer> b = [self drawBuffer:U32(4) task:task offset:U16(8) count:U16(10) stride:U16(2) ? 4 : 2];
         NSInteger base_vertex = tag == 29 ? (NSInteger)(int16_t)U16(14) : (NSInteger)U16(14);
         if (b) [e drawIndexedPrimitives:(MTLPrimitiveType)U16(0) indexCount:U16(10) indexType:(MTLIndexType)U16(2) indexBuffer:b indexBufferOffset:U16(8)
                           instanceCount:U16(12) baseVertex:base_vertex baseInstance:U16(16)];
@@ -1304,13 +1452,15 @@ typedef struct {
         break;
     }
     case 16: { /* {ref, primitive 16, 2 unused, offset 64} */
-        id<MTLBuffer> b = [self get:U32(0) task:task];
+        id<MTLBuffer> b = [self drawBuffer:U32(0) task:task offset:U64(8) count:4 stride:4];
         if (b) [e drawPrimitives:(MTLPrimitiveType)U16(4) indirectBuffer:b indirectBufferOffset:(NSUInteger)U64(8)];
         draws++;
         break;
     }
     case 17: { /* {primitive, index type, index ref, indirect ref, index offset 64, indirect offset 64} */
-        id<MTLBuffer> index = [self get:U32(4) task:task], indirect = [self get:U32(8) task:task];
+        if (U16(2) > 1) { if (diagnostics) { diag_invalid++; if (diag_warnings < 128) [self gpuDiagnostic:@"invalid indirect index type" warning:YES]; } break; }
+        id<MTLBuffer> index = [self drawBuffer:U32(4) task:task offset:U64(12) count:0 stride:U16(2) ? 4 : 2];
+        id<MTLBuffer> indirect = [self drawBuffer:U32(8) task:task offset:U64(20) count:5 stride:4];
         if (index && indirect) [e drawIndexedPrimitives:(MTLPrimitiveType)U16(0) indexType:(MTLIndexType)U16(2) indexBuffer:index indexBufferOffset:(NSUInteger)U64(12)
                                           indirectBuffer:indirect indirectBufferOffset:(NSUInteger)U64(20)];
         draws++;
@@ -1353,6 +1503,7 @@ typedef struct {
         break;
     }
     default:
+        if (diagnostics) { diag_unsupported++; if (diag_warnings < 128) [self gpuDiagnostic:[NSString stringWithFormat:@"unsupported render tag=%u payload=%u", tag, r.size] warning:YES]; }
         [self complain:[NSString stringWithFormat:@"render command %u (%u bytes) skipped", tag, r.size]];
         break;
     }
@@ -1361,6 +1512,7 @@ typedef struct {
 /* Compute calls. Tags start at 200. */
 - (void)compute:(id<MTLComputeCommandEncoder>)e tag:(uint32_t)tag rec:(Rec)r task:(uint32_t)task {
     if (!pipeline_set && (tag == 200 || tag == 202)) return;
+    if (diagnostics) { diag_records++; diag_tags[tag < 512 ? tag : 511]++; }
     switch (tag) {
     case 209: {
         MTLRegion region;
@@ -1391,20 +1543,28 @@ typedef struct {
         break;
     }
     case 203: {
+        if (![self bindingRecord:r element:12 limit:31 tag:tag]) break;
         uint32_t index = U32(0), count = U32(4);
-        if (count > 31) break;
         __unsafe_unretained id<MTLBuffer> buffers[31];
         id strong[31];
         NSUInteger offsets[31];
         for (uint32_t i = 0; i < count; i++) {
             strong[i] = [self get:U32(8 + i * 12) task:task];
             buffers[i] = strong[i];
+            if (diagnostics && U32(8 + i * 12) && !buffers[i]) { diag_missing++; if (diag_warnings < 128) [self gpuDiagnostic:[NSString stringWithFormat:@"missing binding resource tag=%u ref=%u", tag, U32(8 + i * 12)] warning:YES]; }
             offsets[i] = (NSUInteger)U64(12 + i * 12);
+            if (buffers[i] && (![buffers[i] conformsToProtocol:@protocol(MTLBuffer)] || offsets[i] > buffers[i].length)) {
+                if (diagnostics) { diag_invalid++; if (diag_warnings < 128) [self gpuDiagnostic:[NSString stringWithFormat:@"invalid buffer binding tag=%u slot=%u ref=%u offset=%lu", tag, index + i, U32(8 + i * 12), (unsigned long)offsets[i]] warning:YES]; }
+                return;
+            }
+            if (diagnostics && diag_details < 384) [self gpuDiagnostic:[NSString stringWithFormat:@"buffer binding tag=%u slot=%u ref=%u offset=%lu length=%lu stride=pipeline", tag, index + i, U32(8 + i * 12), (unsigned long)offsets[i], (unsigned long)buffers[i].length] warning:NO];
         }
         [e setBuffers:buffers offsets:offsets withRange:NSMakeRange(index, count)];
         break;
     }
-    case 207: [e setBufferOffset:(NSUInteger)U64(4) atIndex:U32(0)]; break;
+    case 207:
+        if (r.size < 12 || U32(0) >= 31) { if (diagnostics) { diag_invalid++; if (diag_warnings < 128) [self gpuDiagnostic:@"invalid compute offset record" warning:YES]; } break; }
+        [e setBufferOffset:(NSUInteger)U64(4) atIndex:U32(0)]; break;
     case 206: {
         uint32_t index = U32(0), count = U32(4);
         if (count > 128) break;
@@ -1444,6 +1604,7 @@ typedef struct {
     case 219: /* not a command the framework knows either, though the guest sends it */
         break;
     default:
+        if (diagnostics) { diag_unsupported++; if (diag_warnings < 128) [self gpuDiagnostic:[NSString stringWithFormat:@"unsupported compute tag=%u payload=%u", tag, r.size] warning:YES]; }
         [self complain:[NSString stringWithFormat:@"compute command %u (%u bytes) skipped", tag, r.size]];
         break;
     }
@@ -1512,6 +1673,7 @@ typedef struct {
     case 308: case 309: case 310: case 311: case 314: case 315: /* hints, and syncing memory Apple GPUs share */
         break;
     default:
+        if (diagnostics) { diag_unsupported++; if (diag_warnings < 128) [self gpuDiagnostic:[NSString stringWithFormat:@"unsupported blit tag=%u payload=%u", tag, r.size] warning:YES]; }
         [self complain:[NSString stringWithFormat:@"blit command %u (%u bytes) skipped", tag, r.size]];
         break;
     }
@@ -1657,6 +1819,7 @@ typedef struct {
                 fprintf(stderr, "pvgres task %u ref %u mapped flags %x\n", task, res[i * 2], res[i * 2 + 1]);
             }
         }
+        if (diagnostics && diag_details < 384) [self gpuDiagnostic:[NSString stringWithFormat:@"resource task=%u ref=%u type=%u flags=%x generation=%u bytes=%llu parent=%d guest-backed=%d host-valid=%d", task, res[i * 2], o->entry[0] & 0xff, res[i * 2 + 1], o->generation, (unsigned long long)o->length, o->parent != nil, o->guest_backed, o->host_valid] warning:NO];
         if (res[i * 2 + 1] & 1) o->guest_stale = NO, o->host_valid = NO; /* the guest wrote it */
         if (o->guest_backed && !o->host_valid) {
             if (!o->guest_stale) [self page:o toGuest:NO task:task blit:&blit commandBuffer:cb];
@@ -1759,6 +1922,7 @@ typedef struct {
         fprintf(stderr, "hengevm: pvg-metal: %llu execs, %llu draws, %llu failed, %llu synced, %llu remaps, %.0f s; encoding %.2f s, waiting for the GPU %.2f s\n", (unsigned long long)execs, (unsigned long long)draws, (unsigned long long)failed, (unsigned long long)synced, (unsigned long long)remaps, now_seconds() - t0, encode_time, gpu_wait_time);
         encode_time = gpu_wait_time = 0;
     }
+    [self gpuSummary];
     return YES;
 }
 
@@ -2213,6 +2377,9 @@ HvPvgMetal *hv_pvg_metal_create(HvPvgLite *lite) {
         r->surfaces = [NSMutableDictionary new];
         r->complaints = [NSMutableSet new];
         r->shot = getenv("HV_PVG_SHOT");
+        const char *diagnostics = getenv("HV_PVG_DIAGNOSTICS");
+        r->diagnostics = diagnostics && strcmp(diagnostics, "0") != 0;
+        if (r->diagnostics) fprintf(stderr, "pvgdiag: enabled; metadata only; detail budget=384 warning budget=128 summaries=32 every>=10s\n");
 #if !TARGET_OS_IPHONE
         if (getenv("HV_PVG_GPU_TEST")) r->layer = [CAMetalLayer layer];
 #endif
