@@ -98,17 +98,6 @@ jobs:
         working-directory: Henge
         run: make ios-lib
 
-      # Upstream keeps main unbuildable between releases: ReleaseGate.swift is
-      # not committed (it "comes with each release"), package_ipa.sh refuses to
-      # build without it, and HengeApp.swift logs ReleaseGate.version. Provide a
-      # stub so this GPL source builds. Personal use only: do not distribute
-      # the artifact without offering the corresponding source, stub included.
-      - name: Provide ReleaseGate.swift stub
-        working-directory: Henge
-        run: |
-          printf 'enum ReleaseGate {\n    /// Upstream ships this file only with releases; stub for building main.\n    static let version = "main-%s"\n}\n' \
-            "$(git rev-parse --short=12 HEAD)" > ios/Henge/ReleaseGate.swift
-
       - name: Package Henge.ipa
         working-directory: Henge
         run: zsh ios/scripts/package_ipa.sh
