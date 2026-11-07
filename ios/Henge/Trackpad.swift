@@ -6,6 +6,9 @@ import UIKit
 /// scroll, and tapped together they right-click. Pointer speed suits a 1920-wide screen on a small
 /// one. Only fingers count here: a real trackpad or mouse goes through HardwareMouse.
 struct Trackpad: UIViewRepresentable {
+    /// Three fingers tapped together: the session shows its hidden controls.
+    static let threeFingerTap = Notification.Name("henge.trackpad.threeFingerTap")
+
     func makeUIView(context: Context) -> Surface { Surface() }
     func updateUIView(_ view: Surface, context: Context) {}
 
@@ -17,6 +20,7 @@ struct Trackpad: UIViewRepresentable {
         private var started = Date()
         private var travelled: CGFloat = 0
         private var hadTwoFingers = false
+        private var mostFingers = 0
         private var holding = false
         private var holdTimer: Timer?
         private var scrollX: CGFloat = 0
@@ -45,11 +49,13 @@ struct Trackpad: UIViewRepresentable {
                 started = Date()
                 travelled = 0
                 hadTwoFingers = false
+                mostFingers = 0
                 scrollX = 0
                 scrollY = 0
                 buzz.prepare()
             }
             fingers.append(contentsOf: touches)
+            mostFingers = max(mostFingers, fingers.count)
             if fingers.count >= 2 {
                 hadTwoFingers = true
                 cancelHold()
@@ -84,6 +90,12 @@ struct Trackpad: UIViewRepresentable {
                 holding = false
                 henge_vm_mouse_button(0, 0)
                 StickyKeys.shared.releaseAll()
+                return
+            }
+            if mostFingers >= 3 {
+                if travelled < Self.tapDistance * 3, Date().timeIntervalSince(started) < Self.tapTime * 2 {
+                    NotificationCenter.default.post(name: Trackpad.threeFingerTap, object: nil)
+                }
                 return
             }
             guard travelled < Self.tapDistance, Date().timeIntervalSince(started) < Self.tapTime else { return }

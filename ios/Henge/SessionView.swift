@@ -22,6 +22,9 @@ struct SessionView: View {
     @State private var typing = false
     @State private var zoomed = false
     @State private var showDetails = false
+    @State private var controlsHidden = false
+    @State private var showRevealHint = false
+    @AppStorage("henge.controls.hintsShown") private var revealHintsShown = 0
     @State private var confirmStop = false
     @State private var shuttingDown = false   // macOS was asked to shut down: close once it has
     @State private var zoomCentre = CGPoint(x: 0.5, y: 0.5) // where the zoomed view is, 0...1 of the Mac's screen
@@ -74,6 +77,16 @@ struct SessionView: View {
                 } else {
                     floatingControls(layout)
                 }
+                if showRevealHint {
+                    Label("Tap with three fingers to show the controls", systemImage: "hand.tap")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 18).padding(.vertical, 12)
+                        .deskGlass(in: Capsule())
+                        .position(x: full.width / 2, y: insets.top + 40)
+                        .transition(.opacity)
+                        .allowsHitTesting(false)
+                }
                 if let error { errorCard(error, layout) }
                 KeyboardCatcher(active: $typing).frame(width: 0, height: 0)
             }
@@ -81,6 +94,12 @@ struct SessionView: View {
             .ignoresSafeArea()
             .animation(.easeInOut(duration: 0.25), value: zoomed)
             .animation(.easeInOut(duration: 0.25), value: typing)
+            .animation(.easeInOut(duration: 0.25), value: controlsHidden)
+            .animation(.easeInOut(duration: 0.25), value: showRevealHint)
+            .onReceive(NotificationCenter.default.publisher(for: Trackpad.threeFingerTap)) { _ in
+                controlsHidden = false
+                showRevealHint = false
+            }
             .onAppear { shown = layout.shown }
             .onChange(of: layout.shown) { shown = $0 }
         }
@@ -200,8 +219,10 @@ struct SessionView: View {
     // MARK: Upright
 
     @ViewBuilder private func uprightControls(_ layout: Layout) -> some View {
-        if !typing {
+        if !typing && !controlsHidden {
             HStack {
+                tool("eye.slash", "Hide controls") { hideControls() }
+                Spacer()
                 tool("keyboard", "Keyboard") { typing = true }
                 Spacer()
                 pasteTool
@@ -269,6 +290,16 @@ struct SessionView: View {
         .tint(Desk.raised)
     }
 
+    /// Hides the session's controls; three fingers on the screen bring them back. The first few times say so.
+    private func hideControls() {
+        controlsHidden = true
+        typing = false
+        guard revealHintsShown < 3 else { return }
+        revealHintsShown += 1
+        showRevealHint = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { showRevealHint = false }
+    }
+
     private func tool(_ symbol: String, _ label: String, tint: Color = Desk.text, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
@@ -286,6 +317,7 @@ struct SessionView: View {
         let landscape = layout.touch.width > layout.touch.height
         let top = layout.insets.top + (landscape ? 8 : 6)
         let pill = HStack(spacing: 4) {
+            tool("eye.slash", "Hide controls", tint: .white) { hideControls() }
             tool("keyboard", "Keyboard", tint: .white) { typing.toggle() }
             pasteTool
             tool(zoomed ? "minus.magnifyingglass" : "plus.magnifyingglass", zoomed ? "Zoom out" : "Zoom in", tint: zoomed ? Desk.accentLight : .white) { zoomed.toggle() }
@@ -296,7 +328,9 @@ struct SessionView: View {
         .padding(.horizontal, 8)
         .frame(height: 50)
         .deskGlass(in: Capsule())
-        if let barY = layout.barY {
+        if controlsHidden {
+            EmptyView()
+        } else if let barY = layout.barY {
             pill.position(x: layout.touch.midX, y: barY)
         } else if landscape || typing {
             pill.position(x: layout.touch.midX, y: top + 25)
