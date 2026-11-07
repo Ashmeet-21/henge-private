@@ -94,7 +94,7 @@ $(B)/test_%: tests/test_%.c tests/%_programs.S tests/harness.S tests/harness.h $
 	$(CC) $(CFLAGS) -Itests tests/test_$*.c tests/$*_programs.S tests/harness.S $(ENGINE) -o $@
 
 test: all
-	@for t in $(TESTS); do echo "== $$t"; $$t || exit 1; done
+	@ulimit -s 65520; for t in $(TESTS); do echo "== $$t"; $$t || exit 1; done # a test keeps a whole HvCpu (2 MB of TLB and more) on its stack
 
 $(B):
 	mkdir -p $(B)
