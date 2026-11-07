@@ -1,5 +1,6 @@
 import SwiftUI
 import QuartzCore
+import CoreGraphics
 
 /// The Mac's screen, refreshed a few times a second: what its GPU draws once
 /// macOS is up. Before that, the boot framebuffer, which only ever holds the
@@ -13,6 +14,8 @@ struct BootDisplay: View {
 
     @State private var image: CGImage?
     @State private var gpuLive = false
+    @AppStorage("henge.matchScreenColors") private var matchScreenColors = true
+    @AppStorage("henge.display.brightness") private var screenBrightness = 1.0
 
     var body: some View {
         ZStack {
@@ -31,7 +34,9 @@ struct BootDisplay: View {
                         .foregroundStyle(.white)
                 }
             }
-            GPUScreen(display: display, role: role, surface: surface).allowsHitTesting(false)
+            GPUScreen(display: display, role: role, surface: surface,
+                      matchScreenColors: matchScreenColors, brightness: screenBrightness)
+                .allowsHitTesting(false)
         }
         .task {
             // Once macOS draws with the GPU the frames go straight to GPUScreen:
@@ -67,6 +72,9 @@ private struct GPUScreen: UIViewRepresentable {
     let display: DisplayRouter
     let role: DisplayTargetSelection.Role
     let surface: UUID
+    let matchScreenColors: Bool
+    let brightness: Double
+    private static let srgb = CGColorSpace(name: CGColorSpace.sRGB)
 
     final class Screen: UIView {
         override class var layerClass: AnyClass { CAMetalLayer.self }
@@ -120,6 +128,14 @@ private struct GPUScreen: UIViewRepresentable {
         }
     }
 
+    private func setColorSpace(_ view: Screen) {
+        let metalLayer = view.layer as! CAMetalLayer
+        // The guest's display profile is sRGB, and the presenter writes sRGB
+        // values. A nil colorspace skips matching on wide-gamut iPad screens.
+        metalLayer.colorspace = matchScreenColors ? Self.srgb : nil
+        view.alpha = CGFloat(min(max(brightness, 0.4), 1))
+    }
+
     func makeUIView(context: Context) -> Screen {
         if ProcessInfo.processInfo.environment["HV_COLOR_PROBE"] != nil {
             // What the screen itself is, for the colour probe (the engine logs the layer and the frames).
@@ -129,8 +145,10 @@ private struct GPUScreen: UIViewRepresentable {
                        + "bounds=\(Int(s.bounds.width))x\(Int(s.bounds.height)) maxEDR=\(s.potentialEDRHeadroom) currentEDR=\(s.currentEDRHeadroom) "
                        + "brightness=\(String(format: "%.2f", s.brightness)) refreshHz=\(s.maximumFramesPerSecond)")
         }
-        return Screen(display: display, role: role, surface: surface)
+        let view = Screen(display: display, role: role, surface: surface)
+        setColorSpace(view)
+        return view
     }
-    func updateUIView(_ view: Screen, context: Context) {}
+    func updateUIView(_ view: Screen, context: Context) { setColorSpace(view) }
     static func dismantleUIView(_ view: Screen, coordinator: ()) { view.detach() }
 }

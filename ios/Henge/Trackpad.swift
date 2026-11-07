@@ -21,6 +21,8 @@ struct Trackpad: UIViewRepresentable {
         private var holdTimer: Timer?
         private var scrollX: CGFloat = 0
         private var scrollY: CGFloat = 0
+        private var restX: CGFloat = 0
+        private var restY: CGFloat = 0
         private let buzz = UIImpactFeedbackGenerator(style: .medium)
 
         override init(frame: CGRect) {
@@ -47,6 +49,8 @@ struct Trackpad: UIViewRepresentable {
                 hadTwoFingers = false
                 scrollX = 0
                 scrollY = 0
+                restX = 0
+                restY = 0
                 buzz.prepare()
             }
             fingers.append(contentsOf: touches)
@@ -67,7 +71,13 @@ struct Trackpad: UIViewRepresentable {
                 scroll(dx, dy)
             } else {
                 if travelled >= Self.tapDistance, !holding { cancelHold() }
-                henge_vm_mouse_move(Int32((dx * speed).rounded()), Int32((dy * speed).rounded()))
+                restX += dx * speed
+                restY += dy * speed
+                let moveX = restX.rounded(), moveY = restY.rounded()
+                guard moveX != 0 || moveY != 0 else { return }
+                restX -= moveX
+                restY -= moveY
+                henge_vm_mouse_move(Int32(moveX), Int32(moveY))
             }
         }
 

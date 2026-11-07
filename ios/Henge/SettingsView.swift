@@ -5,6 +5,7 @@ struct SettingsView: View {
     @AppStorage(JITCoordinator.autoEnableKey) private var jitAtLaunch = false
     @AppStorage(HardwareMouse.speedKey) private var mouseSpeed = 1.0
     @AppStorage(HardwareMouse.reverseKey) private var reverseScrolling = false
+    @AppStorage(HardwareMouse.scrollSpeedKey) private var scrollSpeed = 0.3
 
     var body: some View {
         NavigationStack {
@@ -42,7 +43,11 @@ struct SettingsView: View {
                             Slider(value: $mouseSpeed, in: 0.5...3)
                         }
                         Toggle("Reverse scrolling", isOn: $reverseScrolling)
-                        Text("A Magic Keyboard or a Bluetooth mouse moves the Mac's pointer. Changes apply the next time a Mac starts.")
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Scroll speed")
+                            Slider(value: $scrollSpeed, in: 0.1...1.5)
+                        }
+                        Text("A Magic Keyboard or a Bluetooth mouse moves the Mac's pointer. Pointer speed changes apply the next time a Mac starts; scroll speed changes apply immediately.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                     .listRowBackground(Desk.card)

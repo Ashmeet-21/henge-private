@@ -20,13 +20,16 @@
 /* 1080p shrunk onto a phone would make a normal pointer a few dots across; an iPad's screen needs less. */
 static int cursor_scale(void) {
 #if TARGET_OS_IPHONE
-    static int scale;
-    if (!scale) {
+    NSInteger saved = [[NSUserDefaults standardUserDefaults] integerForKey:@"henge.cursor.scale"];
+    if (saved >= 1 && saved <= 3) return (int)saved;
+    static int defaultScale;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
         struct utsname u;
         uname(&u);
-        scale = strncmp(u.machine, "iPad", 4) ? 3 : 2;
-    }
-    return scale;
+        defaultScale = strncmp(u.machine, "iPad", 4) ? 3 : 1;
+    });
+    return defaultScale;
 #else
     return 1;
 #endif
@@ -86,9 +89,9 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     /* Multi-plane surfaces cannot sit on a buffer: a real IOSurface, kept up to date from the guest's pages. */
     IOSurfaceRef iosurface;
     uint64_t alloc, content_hash;
-    /* When the host cannot lay it out as the guest did: where each plane is on both sides. */
-    uint32_t relaid;
-    uint64_t plane_from[4], plane_to[4], plane_bytes[4], plane_row[4], plane_h[4];
+    /* Source layout for a multi-plane video surface. */
+    uint32_t plane_count;
+    uint64_t plane_from[4], plane_row[4], plane_h[4];
     /* A heap: private memory, a buffer over all of it. */
     id<MTLBuffer> heap_whole;
     /* A heap's or a private texture's copy in guest memory, and which side has the newest bytes. */
@@ -150,7 +153,7 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     __weak CAMetalLayer *prepared_layer; /* presenter only: each target needs its own setup */
     id<MTLRenderPipelineState> screen_pipe, linear_pipe, cursor_pipe;
     id<MTLTexture> cursor_tex;
-    id<MTLSamplerState> screen_sampler;
+    id<MTLSamplerState> screen_sampler, cursor_sampler;
     uint64_t on_screen; /* the mapping showing */
     _Atomic uint64_t gpu_frames;
     dispatch_queue_t presenter;
@@ -616,17 +619,27 @@ static IOSurfaceRef make_iosurface(HvObject *to, const uint8_t *desc, uint64_t a
         [plain addObject:@{(__bridge id)kIOSurfacePlaneWidth: @(w), (__bridge id)kIOSurfacePlaneHeight: @(h), (__bridge id)kIOSurfacePlaneBytesPerRow: @(row),
                            (__bridge id)kIOSurfacePlaneOffset: @(at), (__bridge id)kIOSurfacePlaneSize: @(row * h), (__bridge id)kIOSurfacePlaneBytesPerElement: @(bpe),
                            (__bridge id)kIOSurfacePlaneElementWidth: @1, (__bridge id)kIOSurfacePlaneElementHeight: @1}];
-        to->plane_from[i] = off, to->plane_to[i] = at, to->plane_row[i] = row, to->plane_h[i] = h, to->plane_bytes[i] = row * h;
+        to->plane_from[i] = off, to->plane_row[i] = row, to->plane_h[i] = h;
         at += row * h;
     }
     NSDictionary *props = @{(__bridge id)kIOSurfaceWidth: @(width), (__bridge id)kIOSurfaceHeight: @(height), (__bridge id)kIOSurfacePixelFormat: @(fourcc),
                             (__bridge id)kIOSurfaceAllocSize: @(alloc), (__bridge id)kIOSurfacePlaneInfo: info};
     IOSurfaceRef made = IOSurfaceCreate((__bridge CFDictionaryRef)props);
-    if (made) return made;
-    /* Video formats refuse a layout with the guest's padding: planes end to end, copied across one by one. */
-    NSDictionary *plain_props = @{(__bridge id)kIOSurfaceWidth: @(width), (__bridge id)kIOSurfaceHeight: @(height), (__bridge id)kIOSurfacePixelFormat: @(fourcc), (__bridge id)kIOSurfacePlaneInfo: plain};
-    made = IOSurfaceCreate((__bridge CFDictionaryRef)plain_props);
-    if (made) to->relaid = planes;
+    if (!made) {
+        /* Video formats can refuse the guest's padding: request packed planes instead. */
+        NSDictionary *plain_props = @{(__bridge id)kIOSurfaceWidth: @(width), (__bridge id)kIOSurfaceHeight: @(height), (__bridge id)kIOSurfacePixelFormat: @(fourcc), (__bridge id)kIOSurfacePlaneInfo: plain};
+        made = IOSurfaceCreate((__bridge CFDictionaryRef)plain_props);
+    }
+    if (made) {
+        to->plane_count = planes;
+        static int logged;
+        if (planes >= 2 && logged++ < 4)
+            for (uint32_t i = 0; i < planes && i < IOSurfaceGetPlaneCount(made) && i < 4; i++)
+                fprintf(stderr, "hengevm: video plane %u guest off %llu row %llu h %llu; host row %zu h %zu\n",
+                        i, (unsigned long long)to->plane_from[i], (unsigned long long)to->plane_row[i],
+                        (unsigned long long)to->plane_h[i], IOSurfaceGetBytesPerRowOfPlane(made, i),
+                        IOSurfaceGetHeightOfPlane(made, i));
+    }
     return made;
 }
 
@@ -643,18 +656,27 @@ static void sync_iosurface(HvObject *s) {
     if (hash == s->content_hash) return;
     s->content_hash = hash;
     IOSurfaceLock(s->iosurface, 0, NULL);
-    uint8_t *base = IOSurfaceGetBaseAddress(s->iosurface);
-    if (s->relaid) {
-        for (uint32_t i = 0; i < s->relaid && i < 4; i++)
-            if (s->plane_from[i] + s->plane_bytes[i] <= s->alloc && s->plane_to[i] + s->plane_bytes[i] <= IOSurfaceGetAllocSize(s->iosurface))
-                memcpy(base + s->plane_to[i], from + s->plane_from[i], s->plane_bytes[i]);
+    if (s->plane_count && IOSurfaceGetPlaneCount(s->iosurface) >= s->plane_count) {
+        /* IOSurface can choose different offsets and row strides from those
+           requested. Copy each video plane through its actual host layout. */
+        for (uint32_t i = 0; i < s->plane_count && i < 4; i++) {
+            uint8_t *dst = IOSurfaceGetBaseAddressOfPlane(s->iosurface, i);
+            size_t dst_row = IOSurfaceGetBytesPerRowOfPlane(s->iosurface, i);
+            size_t rows = MIN((size_t)s->plane_h[i], IOSurfaceGetHeightOfPlane(s->iosurface, i));
+            uint64_t src_row = s->plane_row[i], src_off = s->plane_from[i];
+            if (!dst || !src_row || src_off > s->alloc || rows > (s->alloc - src_off) / src_row) continue;
+            size_t bytes = MIN((size_t)src_row, dst_row);
+            for (size_t y = 0; y < rows; y++)
+                memcpy(dst + y * dst_row, from + src_off + y * src_row, bytes);
+        }
     } else {
+        uint8_t *base = IOSurfaceGetBaseAddress(s->iosurface);
         memcpy(base, from, MIN(s->alloc, IOSurfaceGetAllocSize(s->iosurface)));
     }
     IOSurfaceUnlock(s->iosurface, 0, NULL);
     const char *dump = getenv("HV_PVG_SURFACE_DUMP");
     static int dumped;
-    if (dump && s->relaid && dumped < 6) {
+    if (dump && s->plane_count && dumped < 6) {
         char path[1100];
         snprintf(path, sizeof path, "%s-%d.bin", dump, dumped++);
         FILE *f = fopen(path, "wb");
@@ -1868,7 +1890,9 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
         MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
         sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear;
         screen_sampler = [device newSamplerStateWithDescriptor:sd];
-        if (!screen_pipe || !linear_pipe || !cursor_pipe) { [self complain:[NSString stringWithFormat:@"screen pipelines: %@", err.localizedDescription]]; return NO; }
+        sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterNearest;
+        cursor_sampler = [device newSamplerStateWithDescriptor:sd];
+        if (!screen_pipe || !linear_pipe || !cursor_pipe || !screen_sampler || !cursor_sampler) { [self complain:[NSString stringWithFormat:@"screen pipelines: %@", err.localizedDescription]]; return NO; }
     }
     // Pipelines are shared, but a newly connected monitor has a fresh layer.
     if (prepared_layer != target) {
@@ -1925,6 +1949,8 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
     if (!surface) { [self complain:[NSString stringWithFormat:@"swap to unknown surface %llu", mapping]]; return; }
     on_screen = mapping;
     BOOL half = surface->fourcc == 'RGhA';
+    if (!screen_tex) fprintf(stderr, "hengevm: display scanout format %s (%ux%u)\n",
+                             half ? "RGBA16Float" : "BGRA8Unorm", surface->surface_w, surface->surface_h);
     if (!surface->scanout) {
         MTLTextureDescriptor *t = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:half ? MTLPixelFormatRGBA16Float : MTLPixelFormatBGRA8Unorm
                                                                                      width:surface->surface_w height:surface->surface_h mipmapped:NO];
@@ -2037,7 +2063,9 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
         pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:pass];
-        [e setRenderPipelineState:half ? linear_pipe : screen_pipe];
+        NSNumber *linearSetting = [[NSUserDefaults standardUserDefaults] objectForKey:@"henge.display.linearToSRGB"];
+        BOOL convertLinear = linearSetting ? linearSetting.boolValue : YES;
+        [e setRenderPipelineState:(half && convertLinear) ? linear_pipe : screen_pipe];
         float rect[4] = {-1, -1, 2, 2};
         [e setVertexBytes:rect length:sizeof rect atIndex:0];
         [e setFragmentTexture:tex atIndex:0];
@@ -2057,6 +2085,8 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
             [e setRenderPipelineState:cursor_pipe];
             [e setVertexBytes:r length:sizeof r atIndex:0];
             [e setFragmentTexture:ctex atIndex:0];
+            NSNumber *sharpSetting = [[NSUserDefaults standardUserDefaults] objectForKey:@"henge.cursor.sharp"];
+            [e setFragmentSamplerState:sharpSetting && !sharpSetting.boolValue ? screen_sampler : cursor_sampler atIndex:0];
             [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
         }
         [e endEncoding];

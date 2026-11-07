@@ -6,7 +6,7 @@ import UIKit
 
 /// How Henge gets a debugger attached. See docs/06-built-in-jit.md.
 enum JITMethod: String, CaseIterable, Identifiable {
-    /// StikDebug when it is installed, then TrollStore, otherwise Built-in StikJIT.
+    /// TrollStore or jailbreak first, then a paired built-in helper or StikDebug.
     case automatic
     case stikDebug
     case trollStore
@@ -121,9 +121,10 @@ final class JITCoordinator: ObservableObject {
 
     var resolvedMethod: JITMethod {
         guard method == .automatic else { return method }
-        if JITBootstrap.isStikDebugInstalled { return .stikDebug }
         if JITBootstrap.isTrollStoreInstalled { return .trollStore }
         if JITBootstrap.isJailbroken { return .jailbreak }
+        if hasPairing && HengeBuiltInJIT.isAvailable { return .builtIn }
+        if JITBootstrap.isStikDebugInstalled { return .stikDebug }
         return .builtIn
     }
 
@@ -132,7 +133,9 @@ final class JITCoordinator: ObservableObject {
         case .stikDebug: return "StikDebug is installed, so Henge will open it."
         case .trollStore: return "TrollStore is installed, so Henge will ask it to enable JIT."
         case .jailbreak: return "This device is jailbroken, so JIT comes from the jailbreak's Allow JIT in Apps setting."
-        default: return "StikDebug, TrollStore and a jailbreak were not found, so Henge will use its built-in helper."
+        default: return hasPairing
+            ? "Henge will use its paired built-in helper."
+            : "StikDebug, TrollStore and a jailbreak were not found, so Henge will use its built-in helper."
         }
     }
 

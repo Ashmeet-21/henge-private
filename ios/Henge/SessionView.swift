@@ -17,7 +17,14 @@ struct SessionView: View {
     @State private var framesIn: UInt64 = 0
     @State private var log: [String] = []
     @State private var started = Date()
+    @State private var thermalState = ProcessInfo.processInfo.thermalState
     @AppStorage("henge.cpus") private var cpus = 4
+    @AppStorage("henge.matchScreenColors") private var matchScreenColors = true
+    @AppStorage("henge.display.brightness") private var screenBrightness = 1.0
+    @AppStorage("henge.display.linearToSRGB") private var linearColorConversion = true
+    @AppStorage("henge.cursor.scale") private var cursorScale = Device.isPad ? 1 : 3
+    @AppStorage("henge.cursor.sharp") private var sharpCursor = true
+    @AppStorage(HardwareMouse.scrollSpeedKey) private var scrollSpeed = 0.3
 
     @State private var typing = false
     @State private var zoomed = false
@@ -104,6 +111,12 @@ struct SessionView: View {
             }
             HardwareKeys.releaseAll()
             HardwareMouse.shared.releaseButtons()
+        }
+        .onChange(of: showDetails) { showing in
+            if showing { HardwareKeys.releaseAll(); StickyKeys.shared.releaseAll() }
+        }
+        .onChange(of: confirmStop) { showing in
+            if showing { HardwareKeys.releaseAll(); StickyKeys.shared.releaseAll() }
         }
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true
@@ -374,9 +387,31 @@ struct SessionView: View {
             List {
                 Section(phase) {
                     LabeledContent("CPUs on", value: "\(cpusOn) of \(cpus)")
+                    LabeledContent("iPad thermal", value: Self.thermalLabel(thermalState))
                     LabeledContent("Translated blocks", value: String(format: "%.1f M/s", blocksPerSecond / 1e6))
                     LabeledContent("Network frames", value: "\(framesOut) out, \(framesIn) in")
                     LabeledContent("Up", value: "\(Int(Date().timeIntervalSince(started))) s")
+                }
+                Section("Display") {
+                    Toggle("Color matching", isOn: $matchScreenColors)
+                    Toggle("Linear color conversion", isOn: $linearColorConversion)
+                    LabeledContent("Brightness", value: "\(Int(screenBrightness * 100))%")
+                    Slider(value: $screenBrightness, in: 0.4...1)
+                    Text("Compare linear conversion on and off if colors look washed out. Brightness dims only the Mac's screen.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                Section("Pointer") {
+                    Picker("Size", selection: $cursorScale) {
+                        Text("1×").tag(1)
+                        Text("2×").tag(2)
+                        Text("3×").tag(3)
+                    }
+                    .pickerStyle(.segmented)
+                    Toggle("Sharp edges", isOn: $sharpCursor)
+                    LabeledContent("Scroll speed", value: String(format: "%.1f×", scrollSpeed))
+                    Slider(value: $scrollSpeed, in: 0.1...1.5)
+                    Text("The Mac supplies a small pointer image. Enlarging it can look blurry; 1× is the sharpest on an iPad. Scroll speed changes apply immediately.")
+                        .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("Sharing") {
                     LabeledContent("Clipboard and folder", value: helperRunning ? "On" : "Not set up")
@@ -410,6 +445,16 @@ struct SessionView: View {
 
     // MARK: Running
 
+    private static func thermalLabel(_ state: ProcessInfo.ThermalState) -> String {
+        switch state {
+        case .nominal: return "Normal"
+        case .fair: return "Warm"
+        case .serious: return "Hot — performance reduced"
+        case .critical: return "Critical"
+        @unknown default: return "Unknown"
+        }
+    }
+
     private func run() async {
         let ram = GuestMemory.prepare(mac)
         HengeLog.log("session", "available memory \(henge_available_memory() >> 20) MB")
@@ -431,6 +476,7 @@ struct SessionView: View {
         Machines.shared.update(used)
         var lastBlocks = henge_vm_blocks()
         var lastTime = Date()
+        var lastGPUFrames = henge_vm_gpu_frames()
         var tick = 0
         while !Task.isCancelled {
             state = henge_vm_state()
@@ -444,8 +490,19 @@ struct SessionView: View {
             framesIn = henge_vm_net_frames(0)
             helperRunning = Sharing.helperRunning
             log = Array(HengeLog.recentLines(200))
+            let heat = ProcessInfo.processInfo.thermalState
+            if heat.rawValue != thermalState.rawValue {
+                thermalState = heat
+                HengeLog.log("session", "thermal state: \(Self.thermalLabel(heat))")
+            }
             if state == 2 { break }
             tick += 1
+            if tick % 10 == 0 {
+                let gpuFrames = henge_vm_gpu_frames()
+                HengeLog.log("perf", "blocks/s \(String(format: "%.0f", blocksPerSecond)), GPU frames/10s \(gpuFrames &- lastGPUFrames), "
+                             + "network tx \(framesOut), rx \(framesIn), thermal \(Self.thermalLabel(heat))")
+                lastGPUFrames = gpuFrames
+            }
             if tick % 30 == 0 { HengeLog.logFootprint("session") } // how close to the limit, for a memory kill leaves no crash report
             if tick % 60 == 0 { MacPreview.save(for: mac) }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
