@@ -188,7 +188,7 @@ final class Installer: NSObject, ObservableObject {
 
     private func install(_ mac: VirtualMac, ipsw: URL, cpus: Int) async throws {
         guard JITBootstrap.ready else { throw message("Turn on JIT first: the installer runs the Mac's own restore system, which needs it.") }
-        let ram = GuestMemory.prepare(mac)
+        let ram = GuestMemory.prepare(mac, installing: true)
         guard ram >= 2048 else { throw message("Installing needs a few more GB of free storage for the Mac's memory.") }
         let work = mac.directory.appendingPathComponent("restore", isDirectory: true)
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)

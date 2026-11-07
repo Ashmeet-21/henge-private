@@ -51,23 +51,21 @@ struct MacSettingsView: View {
                 .padding(.vertical, 10)
                 .deskCard()
 
-                if Device.fittingScreen.height != 1080 {
-                    DeskHeading("Screen")
-                    VStack(alignment: .leading, spacing: 12) {
-                        Picker("Screen", selection: Binding(get: { mac.screen.height == 1080 }, set: { wide in
-                            (mac.screenWidth, mac.screenHeight) = wide ? (1920, 1080) : Device.fittingScreen
-                            save()
-                        })) {
-                            Text("Fit this \(Device.name)").tag(false)
-                            Text("16:9").tag(true)
-                        }
-                        .pickerStyle(.segmented)
-                        Text("\(mac.screen.width) × \(mac.screen.height). Changes apply the next time this Mac starts.")
-                            .font(.system(size: 13)).foregroundStyle(Desk.dim)
+                DeskHeading("Screen")
+                VStack(alignment: .leading, spacing: 12) {
+                    Picker("Screen", selection: Binding(get: { mac.screen.height }, set: { height in
+                        guard let choice = Device.screenChoices.first(where: { $0.height == height }) else { return }
+                        (mac.screenWidth, mac.screenHeight) = (choice.width, choice.height)
+                        save()
+                    })) {
+                        ForEach(Device.screenChoices, id: \.height) { Text($0.name).tag($0.height) }
                     }
-                    .padding(17)
-                    .deskCard()
+                    .pickerStyle(.segmented)
+                    Text("\(mac.screen.width) × \(mac.screen.height). Smaller is lighter on memory. Changes apply the next time this Mac starts.")
+                        .font(.system(size: 13)).foregroundStyle(Desk.dim)
                 }
+                .padding(17)
+                .deskCard()
 
                 DeskHeading("Storage")
                 VStack(spacing: 11) {

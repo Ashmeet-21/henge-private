@@ -30,10 +30,12 @@ struct VirtualMac: Identifiable, Codable, Hashable {
 /// a file beside the disk: iOS's memory limit does not count a mapped file's pages either.
 enum GuestMemory {
     /// Points the engine at the file (it is unlinked as soon as it is open) and returns the size that fits.
-    static func prepare(_ mac: VirtualMac) -> UInt64 {
+    static func prepare(_ mac: VirtualMac, installing: Bool = false) -> UInt64 {
         let file = mac.directory.appendingPathComponent("ram.tmp")
         setenv("HV_RAM_FILE", file.path, 1)
-        if Device.ramOnStorage {
+        // Only for a restore: a running Mac's GPU drawing breaks on file-backed memory (blurred wallpaper, then black).
+        let onStorage = installing && Device.ramOnStorage
+        if onStorage {
             // Not the footprint-free memory: only the compressor can make room in that. Pages come in as the
             // guest touches them, since going over the whole file first would dirty all of it at once.
             setenv("HV_RAM_NO_LEDGER", "1", 1)
@@ -47,7 +49,7 @@ enum GuestMemory {
         let room = free > 0 ? UInt64(max(free - (2 << 30), 0)) >> 20 : UInt64.max
         let reach = henge_largest_mapping_mb()
         let ram = min(UInt64(mac.ramMB), room, reach > 512 ? reach - 512 : 0) / 512 * 512
-        HengeLog.log("session", "guest RAM \(ram) MB (asked \(mac.ramMB), disk room \(room), largest mapping \(reach), on storage \(Device.ramOnStorage))")
+        HengeLog.log("session", "guest RAM \(ram) MB (asked \(mac.ramMB), disk room \(room), largest mapping \(reach), on storage \(onStorage))")
         return ram
     }
 }

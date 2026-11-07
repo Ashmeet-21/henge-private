@@ -7,6 +7,9 @@ struct SettingsView: View {
     @AppStorage(HardwareMouse.reverseKey) private var reverseScrolling = false
     @AppStorage(Device.smallCodeRegionKey) private var smallCodeRegion = Device.hasLittleMemory
     @AppStorage(Device.ramOnStorageKey) private var ramOnStorage = Device.hasLittleMemory
+    @AppStorage(EngineTuning.fastFlushKey) private var fastFlush = true
+    @AppStorage(EngineTuning.wfiSpinKey) private var wfiSpin = false
+    @AppStorage(EngineTuning.superblocksKey) private var superblocks = false
 
     var body: some View {
         NavigationStack {
@@ -27,13 +30,21 @@ struct SettingsView: View {
                     LabeledContent("Code region", value: "\(JITBootstrap.jitBytes >> 20) MB, claimed once per launch")
                 }
                 .listRowBackground(Desk.card)
+                Section("Performance") {
+                    Toggle("Faster disk writes", isOn: $fastFlush)
+                    Toggle("Quicker wake from idle", isOn: $wfiSpin)
+                    Toggle("Superblocks (experimental)", isOn: $superblocks)
+                    Text("Faster disk writes keep them in order without waiting for a full sync; a sudden power loss could lose the last ones. Quicker wake keeps an idle CPU watching for work for 50 µs, at some battery cost. Superblocks let translated code run past conditional branches. Changes apply the next time a Mac starts.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                .listRowBackground(Desk.card)
                 Section("Memory") {
                     LabeledContent("Extra memory", value: Entitlements.increasedMemory ? "On" : "Off")
                     LabeledContent("Extended addressing", value: Entitlements.extendedAddressing ? "On" : "Off")
                     LabeledContent("This \(Device.name)'s memory", value: ByteText.string(ProcessInfo.processInfo.physicalMemory))
                     Toggle("Smaller code region (512 MB)", isOn: $smallCodeRegion)
-                    Toggle("Keep the Mac's memory on storage", isOn: $ramOnStorage)
-                    Text("Both are on by default with about 6 GB of memory, and slower, with more writes to storage. The code region changes the next time Henge opens; the other, the next time a Mac starts or installs.")
+                    Toggle("Keep the Mac's memory on storage while installing", isOn: $ramOnStorage)
+                    Text("Both are on by default with about 6 GB of memory, and slower, with more writes to storage. The code region changes the next time Henge opens; the other, the next time a Mac installs. A running Mac always keeps its memory in RAM.")
                         .font(.footnote).foregroundStyle(.secondary)
                     LabeledContent("Henge's limit", value: ByteText.string(UInt64(Entitlements.memoryLimitAtLaunch)))
                     LabeledContent("Free for Henge", value: ByteText.string(UInt64(henge_available_memory())))

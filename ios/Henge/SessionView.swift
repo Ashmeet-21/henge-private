@@ -423,6 +423,7 @@ struct SessionView: View {
         }
         var buffer = [CChar](repeating: 0, count: 256)
         Sharing.prepare()
+        EngineTuning.apply()
         henge_vm_set_display(UInt32(mac.screen.width), UInt32(mac.screen.height))
         let rc = henge_vm_boot(mac.rom.path, mac.disk.path, mac.aux.path, mac.ecid, mac.seed, ram, Int32(cpus), &buffer, buffer.count)
         if rc != 0 {

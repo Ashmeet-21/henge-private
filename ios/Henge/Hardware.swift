@@ -16,6 +16,18 @@ enum Device {
         return (1920, min(max(Int((1920 / shape / 8).rounded()) * 8, 1080), 1440))
     }
 
+    /// The screens a Mac can have. Fewer pixels: less for macOS to draw and less of its memory in surfaces.
+    static var screenChoices: [(name: String, width: Int, height: Int)] {
+        var choices: [(name: String, width: Int, height: Int)] = [
+            (name: "1080p", width: 1920, height: 1080),
+            (name: "900p", width: 1600, height: 900),
+            (name: "720p", width: 1280, height: 720),
+        ]
+        let fit = fittingScreen
+        if fit.height != 1080 { choices.insert((name: "Fit", width: fit.width, height: fit.height), at: 0) }
+        return choices
+    }
+
     /// How much memory to suggest for a new Mac: what leaves this device room for iOS.
     static var suggestedRAMGB: Int {
         let mb = ProcessInfo.processInfo.physicalMemory >> 20
@@ -33,7 +45,7 @@ enum Device {
     }
     /// Half the code region: the translator flushes more often, which is slower but holds 512 MB less.
     static var smallCodeRegion: Bool { setting(smallCodeRegionKey) }
-    /// The Mac's memory in a file iOS can write out, instead of memory only its compressor can squeeze.
+    /// During a restore only: the Mac's memory in a file iOS can write out, instead of memory only its compressor can squeeze.
     static var ramOnStorage: Bool { setting(ramOnStorageKey) }
 
     /// The sizes offered for a Mac's memory.
