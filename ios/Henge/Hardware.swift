@@ -45,13 +45,11 @@ enum Device {
         UserDefaults.standard.object(forKey: key) as? Bool ?? hasLittleMemory
     }
     /// Half the code region: the translator flushes more often, which is slower but holds 512 MB less.
-    /// Off by default: a running 3 GB Mac filled 512 MB about once a minute on an iPhone 15 Plus (each time
-    /// every translation is thrown away and redone), and had over 2 GB to spare below Henge's limit.
-    /// Turn it on for an install of a 4 GB Mac, which is what ran out of memory before (#13).
+    /// On by default with about 6 GB. The region is claimed whole when JIT turns on, so its size is real memory
+    /// from then on: with 1 GB, Henge took 2.85 GB with a 3 GB Mac on an iPhone 15 Plus, iOS thrashed its
+    /// compressor and killed Henge within four minutes. With 512 MB it took 1.6-1.9 GB and ran.
     static var smallCodeRegion: Bool { UserDefaults.standard.object(forKey: smallCodeRegionKey) as? Bool ?? smallCodeRegionByDefault }
-    /// Until a Mac is installed on a device with about 6 GB: the region is claimed when Henge opens, and an install
-    /// is when memory is tightest. Once there is a Mac to run, the full region.
-    static var smallCodeRegionByDefault: Bool { hasLittleMemory && !Machines.anyInstalled }
+    static var smallCodeRegionByDefault: Bool { hasLittleMemory }
     /// During a restore only: the Mac's memory in a file iOS can write out, instead of memory only its compressor can squeeze.
     static var ramOnStorage: Bool { setting(ramOnStorageKey) }
 

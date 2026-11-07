@@ -45,7 +45,7 @@ struct SettingsView: View {
                     LabeledContent("This \(Device.name)'s memory", value: ByteText.string(ProcessInfo.processInfo.physicalMemory))
                     Toggle("Smaller code region (512 MB)", isOn: $smallCodeRegion)
                     Toggle("Keep the Mac's memory on storage while installing", isOn: $ramOnStorage)
-                    Text("The smaller code region is slower but holds 512 MB less: turn it on if Henge is closed for memory, or to install a 4 GB Mac. It changes the next time Henge opens. Memory on storage is on by default with about 6 GB, for installs only; a running Mac always keeps its memory in RAM.")
+                    Text("The smaller code region holds 512 MB less: it is on by default with about 6 GB, where the full one runs the device out of memory. It changes the next time Henge opens. Memory on storage is on by default with about 6 GB, for installs only; a running Mac always keeps its memory in RAM.")
                         .font(.footnote).foregroundStyle(.secondary)
                     LabeledContent("Henge's limit", value: ByteText.string(UInt64(Entitlements.memoryLimitAtLaunch)))
                     LabeledContent("Free for Henge", value: ByteText.string(UInt64(henge_available_memory())))
