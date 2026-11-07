@@ -34,6 +34,8 @@
 #define VMAPPLE_AES_1      0x30220000ull
 #define VMAPPLE_AES_2      0x30230000ull
 #define VMAPPLE_RTC_SELECT 0x30240000ull /* not in QEMU's map; see vmapple.c */
+#define VMAPPLE_CTRR       0x30260000ull /* macOS 27: avp-ctrr, the kernel text lock's information and registers */
+#define VMAPPLE_SEALED     0x30270000ull /* macOS 27: avp-sealed-registers */
 #define VMAPPLE_PCIE_ECAM  0x40000000ull
 #define VMAPPLE_PCIE_MMIO  0x50000000ull
 #define VMAPPLE_MEM        0x70000000ull

@@ -20,7 +20,8 @@
 #define REG_NEXT_DEVICE 0x420
 #define REG_UNK3 0x434
 
-#define DATA_FLAGS_READ 0x00030001u
+#define DATA_FLAGS_READ 0x00030001u  /* the data buffer is written by the device: a read from the disk */
+#define DATA_FLAGS_WRITE 0x00010001u /* read by the device: a write to the disk (macOS 27's iBSS writes aux sector 32768) */
 #define MAX_LEN (128u << 20)
 
 /* A request, in guest memory: three (addr, len, flags) commands. */
@@ -162,13 +163,17 @@ static void command(HvBdif *b, HvDisk *disk, uint64_t req_pa) {
     if (hv_phys_read(b->m, req_pa, req, sizeof req) != 0) return;
     if (disk && req[0].len == 16) {
         uint32_t sector[4];
-        if (hv_phys_read(b->m, req[0].addr, sector, sizeof sector) == 0 && req[1].len <= MAX_LEN &&
-            req[1].flags == DATA_FLAGS_READ) {
-            void *dst = hv_phys_ptr(b->m, req[1].addr, req[1].len);
-            if (dst && hv_disk_read(disk, (uint64_t)sector[2] * 512, dst, req[1].len) == 0) ret = 0, hv_dma_written(b->m, req[1].addr, req[1].len);
+        if (hv_phys_read(b->m, req[0].addr, sector, sizeof sector) == 0 && req[1].len <= MAX_LEN) {
+            void *buf = hv_phys_ptr(b->m, req[1].addr, req[1].len);
+            uint64_t at = (uint64_t)sector[2] * 512;
+            if (buf && req[1].flags == DATA_FLAGS_READ) {
+                if (hv_disk_read(disk, at, buf, req[1].len) == 0) ret = 0, hv_dma_written(b->m, req[1].addr, req[1].len);
+            } else if (buf && req[1].flags == DATA_FLAGS_WRITE) {
+                if (hv_disk_write(disk, at, buf, req[1].len) == 0) ret = 0;
+            }
         }
     }
-    if (b->m->log >= 2) {
+    if (b->m->log >= 2 || ret) {
         uint32_t sector[4] = {0};
         hv_phys_read(b->m, req[0].addr, sector, sizeof sector);
         fprintf(stderr, "bdif %s: sector %u len %u flags %x -> %s\n", disk == b->aux ? "aux" : "root", sector[2],
