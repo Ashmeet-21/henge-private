@@ -62,6 +62,9 @@ void hv_vm_cpu_qos(void);
 int hv_vm_run_cpu0(void);
 /* Stop at the next block; the CPUs' threads end. */
 void hv_vm_stop(void);
+/* Press and release the Mac's power button (PL061 pin 3, as QEMU's vmapple wires it): macOS
+   shuts itself down and saves its disk. Blocks for the length of the press. */
+void hv_vm_power_button(void);
 void hv_vm_flush_disks(void);
 const char *hv_vm_reason_name(int reason);
 

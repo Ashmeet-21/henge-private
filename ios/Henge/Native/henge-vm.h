@@ -27,6 +27,8 @@ int henge_vm_state(void);
 /* Why it stopped (an HV_EXIT_* name), once state is 2. */
 const char *henge_vm_exit_reason(void);
 void henge_vm_stop(void);
+/* Asks macOS to shut down, as the power button does. Blocks for about 0.2 s. */
+void henge_vm_power_button(void);
 
 /* Progress, for the session screen. */
 uint64_t henge_vm_blocks(void);            /* blocks the CPUs entered */

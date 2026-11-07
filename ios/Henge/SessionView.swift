@@ -23,6 +23,7 @@ struct SessionView: View {
     @State private var zoomed = false
     @State private var showDetails = false
     @State private var confirmStop = false
+    @State private var shuttingDown = false   // macOS was asked to shut down: close once it has
     @State private var zoomCentre = CGPoint(x: 0.5, y: 0.5) // where the zoomed view is, 0...1 of the Mac's screen
     @State private var map: UIImage?
     @State private var zoomFollowing: Task<Void, Never>?
@@ -88,9 +89,12 @@ struct SessionView: View {
         .preferredColorScheme(.dark)
         .sheet(isPresented: $showDetails) { details }
         .confirmationDialog("Shut down \(mac.name)?", isPresented: $confirmStop, titleVisibility: .visible) {
-            Button("Shut Down", role: .destructive) { finish() }
+            Button("Shut Down") { requestShutdown() }
+            Button("Force Off", role: .destructive) { finish() }
         } message: {
-            Text("This turns the Mac off at once. Anything not saved on it is lost.")
+            Text(shuttingDown
+                 ? "macOS is shutting down. Force Off cuts the power at once, for a Mac that no longer responds."
+                 : "Shut Down asks macOS to shut down, like a Mac's power button, and closes when it has. Force Off cuts the power at once: anything not saved is lost.")
         }
         .onChange(of: zoomed) { on in
             zoomFollowing?.cancel()
@@ -449,7 +453,10 @@ struct SessionView: View {
             framesIn = henge_vm_net_frames(0)
             helperRunning = Sharing.helperRunning
             log = Array(HengeLog.recentLines(200))
-            if state == 2 { break }
+            if state == 2 {
+                if shuttingDown { close() }
+                break
+            }
             tick += 1
             if tick % 30 == 0 { HengeLog.logFootprint("session") } // how close to the limit, for a memory kill leaves no crash report
             if tick % 60 == 0 { MacPreview.save(for: mac) }
@@ -459,6 +466,14 @@ struct SessionView: View {
 
     private func stopTapped() {
         if state == 1 { confirmStop = true } else { close() }
+    }
+
+    private func requestShutdown() {
+        guard state == 1 else { return close() }
+        MacPreview.saveNow(for: mac)
+        shuttingDown = true
+        HengeLog.log("session", "power button: asking macOS to shut down")
+        Task.detached { henge_vm_power_button() }
     }
 
     private func finish() {

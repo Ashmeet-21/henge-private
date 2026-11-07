@@ -351,6 +351,19 @@ void hv_vm_start(int cpu0, void (*on_exit)(int reason)) {
     pthread_create(&t, NULL, kicker_thread, NULL);
 }
 
+void hv_vm_power_button(void) {
+    if (!board.gpio) return;
+    hv_dev_lock(&m);
+    hv_pl061_set_input(board.gpio, 3, 1);
+    hv_dev_unlock(&m);
+    hv_machine_wake(&m);
+    usleep(200000); /* QEMU's gpio-key holds the line for 100 ms */
+    hv_dev_lock(&m);
+    hv_pl061_set_input(board.gpio, 3, 0);
+    hv_dev_unlock(&m);
+    hv_machine_wake(&m);
+}
+
 void hv_vm_stop(void) {
     for (int i = 0; i < ncpus; i++) cpus[i].halted = 3; /* the dispatchers stop at the next block */
     hv_machine_kick_all(&m);
