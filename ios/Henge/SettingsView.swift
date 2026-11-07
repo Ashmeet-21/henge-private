@@ -6,7 +6,7 @@ struct SettingsView: View {
     @AppStorage(HardwareMouse.speedKey) private var mouseSpeed = 1.0
     @AppStorage(HardwareMouse.reverseKey) private var reverseScrolling = false
     @AppStorage(Trackpad.scrollSpeedKey) private var trackpadScroll = Trackpad.defaultScrollSpeed
-    @AppStorage(Device.smallCodeRegionKey) private var smallCodeRegion = false
+    @AppStorage(Device.smallCodeRegionKey) private var smallCodeRegion = Device.smallCodeRegionByDefault
     @AppStorage(Device.ramOnStorageKey) private var ramOnStorage = Device.hasLittleMemory
     @AppStorage(EngineTuning.fastFlushKey) private var fastFlush = true
     @AppStorage(EngineTuning.wfiSpinKey) private var wfiSpin = false

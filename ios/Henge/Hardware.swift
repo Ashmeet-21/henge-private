@@ -31,7 +31,8 @@ enum Device {
     /// How much memory to suggest for a new Mac: what leaves this device room for iOS.
     static var suggestedRAMGB: Int {
         let mb = ProcessInfo.processInfo.physicalMemory >> 20
-        return mb >= 10_000 ? 8 : mb >= 7_000 ? 6 : 4
+        // About 6 GB: a 4 GB Mac ran the phone out of memory once booted (jetsam vm-pageshortage); 3 GB ran.
+        return mb >= 10_000 ? 8 : mb >= 7_000 ? 6 : 3
     }
 
     /// A device with about 6 GB (A14, A15 and A16 iPads and iPhones). iOS has no swap on these, so a 4 GB
@@ -47,7 +48,10 @@ enum Device {
     /// Off by default: a running 3 GB Mac filled 512 MB about once a minute on an iPhone 15 Plus (each time
     /// every translation is thrown away and redone), and had over 2 GB to spare below Henge's limit.
     /// Turn it on for an install of a 4 GB Mac, which is what ran out of memory before (#13).
-    static var smallCodeRegion: Bool { UserDefaults.standard.object(forKey: smallCodeRegionKey) as? Bool ?? false }
+    static var smallCodeRegion: Bool { UserDefaults.standard.object(forKey: smallCodeRegionKey) as? Bool ?? smallCodeRegionByDefault }
+    /// Until a Mac is installed on a device with about 6 GB: the region is claimed when Henge opens, and an install
+    /// is when memory is tightest. Once there is a Mac to run, the full region.
+    static var smallCodeRegionByDefault: Bool { hasLittleMemory && !Machines.anyInstalled }
     /// During a restore only: the Mac's memory in a file iOS can write out, instead of memory only its compressor can squeeze.
     static var ramOnStorage: Bool { setting(ramOnStorageKey) }
 
