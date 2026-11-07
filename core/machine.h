@@ -178,6 +178,8 @@ typedef struct HvPerCpu {
     uint32_t ijc_seq;            /* odd while it checks a block's mapping in its TLB and caches it (hv_ijc_fill_checked) */
     HvTlbStash stash[HV_STASHES];
     uint64_t stash_clock;
+    /* The Mach thread running this CPU, so a CPU waiting for its acks can hand it the processor. */
+    unsigned int thread_port;
 } HvPerCpu;
 
 #define HV_REQ_TLB_ALL 1u   /* drop the whole TLB and branch cache */

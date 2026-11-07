@@ -1,6 +1,8 @@
 #include "machine.h"
 
 #include <mach/mach_time.h>
+#include <mach/thread_switch.h>
+#include <pthread.h>
 #include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -176,7 +178,14 @@ void hv_cpu_sync(HvCpu *self, HvCpu *target, uint64_t seq) {
         if (__atomic_load_n(&t->ack_seq, __ATOMIC_ACQUIRE) >= seq) break;
         if (!__atomic_load_n(&t->tlb_live, __ATOMIC_SEQ_CST)) break; /* parked: it does the work before it runs again */
         if (self) hv_cpu_process_requests(self);
-        if (spins > 200) sched_yield();
+        /* Still not acked: the target is most likely not running (iOS gives a phone's few fast
+           cores to other threads), so a plain yield leaves it waiting its turn. Hand it this
+           processor instead; when it is already running elsewhere this is just a yield. */
+        if (spins > 64) {
+            mach_port_t th = (mach_port_t)__atomic_load_n(&t->thread_port, __ATOMIC_ACQUIRE);
+            if (th) thread_switch(th, SWITCH_OPTION_NONE, 0);
+            else sched_yield();
+        }
     }
     if (s) {
         __atomic_store_n(&s->tlb_live, 1, __ATOMIC_SEQ_CST);

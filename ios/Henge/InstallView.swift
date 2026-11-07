@@ -13,7 +13,7 @@ struct InstallView: View {
     @State private var stageStarted = Date()
     @State private var stageSeen = -1
     @State private var confirmDeleteDownload: MacOSRelease?
-    @AppStorage("henge.cpus") private var cpus = 4
+    @AppStorage("henge.cpus") private var cpus = Device.defaultCPUs
 
     var body: some View {
         NavigationStack {

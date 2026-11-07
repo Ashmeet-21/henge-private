@@ -17,7 +17,7 @@ struct SessionView: View {
     @State private var framesIn: UInt64 = 0
     @State private var log: [String] = []
     @State private var started = Date()
-    @AppStorage("henge.cpus") private var cpus = 4
+    @AppStorage("henge.cpus") private var cpus = Device.defaultCPUs
 
     @State private var typing = false
     @State private var zoomed = false

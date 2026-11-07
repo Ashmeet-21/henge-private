@@ -7,7 +7,7 @@ struct MacSettingsView: View {
     @State private var mac: VirtualMac
     @State private var confirmDelete = false
     @State private var movingExport = false
-    @AppStorage("henge.cpus") private var cpus = 4
+    @AppStorage("henge.cpus") private var cpus = Device.defaultCPUs
 
     init(mac: VirtualMac) { _mac = State(initialValue: mac) }
 

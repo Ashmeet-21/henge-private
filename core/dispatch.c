@@ -884,6 +884,7 @@ static int run_loop(HvCpu *cpu, int one) {
     uint32_t chain_flags = 0;
     uint32_t last_reason = HV_EXIT_BRANCH;
     hv_self = cpu;
+    __atomic_store_n(&cpu->pc_state->thread_port, (unsigned int)pthread_mach_thread_np(pthread_self()), __ATOMIC_RELEASE);
     unpark(cpu);
     for (;;) {
         if (__atomic_load_n(&m->flush_pending, __ATOMIC_SEQ_CST) || __atomic_load_n(&m->stw_active, __ATOMIC_SEQ_CST)) {

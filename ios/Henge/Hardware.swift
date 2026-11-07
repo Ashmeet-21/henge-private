@@ -48,6 +48,10 @@ enum Device {
     /// During a restore only: the Mac's memory in a file iOS can write out, instead of memory only its compressor can squeeze.
     static var ramOnStorage: Bool { setting(ramOnStorageKey) }
 
+    /// CPUs for a new Mac. A phone with about 6 GB has two fast cores: a third or fourth virtual CPU lands on
+    /// a slow one, and every CPU then waits on the slowest whenever page tables change.
+    static var defaultCPUs: Int { hasLittleMemory ? 2 : 4 }
+
     /// The sizes offered for a Mac's memory.
     static var memoryChoices: [Int] { hasLittleMemory ? [3, 4, 6] : [4, 6, 8] }
 
