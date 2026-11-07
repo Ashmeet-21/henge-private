@@ -270,6 +270,25 @@ static void descriptor_common(MTLTextureDescriptor *t, uint8_t flags, uint16_t o
     t.resourceOptions = o;
 }
 
+/* Metal aborts the whole app on a swizzle channel outside 0...5 (seen as 193 when a surface's description was
+   read short, see makeMappedTexture), so an unknown one falls back to the identity, logged a few times. */
+static MTLTextureSwizzleChannels safe_swizzle(const uint8_t *sw, const uint8_t *desc, size_t desc_len, const char *what) {
+    if (!(sw[0] | sw[1] | sw[2] | sw[3])) /* all Zero: never meant, it would draw nothing; an unread field */
+        return MTLTextureSwizzleChannelsMake(MTLTextureSwizzleRed, MTLTextureSwizzleGreen, MTLTextureSwizzleBlue, MTLTextureSwizzleAlpha);
+    for (int i = 0; i < 4; i++) {
+        if (sw[i] > MTLTextureSwizzleAlpha) {
+            static int told;
+            if (told++ < 3) {
+                fprintf(stderr, "hengevm: pvg-metal: %s swizzle %u %u %u %u is not a Metal swizzle; using RGBA. desc:", what, sw[0], sw[1], sw[2], sw[3]);
+                for (size_t j = 0; j < desc_len; j++) fprintf(stderr, " %02x", desc[j]);
+                fputc('\n', stderr);
+            }
+            return MTLTextureSwizzleChannelsMake(MTLTextureSwizzleRed, MTLTextureSwizzleGreen, MTLTextureSwizzleBlue, MTLTextureSwizzleAlpha);
+        }
+    }
+    return MTLTextureSwizzleChannelsMake(sw[0], sw[1], sw[2], sw[3]);
+}
+
 /* The two serialized forms of a texture description. */
 static MTLTextureDescriptor *descriptor_v1(const uint8_t *d) {
     MTLTextureDescriptor *t = [MTLTextureDescriptor new];
@@ -298,7 +317,9 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
     t.width = w, t.height = h, t.depth = depth;
     t.mipmapLevelCount = mips, t.sampleCount = samples, t.arrayLength = array;
     descriptor_common(t, d[0], options);
-    t.swizzle = MTLTextureSwizzleChannelsMake(d[0x23], d[0x24], d[0x25], d[0x26]);
+    t.swizzle = safe_swizzle(d + 0x23, d, 0x27, "texture");
+    if (t.usage & MTLTextureUsageRenderTarget) /* Metal aborts on a swizzled render target */
+        t.swizzle = MTLTextureSwizzleChannelsMake(MTLTextureSwizzleRed, MTLTextureSwizzleGreen, MTLTextureSwizzleBlue, MTLTextureSwizzleAlpha);
     return t;
 }
 
@@ -548,7 +569,7 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
         if (h.tag == 7) o->object = [from newTextureViewWithPixelFormat:(MTLPixelFormat)v.format];
         else if (h.tag == 8) o->object = [from newTextureViewWithPixelFormat:(MTLPixelFormat)v.format textureType:(MTLTextureType)v.type levels:levels slices:slices];
         else o->object = [from newTextureViewWithPixelFormat:(MTLPixelFormat)v.format textureType:(MTLTextureType)v.type levels:levels slices:slices
-                                                     swizzle:MTLTextureSwizzleChannelsMake(v.swizzle[0], v.swizzle[1], v.swizzle[2], v.swizzle[3])];
+                                                     swizzle:safe_swizzle(v.swizzle, (const uint8_t *)&v, sizeof v, "view")];
         if (!o->object) [self complain:[NSString stringWithFormat:@"view tag %u of format %lu as %u failed", h.tag, (unsigned long)from.pixelFormat, v.format]];
         return;
     }
@@ -645,8 +666,16 @@ static void sync_iosurface(HvObject *s) {
    (physical >> 12, bit 0 present, one per 16 KB), first-page offset +0x60,
    allocation +0x18, bytes per row +0x30. */
 - (void)makeMappedTexture:(HvObject *)o at:(uint64_t)at task:(uint32_t)task {
-    struct __attribute__((packed)) { uint64_t mapping; uint32_t tag, size, ref; uint8_t d[32]; } h;
-    if (hv_pvg_lite_task_read(lite, task, at, &h, sizeof h)) return;
+    /* d holds a v2 description (tag 0x39, 0x38 bytes) whose swizzle sits at +0x23..0x26: with only 32 bytes
+       read those came from the stack, and macOS 27.2's first surface made Metal abort Henge (swizzle 193). */
+    struct __attribute__((packed)) { uint64_t mapping; uint32_t tag, size, ref; uint8_t d[64]; } h;
+    memset(&h, 0, sizeof h);
+    const uint32_t head = (uint32_t)offsetof(__typeof__(h), d);
+    if (hv_pvg_lite_task_read(lite, task, at, &h, head + 32)) return;
+    /* size is the description's own length (0x38 for a v2 one), after the header */
+    if (h.size > 32 && hv_pvg_lite_task_read(lite, task, at, &h, head + MIN(h.size, (uint32_t)sizeof h.d))) {
+        memset(h.d + 32, 0, sizeof h.d - 32); /* past the end of the task: keep what the first read had */
+    }
     NSNumber *key = @(h.mapping);
     HvObject *surface = surfaces[key];
     MTLTextureDescriptor *t = h.tag == 0x39 ? descriptor_v2(h.d) : descriptor_v1(h.d);
@@ -698,6 +727,14 @@ static void sync_iosurface(HvObject *s) {
     t.storageMode = MTLStorageModeShared;
     set_framebuffer_only(t, NO);
     t.usage |= MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+    /* Metal aborts on a swizzled render target, and a surface is always drawn into here: views over it
+       (tags 7/8/0x1b) can still swizzle. */
+    MTLTextureSwizzleChannels sw = t.swizzle;
+    if (sw.red != MTLTextureSwizzleRed || sw.green != MTLTextureSwizzleGreen || sw.blue != MTLTextureSwizzleBlue || sw.alpha != MTLTextureSwizzleAlpha) {
+        static int told;
+        if (told++ < 3) fprintf(stderr, "hengevm: pvg-metal: surface %llu asked for swizzle %u %u %u %u; drawing it unswizzled\n", h.mapping, sw.red, sw.green, sw.blue, sw.alpha);
+        t.swizzle = MTLTextureSwizzleChannelsMake(MTLTextureSwizzleRed, MTLTextureSwizzleGreen, MTLTextureSwizzleBlue, MTLTextureSwizzleAlpha);
+    }
     o->surface = surface;
     if (surface->iosurface) {
         o->object = [device newTextureWithDescriptor:t iosurface:surface->iosurface plane:0];
@@ -741,6 +778,11 @@ static void sync_iosurface(HvObject *s) {
     case OBJ_LINEAR_TEXTURE: case 9: [self makeLinearTexture:o at:at size:size task:task]; break;
     case 13: [self makeHeap:o at:at task:task]; break;
     case 14: [self makeHeapBuffer:o at:at task:task]; break;
+    case 19: /* macOS 27: a buffer, with the same {length, page, flags} entry as type 1 (16 KB ones seen). The guest
+                has object info (tags 450...) written into these, so leaving them out broke its argument buffers:
+                black layers, and "info 450 ... no buffer" over and over */
+        [self makeBuffer:o at:at task:task];
+        break;
     case 0: break; /* an empty slot */
     case OBJ_MAPPED_TEXTURE: [self makeMappedTexture:o at:at task:task]; break;
     default: {
@@ -1395,6 +1437,10 @@ typedef struct {
         else [e dispatchThreads:a threadsPerThreadgroup:b];
         break;
     }
+    case 216: /* {width, height} of the imageblock, 32x32 from macOS 27's glass and blur kernels: without it their
+                 imageblock memory is undefined, and toolbars came out black with coloured blocks */
+        if (r.size >= 8 && U32(0) && U32(4) && U32(0) <= 256 && U32(4) <= 256) [e setImageblockWidth:U32(0) height:U32(4)];
+        break;
     case 219: /* not a command the framework knows either, though the guest sends it */
         break;
     default:
@@ -1499,7 +1545,8 @@ typedef struct {
     uint8_t *out = to && to->mapped && off + 28 <= to->length ? to->mapped + off : NULL;
     id obj = [self get:ref task:task];
     if (!out || !obj) {
-        [self complain:[NSString stringWithFormat:@"info %u: ref %u buffer %u offset %llu: %s", tag, ref, bufref, off, out ? "no object" : "no buffer"]];
+        [self complain:[NSString stringWithFormat:@"info %u: ref %u buffer %u (%s, %llu bytes) offset %llu: %s", tag, ref, bufref,
+                        !to ? "unknown" : to->mapped ? "mapped" : "not mapped", to ? to->length : 0, off, out ? "no object" : "no buffer"]];
         return;
     }
     SEL index_sel = sel_registerName("resourceIndex");

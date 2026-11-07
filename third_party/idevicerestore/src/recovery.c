@@ -175,7 +175,11 @@ int recovery_enter_restore(struct idevicerestore_client_t* client, plist_t build
 	}
 
 	unsigned long radio_error = 0;
-	irecv_getenv(client->recovery->client, "radio-error", &value);
+	/* HengeVM: a virtual Mac has no radio, and macOS 27's iBEC (mBoot) panics answering a getenv of a
+	   variable it does not have (its cmd-results message overflows), so radio-error is not asked. */
+	value = NULL;
+	if (getenv("HV_ASK_RADIO_ERROR"))
+		irecv_getenv(client->recovery->client, "radio-error", &value);
 	if (value) {
 		radio_error = strtoul(value, NULL, 0);
 	}

@@ -92,6 +92,53 @@ static void rtc_select_write(void *opaque, uint64_t off, uint64_t v, unsigned si
                            (unsigned long long)VMAPPLE_RTC_SELECT, (unsigned long long)off, (unsigned long long)v, size);
 }
 
+/* macOS 27's virtual Mac (device tree: avp-ctrr at arm-io +0x20260000, avp-sealed-registers at +0x20270000).
+   iBEC (mBoot-20457) reads an information block from avp-ctrr before it locks the kernel's text, and panics
+   (4962211b03d706d:203) on a machine without one:
+     +0x00 magic 'ctrr' (0x63747272)   +0x04 version 1   +0x0c must be > 7   +0x10 must be < 15
+     +0x20, +0x28 the physical range the locked regions must lie in   +0x50, +0x70 must be 7
+   then programs region registers (+0x40.., +0xc0.., +0xd0). Nothing is enforced here: both devices are
+   plain registers that keep what is written, which is all the firmware can see of them. HV_AVP_LOG logs them. */
+typedef struct {
+    const char *name;
+    int log;
+    uint8_t regs[0x10000];
+} AvpRegs;
+
+static uint64_t avp_regs_read(void *opaque, uint64_t off, unsigned size) {
+    AvpRegs *r = opaque;
+    uint64_t v = 0;
+    if (off + size <= sizeof r->regs) memcpy(&v, r->regs + off, size);
+    if (r->log) fprintf(stderr, "hengevm: %s read +%llx (size %u) = %llx\n", r->name, (unsigned long long)off, size,
+                        (unsigned long long)v);
+    return v;
+}
+
+static void avp_regs_write(void *opaque, uint64_t off, uint64_t v, unsigned size) {
+    AvpRegs *r = opaque;
+    if (off + size <= sizeof r->regs) memcpy(r->regs + off, &v, size);
+    if (r->log) fprintf(stderr, "hengevm: %s write +%llx (size %u) = %llx\n", r->name, (unsigned long long)off, size,
+                        (unsigned long long)v);
+}
+
+static void avp_put(AvpRegs *r, uint64_t off, uint64_t v, unsigned size) { memcpy(r->regs + off, &v, size); }
+
+static void avp_regs_create(HvMachine *m, uint64_t ram_size) {
+    AvpRegs *ctrr = calloc(1, sizeof *ctrr), *sealed = calloc(1, sizeof *sealed);
+    ctrr->name = "avp-ctrr", sealed->name = "avp-sealed-registers";
+    ctrr->log = sealed->log = getenv("HV_AVP_LOG") != NULL;
+    avp_put(ctrr, 0x00, 0x63747272, 4);
+    avp_put(ctrr, 0x04, 1, 4);
+    avp_put(ctrr, 0x0c, 14, 4);
+    avp_put(ctrr, 0x10, 14, 4);
+    avp_put(ctrr, 0x20, VMAPPLE_MEM, 8);
+    avp_put(ctrr, 0x28, VMAPPLE_MEM + ram_size, 8);
+    avp_put(ctrr, 0x50, 7, 8);
+    avp_put(ctrr, 0x70, 7, 8);
+    hv_machine_add_mmio(m, VMAPPLE_CTRR, sizeof ctrr->regs, ctrr, avp_regs_read, avp_regs_write, "avp-ctrr");
+    hv_machine_add_mmio(m, VMAPPLE_SEALED, sizeof sealed->regs, sealed, avp_regs_read, avp_regs_write, "avp-sealed-registers");
+}
+
 /* The guest's device tree gives the GIC a third region (gic,vmapple1), and
    the kernel's AppleVirtualPlatformPCIEMSIController asserts that the type
    register at +0x8 has bit 31 ("valid") set. It splits the rest into two
@@ -250,6 +297,7 @@ int hv_vmapple_create(HvVmapple *b, HvMachine *m, HvCpu *cpu, uint64_t ram_size,
     hv_machine_add_mmio(m, VMAPPLE_PVPANIC, 2, b, pvpanic_read, pvpanic_write, "pvpanic");
     b->pvg = hv_pvg_lite_create(m, b->gic, VMAPPLE_GFX, VMAPPLE_IOSFC, 32 + 0x11, 32 + 0x10);
     hv_machine_add_mmio(m, VMAPPLE_RTC_SELECT, 0x4000, b, rtc_select_read, rtc_select_write, "rtc-select");
+    avp_regs_create(m, ram_size);
     HvCfgParams p = *cfg;
     p.ram_size = ram_size;
     b->cfg = hv_cfg_create(m, VMAPPLE_CONFIG, &p);
