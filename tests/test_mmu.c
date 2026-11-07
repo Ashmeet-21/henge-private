@@ -204,6 +204,44 @@ int main(void) {
         }
     }
 
+    /* A big kernel-range TLBI drops the kernel pages in the range and keeps the rest, the processes' entries included
+       (it used to flush everything). 512 pages goes page by page, 6144 pages by a scan. */
+    {
+        static const struct { uint32_t scale, num, pages; } ranges[2] = {{1, 7, 512}, {2, 2, 6144}};
+        const uint64_t base = 0xfffffe0040000000ull;
+        for (int r = 0; r < 2; r++) {
+            hv_tlb_flush(&cpu);
+            const int32_t ks[6] = {0, 1, (int32_t)ranges[r].pages / 2, (int32_t)ranges[r].pages - 1, (int32_t)ranges[r].pages, (int32_t)ranges[r].pages + 300};
+            for (int k = 0; k < 6; k++) {
+                uint64_t va = base + ((uint64_t)ks[k] << 14);
+                HvTlbEntry *t = hv_tlb_ent(&cpu, (va >> 14) & (HV_TLB_SIZE - 1), 1);
+                t->read_tag = va - HV_TLB_ADJ;
+                t->addend = 0;
+            }
+            uint64_t uva = 0x100000000ull + ((uint64_t)7000 << 14); /* a process's page, in a slot outside the range's */
+            HvTlbEntry *u = hv_tlb_ent(&cpu, (uva >> 14) & (HV_TLB_SIZE - 1), 0);
+            u->read_tag = uva - HV_TLB_ADJ;
+            u->addend = 0;
+            cpu.el = 1;
+            cpu.x[1] = 0ull << 48 | 2ull << 46 | (uint64_t)ranges[r].scale << 44 | (uint64_t)ranges[r].num << 39 | ((base >> 14) & 0x1fffffffffull);
+            hv_sysreg_sys(&cpu, 0xd5088221u, 0); /* tlbi rvae1is, x1 */
+            for (int k = 0; k < 6; k++) {
+                uint64_t va = base + ((uint64_t)ks[k] << 14);
+                int dropped = hv_tlb_ent(&cpu, (va >> 14) & (HV_TLB_SIZE - 1), 1)->read_tag == HV_TLB_INVALID;
+                checks++;
+                if (dropped != (ks[k] < (int32_t)ranges[r].pages)) {
+                    printf("  FAIL big kernel range %u pages, page %d: %s\n", ranges[r].pages, ks[k], dropped ? "dropped" : "kept");
+                    failures++;
+                }
+            }
+            checks++;
+            if (hv_tlb_ent(&cpu, (uva >> 14) & (HV_TLB_SIZE - 1), 0)->read_tag == HV_TLB_INVALID) {
+                printf("  FAIL big kernel range %u pages dropped a process's entry\n", ranges[r].pages);
+                failures++;
+            }
+        }
+    }
+
     /* A TLBI by VA and ASID forgets the indirect-branch cache entries of that page
        for that address space, and nothing else. Entries are filled the way the dispatcher does it. */
     {
