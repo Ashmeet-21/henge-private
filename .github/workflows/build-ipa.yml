@@ -36,6 +36,7 @@ jobs:
           ios/scripts/fetch_deps.sh
           tools/build_ios_restore.sh
           make ios-lib IOS_DEPS="$IOS_DEPS"
+          mkdir -p ios/build
           ios/scripts/package_ipa.sh
       - name: Build log on failure
         if: failure()
