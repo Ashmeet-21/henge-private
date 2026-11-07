@@ -41,6 +41,7 @@ void hv_flush_blocks(HvMachine *m) {
         memset(r->chain_heads, 0, pages * sizeof *r->chain_heads);
     }
     hv_jit_reset(&m->jit);
+    m->jit.limit = hv_knob[HV_K_JITCAP] > 0 ? ((size_t)hv_knob[HV_K_JITCAP] << 20) / sizeof(uint32_t) : 0; /* MB of it to use (testing) */
     /* HV_JIT_POISON: nothing old is left to run, so a stale pointer faults where it is used. */
     static int poison = -1;
     if (poison < 0) poison = getenv("HV_JIT_POISON") != NULL;
