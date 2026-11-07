@@ -32,7 +32,7 @@ struct MacSettingsView: View {
                             .font(.system(size: 13)).foregroundStyle(Desk.dim).multilineTextAlignment(.trailing)
                     }
                     Picker("Memory", selection: Binding(get: { mac.ramMB / 1024 }, set: { mac.ramMB = $0 * 1024; save() })) {
-                        ForEach([4, 6, 8], id: \.self) { Text("\($0) GB").tag($0) }
+                        ForEach(Device.memoryChoices, id: \.self) { Text("\($0) GB").tag($0) }
                     }
                     .pickerStyle(.segmented)
                 }

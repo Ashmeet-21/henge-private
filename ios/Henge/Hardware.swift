@@ -22,6 +22,23 @@ enum Device {
         return mb >= 10_000 ? 8 : mb >= 7_000 ? 6 : 4
     }
 
+    /// A device with about 6 GB (A14, A15 and A16 iPads and iPhones). iOS has no swap on these, so a 4 GB
+    /// Mac plus the 1 GB code region can run the whole system out of memory (a restore killed by jetsam, #13).
+    static let hasLittleMemory = ProcessInfo.processInfo.physicalMemory >> 20 < 7_000
+    static let smallCodeRegionKey = "henge.lowmem.smallCodeRegion"
+    static let ramOnStorageKey = "henge.lowmem.ramOnStorage"
+
+    private static func setting(_ key: String) -> Bool {
+        UserDefaults.standard.object(forKey: key) as? Bool ?? hasLittleMemory
+    }
+    /// Half the code region: the translator flushes more often, which is slower but holds 512 MB less.
+    static var smallCodeRegion: Bool { setting(smallCodeRegionKey) }
+    /// The Mac's memory in a file iOS can write out, instead of memory only its compressor can squeeze.
+    static var ramOnStorage: Bool { setting(ramOnStorageKey) }
+
+    /// The sizes offered for a Mac's memory.
+    static var memoryChoices: [Int] { hasLittleMemory ? [3, 4, 6] : [4, 6, 8] }
+
     /// The virtual CPU offers Armv8.5 instructions (core/sysreg.c), and macOS uses them. They run as
     /// they are, so the chip needs them too: A14, M1 and later, which is iPhone13,x and iPad13,x up.
     static let chipTooOld: Bool = {

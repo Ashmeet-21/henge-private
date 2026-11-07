@@ -5,6 +5,8 @@ struct SettingsView: View {
     @AppStorage(JITCoordinator.autoEnableKey) private var jitAtLaunch = false
     @AppStorage(HardwareMouse.speedKey) private var mouseSpeed = 1.0
     @AppStorage(HardwareMouse.reverseKey) private var reverseScrolling = false
+    @AppStorage(Device.smallCodeRegionKey) private var smallCodeRegion = Device.hasLittleMemory
+    @AppStorage(Device.ramOnStorageKey) private var ramOnStorage = Device.hasLittleMemory
 
     var body: some View {
         NavigationStack {
@@ -27,6 +29,12 @@ struct SettingsView: View {
                 .listRowBackground(Desk.card)
                 Section("Memory") {
                     LabeledContent("Extra memory", value: Entitlements.increasedMemory ? "On" : "Off")
+                    LabeledContent("Extended addressing", value: Entitlements.extendedAddressing ? "On" : "Off")
+                    LabeledContent("This \(Device.name)'s memory", value: ByteText.string(ProcessInfo.processInfo.physicalMemory))
+                    Toggle("Smaller code region (512 MB)", isOn: $smallCodeRegion)
+                    Toggle("Keep the Mac's memory on storage", isOn: $ramOnStorage)
+                    Text("Both are on by default with about 6 GB of memory, and slower, with more writes to storage. The code region changes the next time Henge opens; the other, the next time a Mac starts or installs.")
+                        .font(.footnote).foregroundStyle(.secondary)
                     LabeledContent("Henge's limit", value: ByteText.string(UInt64(Entitlements.memoryLimitAtLaunch)))
                     LabeledContent("Free for Henge", value: ByteText.string(UInt64(henge_available_memory())))
                     Text(Entitlements.increasedMemory

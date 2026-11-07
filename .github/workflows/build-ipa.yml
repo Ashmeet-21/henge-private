@@ -1,0 +1,50 @@
+# Builds Henge.ipa on a Mac runner, for people without a Mac. The sideloader signs it.
+# Follows the README's Building section, with Husk's prebuilt pieces built from source.
+name: Build IPA
+on:
+  workflow_dispatch:
+  push:
+    branches: [ipad-a16-lowmem]
+
+jobs:
+  ipa:
+    runs-on: xcode-27
+    timeout-minutes: 90
+    env:
+      HUSK: ${{ github.workspace }}/husk
+      IOS_DEPS: ${{ github.workspace }}/husk/build/ios-arm64/sysroot
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Leviidev/Husk
+          path: husk
+      - name: Tools
+        run: |
+          brew install xcodegen meson ninja pkg-config cmake nasm autoconf automake libtool bison gettext
+          rustup target add aarch64-apple-ios || { brew install rustup && rustup-init -y && . "$HOME/.cargo/env" && rustup target add aarch64-apple-ios; }
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          mkdir -p "$HOME/Desktop"
+      - name: Husk dependencies (libslirp, glib, on-device pairing)
+        working-directory: husk
+        run: |
+          ./scripts/fetch_sources.sh
+          ./scripts/build_ios.sh libffi glib libslirp
+          ./scripts/build_rppairing_ios.sh
+      - name: Henge
+        run: |
+          ios/scripts/fetch_deps.sh
+          tools/build_ios_restore.sh
+          make ios-lib IOS_DEPS="$IOS_DEPS"
+          ios/scripts/package_ipa.sh
+      - name: Build log on failure
+        if: failure()
+        run: |
+          grep -E "error:|BUILD" ios/build/DerivedData.buildlog | sort -u | tail -40 || true
+          tail -30 husk/build/logs/*.log || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Henge-ipa
+          path: ~/Desktop/Henge.ipa
+          if-no-files-found: error
+          retention-days: 30

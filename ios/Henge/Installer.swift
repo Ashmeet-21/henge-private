@@ -196,10 +196,14 @@ final class Installer: NSObject, ObservableObject {
         let rc = henge_vm_install(mac.rom.path, mac.disk.path, mac.aux.path, mac.ecid, ipsw.path, work.path, ram, Int32(cpus),
                                   &buffer, buffer.count)
         if rc != 0 { throw message(String(cString: buffer)) }
+        var seconds = 0
         while true {
             try await Task.sleep(nanoseconds: 1_000_000_000)
             step = Int(henge_install_step())
             stepProgress = henge_install_progress()
+            // Jetsam's SIGKILL leaves no trace, so the log has to show the way there.
+            seconds += 1
+            if seconds % 15 == 0 { HengeLog.logFootprint("install step \(step)") }
             if step == 100 { break }
             if step == 101 { throw message("The restore failed. The log (Settings, or Documents/henge.log) says why.") }
             if henge_vm_state() == 2 && step < 100 {

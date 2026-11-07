@@ -33,12 +33,21 @@ enum GuestMemory {
     static func prepare(_ mac: VirtualMac) -> UInt64 {
         let file = mac.directory.appendingPathComponent("ram.tmp")
         setenv("HV_RAM_FILE", file.path, 1)
+        if Device.ramOnStorage {
+            // Not the footprint-free memory: only the compressor can make room in that. Pages come in as the
+            // guest touches them, since going over the whole file first would dirty all of it at once.
+            setenv("HV_RAM_NO_LEDGER", "1", 1)
+            setenv("HV_RAM_NO_PREFAULT", "1", 1)
+        } else {
+            unsetenv("HV_RAM_NO_LEDGER")
+            unsetenv("HV_RAM_NO_PREFAULT")
+        }
         let free = (try? mac.directory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
             .volumeAvailableCapacityForImportantUsage ?? 0
         let room = free > 0 ? UInt64(max(free - (2 << 30), 0)) >> 20 : UInt64.max
         let reach = henge_largest_mapping_mb()
         let ram = min(UInt64(mac.ramMB), room, reach > 512 ? reach - 512 : 0) / 512 * 512
-        HengeLog.log("session", "guest RAM \(ram) MB (asked \(mac.ramMB), disk room \(room), largest mapping \(reach))")
+        HengeLog.log("session", "guest RAM \(ram) MB (asked \(mac.ramMB), disk room \(room), largest mapping \(reach), on storage \(Device.ramOnStorage))")
         return ram
     }
 }

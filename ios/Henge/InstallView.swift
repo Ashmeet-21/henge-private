@@ -72,7 +72,7 @@ struct InstallView: View {
                 Text("Memory").font(.system(size: 16))
                 Spacer()
                 Picker("Memory", selection: $ramGB) {
-                    ForEach([4, 6, 8], id: \.self) { Text("\($0) GB").tag($0) }
+                    ForEach(Device.memoryChoices, id: \.self) { Text("\($0) GB").tag($0) }
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 190)
@@ -99,6 +99,13 @@ struct InstallView: View {
             .foregroundStyle(Desk.dim)
             .multilineTextAlignment(.center)
             .padding(.top, 10)
+        if !Entitlements.extendedAddressing {
+            Text("This install isn't signed with extended addressing, and iOS may refuse the Mac's memory after the download. Check before downloading 17 GB.")
+                .font(.system(size: 13))
+                .foregroundStyle(Desk.dim)
+                .multilineTextAlignment(.center)
+                .padding(.top, 6)
+        }
     }
 
     private func versionRow(_ r: MacOSRelease) -> some View {
