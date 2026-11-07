@@ -152,6 +152,7 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     uint64_t layer_generation;
     __weak CAMetalLayer *prepared_layer; /* presenter only: each target needs its own setup */
     id<MTLRenderPipelineState> screen_pipe, linear_pipe, cursor_pipe;
+    id<MTLFunction> stand_in; /* computeStandIn */
     id<MTLTexture> cursor_tex;
     id<MTLSamplerState> screen_sampler, cursor_sampler;
     uint64_t on_screen; /* the mapping showing */
@@ -186,6 +187,7 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     __unsafe_unretained HvReplay *replay;
     uint32_t task;
     NSString *failure;
+    id standIn; /* what a failed function lookup returns: nil, except for compute pipelines (makeSerialized) */
 }
 @end
 
@@ -357,7 +359,7 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
     HvObject *o = [replay object:(uint32_t)ref task:task];
     if (!o || !o->object) {
         if (!failure) failure = [NSString stringWithFormat:@"function %llu", ref];
-        return nil;
+        return standIn;
     }
     return o->object;
 }
@@ -371,7 +373,25 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
     fprintf(stderr, "hengevm: pvg-metal: %s\n", what.UTF8String);
 }
 
+/* A kernel that does nothing. Metal's deserializer aborts the whole app when a compute pipeline's function is nil, which
+   happens when this OS cannot load the library macOS sent ("This library format is not supported on this platform", seen on
+   iPadOS 17 with macOS 15). The lookup has failed either way, so makeSerialized drops the pipeline: a missing effect, not a
+   crash. */
+- (id)computeStandIn {
+    if (!stand_in) {
+        NSError *err = nil;
+        id<MTLLibrary> lib = [device newLibraryWithSource:@"#include <metal_stdlib>\nkernel void hv_stand_in() {}\n" options:nil error:&err];
+        stand_in = [lib newFunctionWithName:@"hv_stand_in"];
+        if (!stand_in) [self complain:[NSString stringWithFormat:@"stand-in kernel: %@", err.localizedDescription]];
+    }
+    return stand_in;
+}
+
 - (id)makeFunction:(uint64_t)at task:(uint32_t)task {
+    if (getenv("HV_PVG_FAIL_LIBS")) { /* testing: every library refused, as an OS that cannot load them does */
+        [self complain:@"library: refused (HV_PVG_FAIL_LIBS)"];
+        return nil;
+    }
     struct __attribute__((packed)) { uint64_t off; uint32_t len; uint32_t tag, size; } h;
     if (hv_pvg_lite_task_read(lite, task, at, &h, sizeof h)) return nil;
     NSMutableData *lib = [NSMutableData dataWithLength:h.len];
@@ -438,6 +458,7 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
         HvContext *ctx = [HvContext new];
         ctx->replay = self, ctx->task = task;
         dispatch_data_t data = dispatch_data_create((const uint8_t *)all.bytes + 16, w[3], NULL, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+        ctx->standIn = [self computeStandIn];
         id descriptor = [spi newComputePipelineDescriptorWithSerializedData:data deserializationContext:ctx];
         if (!descriptor || ctx->failure) {
             [self complain:[NSString stringWithFormat:@"compute descriptor: %@", ctx->failure]];
