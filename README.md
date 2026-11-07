@@ -76,7 +76,7 @@ Then a Henge folder in the Mac's home folder is the same folder as Files › Hen
 
 ## Building
 
-**`main` is between releases and won't build from source.** Work in progress lives there until it's ready, and the file that completes it comes with each release. To use Henge, install the [latest release](https://github.com/Leviidev/Henge/releases); to build it yourself, check out a release tag.
+This repository is updated with each release. To use Henge, install the [latest release](https://github.com/Leviidev/Henge/releases).
 
 On a Mac with Xcode 27 or later and `xcodegen`. Henge takes StikJIT, on-device pairing, libslirp and glib from a built [Husk](https://github.com/Leviidev/Husk) checkout at `~/Documents/Coding/Husk` (set `HUSK` to use another path):
 

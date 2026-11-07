@@ -11,7 +11,6 @@ struct HengeApp: App {
         // Order matters: HengeLog takes over stderr, so the engine's and the JIT
         // allocator's first lines land in Documents/henge.log too.
         HengeLog.start()
-        HengeLog.log("boot", "release \(ReleaseGate.version)")
         EngineTuning.apply()
         HengeLog.logFootprint("app-launch")
         JITBootstrap.noteLaunchState()
