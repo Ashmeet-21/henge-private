@@ -1,0 +1,73 @@
+name: Build Henge IPA
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+
+env:
+  HUSK: ${{ github.workspace }}/Husk
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out Henge (this fork)
+        uses: actions/checkout@v4
+        with:
+          path: Henge
+
+      - name: Check out Husk
+        uses: actions/checkout@v4
+        with:
+          repository: Leviidev/Husk
+          path: Husk
+
+      - name: Cache Husk's prebuilt iOS pieces
+        uses: actions/cache@v4
+        with:
+          path: Husk/build/ios-arm64
+          key: husk-ios-arm64-${{ hashFiles('Husk/scripts/build_ios.sh', 'Husk/scripts/build_rppairing_ios.sh') }}
+
+      - name: Install build tools
+        run: |
+          set -euxo pipefail
+          brew install xcodegen meson ninja pkg-config qemu
+          # Runner images ship rustup; add the iOS target if it's missing.
+          rustup target add aarch64-apple-ios || {
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            rustup target add aarch64-apple-ios
+          }
+
+      - name: Build Husk's iOS static libraries
+        working-directory: Husk
+        run: zsh scripts/build_ios.sh
+
+      - name: Build Husk's on-device pairing library
+        working-directory: Husk
+        run: zsh scripts/build_rppairing_ios.sh
+
+      - name: Copy prebuilt deps into Henge
+        working-directory: Henge
+        run: zsh ios/scripts/fetch_deps.sh
+
+      - name: Build the restore stack (libirecovery, usbmuxd, idevicerestore)
+        working-directory: Henge
+        run: zsh ios/scripts/build_ios_restore.sh
+
+      - name: Build the engine
+        working-directory: Henge
+        run: make ios-lib
+
+      - name: Package Henge.ipa
+        working-directory: Henge
+        run: zsh ios/scripts/package_ipa.sh
+
+      - name: Upload Henge.ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: Henge-ipa-${{ github.sha }}
+          path: /Users/runner/Desktop/Henge.ipa
+          if-no-files-found: error
