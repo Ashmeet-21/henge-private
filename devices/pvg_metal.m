@@ -1715,7 +1715,8 @@ typedef struct {
     return YES;
 }
 
-/* The surface is linear light in half floats: every possible value, to a display byte. */
+/* The surface holds sRGB-encoded values in half floats (measured: encoding them again lifted
+   macOS's blue (10,130,255) to (54,172,232)): every possible value, to a display byte. */
 static const uint8_t *half_to_byte(void) {
     static uint8_t *table;
     if (table) return table;
@@ -1727,7 +1728,7 @@ static const uint8_t *half_to_byte(void) {
         float v = h;
         if (!(v > 0)) t[i] = 0;
         else if (v >= 1) t[i] = 255;
-        else t[i] = (uint8_t)((v <= 0.0031308f ? v * 12.92f : 1.055f * powf(v, 1.0f / 2.4f) - 0.055f) * 255.0f + 0.5f);
+        else t[i] = (uint8_t)(v * 255.0f + 0.5f);
     }
     table = t;
     return t;
@@ -1818,9 +1819,7 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
     "fragment float4 screen_plain(V v [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
     "  return float4(t.sample(s, v.uv).rgb, 1); }\n"
     "fragment float4 screen_linear(V v [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
-    "  float3 c = saturate(t.sample(s, v.uv).rgb);\n"
-    "  float3 e = select(1.055 * powr(c, 1.0 / 2.4) - 0.055, c * 12.92, c <= 0.0031308);\n"
-    "  return float4(e, 1); }\n"
+    "  return float4(saturate(t.sample(s, v.uv).rgb), 1); }\n"
     "fragment float4 screen_cursor(V v [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
     "  return t.sample(s, v.uv); }\n";
 
@@ -2309,7 +2308,6 @@ int hv_pvg_metal_snapshot(HvPvgMetal *m, uint8_t *bgra, uint32_t w, uint32_t h) 
                 for (int c = 0; c < 3; c++) {
                     float v = (float)p[c];
                     v = v < 0 ? 0 : v > 1 ? 1 : v;
-                    v = v <= 0.0031308f ? v * 12.92f : 1.055f * powf(v, 1 / 2.4f) - 0.055f; /* the surface is linear light */
                     sum[2 - c] += (uint32_t)(v * 255 + 0.5f);
                 }
             }
