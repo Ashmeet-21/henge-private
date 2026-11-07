@@ -11,6 +11,7 @@
 #include <sys/ucontext.h>
 #include <stdio.h>
 #include <time.h>
+#include <mach/mach_time.h>
 
 #include "usb_host.h"
 #include <stdlib.h>
@@ -269,11 +270,44 @@ int hv_vm_create(const HvVmConfig *c, char *err, size_t errlen) {
     return 0;
 }
 
+/* Makes running CPUs leave their translated code when they have something to do that nothing else
+   tells them about. A CPU's own timer: each CPU is kicked when its timer is due (the dispatcher and
+   the timer registers keep cpu->timer_due current). CPU 0's devices: a safety poll every HV_KICK_US
+   (4 ms); devices with work, interrupts and requests between CPUs already kick the CPU concerned.
+   This used to kick every CPU every millisecond (1-2 ms on iOS), which on a phone with two fast
+   cores cost hundreds of slow-path exits a second per CPU for nothing. HV_KICK_ALL=1 brings back the
+   old way, at HV_KICK_US (1 ms). One CPU keeps it too: the GIC wakes a CPU only when there are several. */
 static void *kicker_thread(void *unused) {
     (void)unused;
+    const char *all_env = getenv("HV_KICK_ALL"), *us_env = getenv("HV_KICK_US");
+    int kick_all = (all_env && atoi(all_env)) || ncpus == 1;
+    long poll_us = us_env && atol(us_env) > 0 ? atol(us_env) : kick_all ? 1000 : 4000;
+    if (kick_all) {
+        for (;;) {
+            usleep((useconds_t)poll_us);
+            hv_machine_kick_all(&m);
+        }
+    }
+    mach_timebase_info_data_t tb;
+    mach_timebase_info(&tb);
+    const uint64_t us = tb.numer ? 1000ull * tb.denom / tb.numer : 24; /* host ticks per microsecond */
+    uint64_t next_poll = mach_absolute_time() + (uint64_t)poll_us * us;
     for (;;) {
-        usleep(1000);
-        hv_machine_kick_all(&m);
+        uint64_t now = mach_absolute_time(), wake = next_poll;
+        if (now >= next_poll) {
+            if (m.stats_interval) m.stats.kick_src[2]++;
+            hv_cpu_kick(&cpus[0]);
+            next_poll = now + (uint64_t)poll_us * us;
+            wake = next_poll;
+        }
+        for (int i = 0; i < ncpus; i++) {
+            uint64_t due = __atomic_load_n(&cpus[i].timer_due, __ATOMIC_RELAXED);
+            if (!due) continue;
+            if (due <= now) hv_cpu_kick(&cpus[i]); /* it clears or moves timer_due at its tick */
+            else if (due < wake) wake = due;
+        }
+        uint64_t gap = wake > now ? (wake - now) / us : 0;
+        usleep((useconds_t)(gap < 200 ? 200 : gap)); /* 200 us at least: a CPU just kicked needs a moment to tick */
     }
     return NULL;
 }

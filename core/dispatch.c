@@ -915,7 +915,7 @@ static int run_loop(HvCpu *cpu, int one) {
         if (m->tick && (kicked || (++since_tick >= 64 && (since_tick = 0, next_due && mach_absolute_time() >= next_due)))) {
             since_tick = 0;
             next_due = m->tick(m, cpu);
-            cpu->timer_due = next_due;
+            __atomic_store_n(&cpu->timer_due, next_due, __ATOMIC_RELAXED);
         }
         int why = pending_chain ? 0 : kicked ? 1 : last_reason != HV_EXIT_BRANCH ? 2 : 5;
         if (hv_check_interrupts(cpu)) {

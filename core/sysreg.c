@@ -244,8 +244,9 @@ static int write_reg(HvCpu *cpu, uint32_t reg, uint64_t v) {
     default: goto other;
     }
     /* Timer outputs follow their registers at once, as in hardware: a masked
-       timer must drop its line before the handler's EOI. */
-    if (m->tick) m->tick(m, cpu);
+       timer must drop its line before the handler's EOI. The new deadline goes to
+       timer_due at once too, so the kicker (host/vm.c) wakes this CPU when it is due. */
+    if (m->tick) __atomic_store_n(&cpu->timer_due, m->tick(m, cpu), __ATOMIC_RELAXED);
     return 0;
 other:
     /* PAuth key registers (CRn 2, CRm 1..3): kept, never used, since signing is a no-op. */
