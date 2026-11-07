@@ -172,7 +172,18 @@ final class JITCoordinator: ObservableObject {
     static let trollStoreAutoKey = "henge.jit.trollStoreAuto"
     static var trollStoreAuto: Bool { UserDefaults.standard.object(forKey: trollStoreAutoKey) as? Bool ?? true }
 
+    /// JIT at launch opened LocalDevVPN to connect it; the next return to the foreground goes on with the built-in helper.
+    private var awaitingVPN = false
+
     func enableAtLaunchIfAsked() {
+        if awaitingVPN {
+            awaitingVPN = false
+            guard !JITBootstrap.ready else { return }
+            log("back from LocalDevVPN (\(LocalDevVPN.isConnected ? "connected" : "not connected")): turning JIT on with built-in StikJIT")
+            method = .builtIn
+            enable()
+            return
+        }
         if !autoTried, JITBootstrap.isInstalledWithTrollStore, Self.trollStoreAuto {
             autoTried = true
             guard !JITBootstrap.ready else { return }
@@ -186,6 +197,14 @@ final class JITCoordinator: ObservableObject {
         guard !JITBootstrap.ready else { return }
         guard HengeBuiltInJIT.isAvailable, hasPairing else {
             log("JIT at launch is on, but built-in StikJIT is not available or not paired; skipped")
+            return
+        }
+        // The helper reaches this device through LocalDevVPN. When it is not connected, connect it first: LocalDevVPN
+        // connects and comes back (henge://), and the return to the foreground goes on above.
+        if LocalDevVPN.isInstalled, !LocalDevVPN.isConnected {
+            log("JIT at launch: LocalDevVPN is not connected; opening it to connect")
+            awaitingVPN = true
+            LocalDevVPN.open()
             return
         }
         log("turning JIT on at launch with built-in StikJIT")
@@ -455,6 +474,24 @@ enum LocalDevVPN {
     static let connect = URL(string: "localdevvpn://enable?scheme=henge")!
 
     static var isInstalled: Bool { UIApplication.shared.canOpenURL(URL(string: "localdevvpn://")!) }
+
+    /// Whether its tunnel is up: a tunnel interface that is up with an address in 10.7.0.0/16 (LocalDevVPN's own is
+    /// 10.7.1.1), the network it routes to reach this device at 10.7.0.1, StikJIT's default device address.
+    static var isConnected: Bool {
+        var list: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&list) == 0, let first = list else { return false }
+        defer { freeifaddrs(list) }
+        for p in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let ifa = p.pointee
+            guard (ifa.ifa_flags & UInt32(IFF_UP)) != 0, let sa = ifa.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET) else { continue }
+            let ip = sa.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { UInt32(bigEndian: $0.pointee.sin_addr.s_addr) }
+            if ip >> 16 == 0x0a07, String(cString: ifa.ifa_name).hasPrefix("utun") {
+                HengeLog.log("jit", "LocalDevVPN tunnel on \(String(cString: ifa.ifa_name))")
+                return true
+            }
+        }
+        return false
+    }
     static var actionTitle: String { isInstalled ? "Connect LocalDevVPN" : "Get LocalDevVPN" }
 
     @MainActor static func open() {

@@ -18,6 +18,10 @@ struct SettingsView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                     Button("Set up JIT") { jit.showSetup = true }
                     Toggle("Turn on JIT when Henge opens", isOn: $jitAtLaunch)
+                    if jitAtLaunch {
+                        Text("Henge connects LocalDevVPN first when it is off, and comes back.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
                     LabeledContent("Code region", value: "\(JITBootstrap.jitBytes >> 20) MB, claimed once per launch")
                 }
                 .listRowBackground(Desk.card)
