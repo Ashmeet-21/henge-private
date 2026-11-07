@@ -1,4 +1,5 @@
 import SwiftUI
+import GameController
 
 /// A running Mac. Upright, its screen sits above a trackpad; on its side the screen fills the device
 /// and is its own trackpad. Zoomed in, the screen fills the device either way and follows the pointer.
@@ -30,6 +31,7 @@ struct SessionView: View {
     @State private var showDetails = false
     @State private var controlsHidden = false
     @State private var showRevealHint = false
+    @State private var pointerRefused = false
     @AppStorage("henge.controls.hintsShown") private var revealHintsShown = 0
     @State private var confirmStop = false
     @State private var zoomCentre = CGPoint(x: 0.5, y: 0.5) // where the zoomed view is, 0...1 of the Mac's screen
@@ -82,6 +84,16 @@ struct SessionView: View {
                 } else {
                     floatingControls(layout)
                 }
+                if pointerRefused && !showRevealHint {
+                    Label("Make Henge full screen to use the trackpad or mouse as the Mac's", systemImage: "cursorarrow.rays")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 18).padding(.vertical, 12)
+                        .deskGlass(in: Capsule())
+                        .position(x: full.width / 2, y: insets.top + 40)
+                        .transition(.opacity)
+                        .allowsHitTesting(false)
+                }
                 if showRevealHint {
                     Label("Tap with three fingers to show the controls", systemImage: "hand.tap")
                         .font(.system(size: 15, weight: .medium))
@@ -101,6 +113,12 @@ struct SessionView: View {
             .animation(.easeInOut(duration: 0.25), value: typing)
             .animation(.easeInOut(duration: 0.25), value: controlsHidden)
             .animation(.easeInOut(duration: 0.25), value: showRevealHint)
+            .onReceive(NotificationCenter.default.publisher(for: UIPointerLockState.didChangeNotification)) { _ in
+                pointerRefused = PointerLock.refused
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .GCMouseDidConnect)) { _ in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { pointerRefused = PointerLock.refused }
+            }
             .onReceive(NotificationCenter.default.publisher(for: Trackpad.threeFingerTap)) { _ in
                 controlsHidden = false
                 showRevealHint = false

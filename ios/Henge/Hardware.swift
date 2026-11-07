@@ -134,6 +134,14 @@ enum PointerLock {
             root.setNeedsUpdateOfPrefersPointerLocked()
         }
     }
+
+    /// iPadOS only locks the pointer to an app that fills the screen: in a window (Stage Manager, or iPadOS 26's windows)
+    /// the request is ignored and the system pointer stays separate from the Mac's (#18).
+    static var refused: Bool {
+        guard wanted, GCMouse.current != nil else { return false }
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.filter { $0.activationState == .foregroundActive }
+        return !scenes.isEmpty && !scenes.contains { $0.pointerLockState?.isLocked == true }
+    }
 }
 
 /// A Magic Keyboard's trackpad or a mouse, while a Mac is running. GameController gives the raw motion,
