@@ -55,18 +55,22 @@ struct MacSettingsView: View {
                     DeskHeading("Screen")
                     VStack(alignment: .leading, spacing: 12) {
                         Picker("Screen", selection: Binding(get: {
+                            if mac.isRetina { return "retina" }
                             if mac.screen.width == Device.performanceScreen.width,
                                mac.screen.height == Device.performanceScreen.height { return "performance" }
                             if mac.screen.width == 1920, mac.screen.height == 1080 { return "wide" }
                             return "fit"
                         }, set: { choice in
+                            mac.retina = choice == "retina"
                             switch choice {
+                            case "retina": break
                             case "performance": (mac.screenWidth, mac.screenHeight) = Device.performanceScreen
                             case "wide": (mac.screenWidth, mac.screenHeight) = (1920, 1080)
                             default: (mac.screenWidth, mac.screenHeight) = Device.fittingScreen
                             }
                             save()
                         })) {
+                            Text("Retina").tag("retina")
                             Text("Performance").tag("performance")
                             Text("Fit this iPad").tag("fit")
                             Text("16:9").tag("wide")

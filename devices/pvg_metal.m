@@ -362,6 +362,15 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
         [self complain:[NSString stringWithFormat:@"library: %@", err.localizedDescription]];
         return nil;
     }
+    {   /* m4 fork: while tracing, keep each library macOS sends, to read its shaders on a Mac */
+        const char *tf = getenv("HV_PVG_TRACE_FILE");
+        if (tf && getenv("HV_SHADER_DUMP") && atoi(getenv("HV_SHADER_DUMP"))) {
+            NSString *dir = [[[NSString stringWithUTF8String:tf] stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"shaders"];
+            [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+            NSString *name = [NSString stringWithFormat:@"%@-%llx.metallib", library.functionNames.firstObject ?: @"lib", (unsigned long long)at];
+            [lib writeToFile:[dir stringByAppendingPathComponent:name] atomically:NO];
+        }
+    }
     return [library newFunctionWithName:library.functionNames.firstObject];
 }
 
@@ -385,6 +394,18 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
         id state = tag == 0xe ? [device newRenderPipelineStateWithDescriptor:descriptor error:&err]
                               : [device newRenderPipelineStateWithTileDescriptor:descriptor options:MTLPipelineOptionNone reflection:nil error:&err];
         if (!state) [self complain:[NSString stringWithFormat:@"pipeline %u: %@", tag, err.localizedDescription]];
+        if (tag == 0xe && getenv("HV_SHADER_DUMP") && atoi(getenv("HV_SHADER_DUMP"))) { /* m4 fork: blend state as this iOS read it */
+            MTLRenderPipelineDescriptor *rp = descriptor;
+            for (int i = 0; i < 4; i++) {
+                MTLRenderPipelineColorAttachmentDescriptor *c = rp.colorAttachments[i];
+                if (c.pixelFormat == MTLPixelFormatInvalid) continue;
+                fprintf(stderr, "hvpipe: %s c%d fmt %lu blend %d rgb %lu*src %lu %lu*dst alpha %lu*src %lu %lu*dst mask %lx\n",
+                        rp.fragmentFunction.name.UTF8String ?: "?", i, (unsigned long)c.pixelFormat, (int)c.blendingEnabled,
+                        (unsigned long)c.sourceRGBBlendFactor, (unsigned long)c.rgbBlendOperation, (unsigned long)c.destinationRGBBlendFactor,
+                        (unsigned long)c.sourceAlphaBlendFactor, (unsigned long)c.alphaBlendOperation, (unsigned long)c.destinationAlphaBlendFactor,
+                        (unsigned long)c.writeMask);
+            }
+        }
         if (state && tag == 0xe && getenv("HV_PVG_TRACE_FILE")) {
             MTLRenderPipelineDescriptor *rp = descriptor;
             objc_setAssociatedObject(state, "hvname", [NSString stringWithFormat:@"%@ / %@ -> fmt %lu blend %d", rp.vertexFunction.name, rp.fragmentFunction.name, (unsigned long)rp.colorAttachments[0].pixelFormat, (int)rp.colorAttachments[0].blendingEnabled], OBJC_ASSOCIATION_RETAIN);
@@ -1030,6 +1051,17 @@ typedef struct {
             offsets[i] = (NSUInteger)U64(12 + i * 12);
         }
         NSRange range = NSMakeRange(index, count);
+        if (tracing) for (uint32_t i = 0; i < count; i++) { /* m4 fork: what the shaders are given */
+            id<MTLBuffer> bb = strong[i];
+            fprintf(stderr, "trace:  %s buf %u ref %u off %lu len %lu:", tag == 125 ? "vtx" : tag == 110 ? "frag" : "tile", index + i, U32(8 + i * 12),
+                    (unsigned long)offsets[i], (unsigned long)bb.length);
+            if (bb && bb.storageMode != MTLStorageModePrivate && offsets[i] < bb.length) {
+                const float *f = (const float *)((const uint8_t *)bb.contents + offsets[i]);
+                NSUInteger nf = MIN((bb.length - offsets[i]) / 4, (NSUInteger)96);
+                for (NSUInteger k = 0; k < nf; k++) fprintf(stderr, " %g", f[k]);
+            }
+            fprintf(stderr, "\n");
+        }
         if (tag == 125) [e setVertexBuffers:buffers offsets:offsets withRange:range];
         else if (tag == 110) [e setFragmentBuffers:buffers offsets:offsets withRange:range];
         else [e setTileBuffers:buffers offsets:offsets withRange:range];

@@ -42,5 +42,8 @@ struct ExternalMacDisplayModifier: ViewModifier {
         } else {
             session
         }
+        #else
+        content
+        #endif
     }
 }
