@@ -464,6 +464,7 @@ struct SessionView: View {
         }
         var buffer = [CChar](repeating: 0, count: 256)
         Sharing.prepare()
+        EngineTuning.apply()
         henge_vm_set_display(UInt32(mac.screen.width), UInt32(mac.screen.height))
         if mac.isRetina {
             henge_vm_set_display_mm(UInt32(Device.retinaMM.width), UInt32(Device.retinaMM.height))
