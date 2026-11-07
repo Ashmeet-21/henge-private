@@ -272,7 +272,13 @@ static void *fast_resume(HvCpu *cpu) {
         return NULL;
     }
     if ((p->irq_line && !(cpu->daif & HV_PSTATE_I)) || (p->fiq_line && !(cpu->daif & HV_PSTATE_F))) { if (m->stats_interval) m->stats.fr_fail[2]++; return NULL; }
-    if (cpu->timer_due && mach_absolute_time() >= cpu->timer_due) { if (m->stats_interval) m->stats.fr_fail[3]++; return NULL; }
+    if (cpu->timer_due && mach_absolute_time() >= cpu->timer_due) {
+        /* Due: have the dispatcher tick at its next pass, as a kick does. Otherwise it ticks only every 64th
+           pass, and every SVC and ERET until then is refused here and goes the slow way. */
+        __atomic_store_n(&cpu->exit_req, 1, __ATOMIC_RELAXED);
+        if (m->stats_interval) m->stats.fr_fail[3]++, m->stats.kick_src[4]++;
+        return NULL;
+    }
     uint32_t flags = block_flags(cpu);
     int kernel = flags & HV_BLOCK_EL1;
     uint64_t va = cpu->pc;
@@ -909,10 +915,12 @@ static int run_loop(HvCpu *cpu, int one) {
             cpu->excl_addr = ~0ull;
             hv_big_yield(m);
         }
-        /* Ticks take the device lock, so not every few blocks: on a kick (the 1 ms
+        /* Ticks take the device lock, so not every few blocks: on a kick (the kicker,
            kicker, a device with work for CPU 0, an interrupt raised for this
            CPU) or once this CPU's own timer is due. */
-        if (m->tick && (kicked || (++since_tick >= 64 && (since_tick = 0, next_due && mach_absolute_time() >= next_due)))) {
+        /* cpu->timer_due, not only next_due: a timer register write since the last tick may have set an earlier one. */
+        if (m->tick && (kicked || (++since_tick >= 64 && (since_tick = 0, (next_due = __atomic_load_n(&cpu->timer_due, __ATOMIC_RELAXED)) &&
+                                                          mach_absolute_time() >= next_due)))) {
             since_tick = 0;
             next_due = m->tick(m, cpu);
             __atomic_store_n(&cpu->timer_due, next_due, __ATOMIC_RELAXED);
