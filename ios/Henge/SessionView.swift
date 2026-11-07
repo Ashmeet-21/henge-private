@@ -436,6 +436,17 @@ struct SessionView: View {
                          : "Once for each Mac: open Terminal on the Mac, tap this, then press Return. When macOS asks about henge-agent and local networks, choose Allow. It types \(Sharing.setUpCommand) and needs the Mac's keyboard layout to be U.S.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
+                Section("Lighter macOS") {
+                    Button("Type the Lighter Command") {
+                        showDetails = false
+                        Task {
+                            try? await Task.sleep(nanoseconds: 600_000_000)
+                            await Sharing.typeLighterCommand()
+                        }
+                    }
+                    Text("Once for each Mac, for smoother use on a phone: open Terminal on the Mac, tap this, then press Return and type the Mac's password when asked. It turns off Spotlight indexing, reopening windows at login, update checks and Time Machine, and most animations (Genie becomes Scale). It types \(Sharing.lighterCommand); to undo, run the same with lighter-undo.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
                 Section("Log") {
                     VStack(alignment: .leading, spacing: 1) {
                         ForEach(Array(log.suffix(30).enumerated()), id: \.offset) { _, line in

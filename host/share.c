@@ -656,11 +656,53 @@ static int clipboard_put(Conn *c, Request *r) {
     return respond_empty(c, r, 204, "No Content");
 }
 
+/* What "curl -s http://10.0.2.4/.henge/lighter | sh" runs in macOS: fewer animations and less
+   background work (Spotlight indexing, update checks, Time Machine), for a phone's few fast cores. */
+static const char lighter_script[] =
+    "#!/bin/sh\n"
+    "# Henge: make macOS lighter for a phone's few fast cores. Undo: curl -s http://10.0.2.4/.henge/lighter-undo | sh\n"
+    "echo 'Making this Mac lighter for Henge...'\n"
+    "w() { defaults write \"$@\" 2>/dev/null || echo \"  (could not set $1 $2)\"; }\n"
+    "w com.apple.dock mineffect -string scale\n"
+    "w com.apple.dock launchanim -bool false\n"
+    "w com.apple.dock expose-animation-duration -float 0.1\n"
+    "w NSGlobalDomain NSAutomaticWindowAnimationsEnabled -bool false\n"
+    "w NSGlobalDomain NSWindowResizeTime -float 0.001\n"
+    "w NSGlobalDomain NSQuitAlwaysKeepsWindows -bool false\n"
+    "w com.apple.loginwindow TALLogoutSavesState -bool false\n"
+    "w com.apple.universalaccess reduceTransparency -bool true\n"
+    "w com.apple.universalaccess reduceMotion -bool true\n"
+    "killall Dock 2>/dev/null\n"
+    "echo 'Now the parts that need your Mac password (it is not shown as you type):'\n"
+    "sudo sh -c 'mdutil -a -i off >/dev/null 2>&1 && echo \"  Spotlight indexing: off\"; softwareupdate --schedule off >/dev/null 2>&1; tmutil disable >/dev/null 2>&1; echo \"  Automatic update checks and Time Machine: off\"'\n"
+    "echo 'Done. Log out and back in (or restart) for every change to apply.'\n";
+
+/* Puts back what lighter_script changed. */
+static const char lighter_undo_script[] =
+    "#!/bin/sh\n"
+    "# Henge: put back what /.henge/lighter changed.\n"
+    "for k in mineffect launchanim expose-animation-duration; do defaults delete com.apple.dock $k 2>/dev/null; done\n"
+    "for k in NSAutomaticWindowAnimationsEnabled NSWindowResizeTime NSQuitAlwaysKeepsWindows; do defaults delete NSGlobalDomain $k 2>/dev/null; done\n"
+    "defaults delete com.apple.loginwindow TALLogoutSavesState 2>/dev/null\n"
+    "defaults write com.apple.universalaccess reduceTransparency -bool false 2>/dev/null\n"
+    "defaults write com.apple.universalaccess reduceMotion -bool false 2>/dev/null\n"
+    "killall Dock 2>/dev/null\n"
+    "sudo sh -c 'mdutil -a -i on >/dev/null 2>&1; softwareupdate --schedule on >/dev/null 2>&1; tmutil enable >/dev/null 2>&1'\n"
+    "echo 'Put back. Log out and back in for every change to apply.'\n";
+
 static int serve_henge(Conn *c, Request *r) {
     const char *what = r->path + strlen("/.henge/");
     if (!strcmp(what, "install") && !strcmp(r->method, "GET")) {
         if (body_discard(c, r) != 0) return -1;
         return respond(c, r, 200, "OK", "Content-Type: text/plain\r\n", install_script, sizeof install_script - 1);
+    }
+    if (!strcmp(what, "lighter") && !strcmp(r->method, "GET")) {
+        if (body_discard(c, r) != 0) return -1;
+        return respond(c, r, 200, "OK", "Content-Type: text/plain\r\n", lighter_script, sizeof lighter_script - 1);
+    }
+    if (!strcmp(what, "lighter-undo") && !strcmp(r->method, "GET")) {
+        if (body_discard(c, r) != 0) return -1;
+        return respond(c, r, 200, "OK", "Content-Type: text/plain\r\n", lighter_undo_script, sizeof lighter_undo_script - 1);
     }
     if (!strcmp(what, "agent") && !strcmp(r->method, "GET")) return serve_agent(c, r);
     if (!strcmp(what, "clipboard") && !strcmp(r->method, "GET")) return clipboard_get(c, r);
