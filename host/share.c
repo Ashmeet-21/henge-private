@@ -301,6 +301,32 @@ static int decode_path(const char *in, char *out, size_t cap) {
 static int local_path(const char *path, char *out, size_t cap) {
     int n = snprintf(out, cap, "%s%s", root, path);
     if (n < 0 || (size_t)n >= cap) return -1;
+    size_t root_len = strlen(root);
+    /* Do not let a path component inside the shared folder redirect a request
+       through a symlink. The final open still uses O_NOFOLLOW as a second check. */
+    for (char *p = out + root_len; *p;) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        char *end = strchr(p, '/');
+        if (end) *end = 0;
+        struct stat st;
+        if (lstat(out, &st) == 0) {
+            if (S_ISLNK(st.st_mode) || (end && !S_ISDIR(st.st_mode))) {
+                if (end) *end = '/';
+                return -1;
+            }
+        } else if (errno != ENOENT) {
+            if (end) *end = '/';
+            return -1;
+        } else if (end) {
+            /* A missing parent cannot contain a resolvable child yet. */
+            *end = '/';
+            break;
+        }
+        if (!end) break;
+        *end = '/';
+        p = end + 1;
+    }
     while (n > 1 && out[n - 1] == '/') out[--n] = 0;
     return 0;
 }
@@ -399,20 +425,25 @@ static int do_get(Conn *c, Request *r) {
     int partial = 0;
     if (r->range_from >= 0 || r->range_to >= 0) {
         if (r->range_from < 0) { /* the last N bytes */
+            if (r->range_to == 0 || st.st_size == 0) goto range_unsatisfiable;
             from = st.st_size > r->range_to ? st.st_size - r->range_to : 0;
         } else {
             from = r->range_from;
             if (r->range_to >= 0 && r->range_to < to) to = r->range_to;
         }
-        if (from >= st.st_size && st.st_size > 0) {
-            close(fd);
-            char h[80];
-            snprintf(h, sizeof h, "Content-Range: bytes */%lld\r\n", (long long)st.st_size);
-            return respond(c, r, 416, "Range Not Satisfiable", h, NULL, 0);
-        }
+        if (from >= st.st_size || to < from) goto range_unsatisfiable;
         partial = 1;
     }
     long long len = st.st_size ? to - from + 1 : 0;
+    static const size_t piece = 256 * 1024;
+    char *buf = NULL;
+    if (strcmp(r->method, "HEAD") != 0 && len > 0) {
+        buf = malloc(piece);
+        if (!buf) {
+            close(fd);
+            return respond_empty(c, r, 503, "Service Unavailable");
+        }
+    }
     char modified[64];
     struct tm tm;
     gmtime_r(&st.st_mtimespec.tv_sec, &tm);
@@ -427,8 +458,6 @@ static int do_get(Conn *c, Request *r) {
     n += snprintf(head + n, sizeof head - (size_t)n, "%s\r\n", r->close ? "Connection: close\r\n" : "");
     int rc = send_all(c->fd, head, (size_t)n);
     if (rc == 0 && strcmp(r->method, "HEAD") != 0) {
-        static const size_t piece = 256 * 1024;
-        char *buf = malloc(piece);
         long long at = from, left = len;
         while (rc == 0 && left > 0) {
             ssize_t got = pread(fd, buf, (size_t)left < piece ? (size_t)left : piece, at);
@@ -438,10 +467,17 @@ static int do_get(Conn *c, Request *r) {
                 at += got, left -= got;
             }
         }
-        free(buf);
     }
+    free(buf);
     close(fd);
     return rc;
+
+range_unsatisfiable: {
+        close(fd);
+        char h[80];
+        snprintf(h, sizeof h, "Content-Range: bytes */%lld\r\n", (long long)st.st_size);
+        return respond(c, r, 416, "Range Not Satisfiable", h, NULL, 0);
+    }
 }
 
 /* Into a temporary file beside it, then renamed, so a transfer cut short leaves the old file alone. */
@@ -473,6 +509,12 @@ static int do_put(Conn *c, Request *r) {
     body_ready(c, r);
     static const size_t piece = 256 * 1024;
     char *buf = malloc(piece);
+    if (!buf) {
+        close(fd);
+        unlink(temp);
+        if (body_discard(c, r) != 0) return -1;
+        return respond_empty(c, r, 503, "Service Unavailable");
+    }
     int full = 0;
     for (;;) {
         ssize_t got = body_read(c, r, buf, piece);
