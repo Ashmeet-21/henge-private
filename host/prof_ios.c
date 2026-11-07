@@ -3,7 +3,9 @@
    1000 times a second and sorts it into: asleep, in translated code, or in a host
    function (kept as an offset into the app image, symbolized afterwards with the
    unstripped binary: tools/prof_symbolize.sh). Every HV_PROF_IOS_SECS seconds
-   (default 30) the totals go to stderr, which Henge mirrors to henge-native.log. */
+   (default 30) the totals go to stderr, which Henge mirrors to henge-native.log.
+   Off unless HV_PROF_IOS is set (Documents/henge-env.txt can set it): reading a running
+   thread's PC stops it for a moment, so sampling is not free. */
 #include <dlfcn.h>
 #include <mach/mach.h>
 #include <pthread.h>
@@ -91,7 +93,7 @@ static void *sampler(void *unused) {
 void hv_prof_ios_start(void) {
     static int started;
     if (started++) return;
-    if (getenv("HV_PROF_IOS_OFF")) return;
+    if (!getenv("HV_PROF_IOS")) return;
     Dl_info info;
     if (dladdr((void *)hv_prof_ios_start, &info)) image_base = (uintptr_t)info.dli_fbase;
     hv_prof_register = reg;

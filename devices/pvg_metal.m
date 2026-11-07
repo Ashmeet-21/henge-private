@@ -2142,9 +2142,7 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
         pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:pass];
-        NSNumber *linearSetting = [[NSUserDefaults standardUserDefaults] objectForKey:@"henge.display.linearToSRGB"];
-        BOOL convertLinear = linearSetting ? linearSetting.boolValue : YES;
-        [e setRenderPipelineState:(half && convertLinear) ? linear_pipe : screen_pipe];
+        [e setRenderPipelineState:half ? linear_pipe : screen_pipe];
         float rect[4] = {-1, -1, 2, 2};
         [e setVertexBytes:rect length:sizeof rect atIndex:0];
         [e setFragmentTexture:tex atIndex:0];

@@ -21,7 +21,6 @@ struct SessionView: View {
     @AppStorage("henge.cpus") private var cpus = 4
     @AppStorage("henge.matchScreenColors") private var matchScreenColors = true
     @AppStorage("henge.display.brightness") private var screenBrightness = 1.0
-    @AppStorage("henge.display.linearToSRGB") private var linearColorConversion = true
     @AppStorage("henge.cursor.scale") private var cursorScale = Device.isPad ? 1 : 3
     @AppStorage("henge.cursor.sharp") private var sharpCursor = true
     @AppStorage(HardwareMouse.scrollSpeedKey) private var scrollSpeed = 0.3
@@ -432,10 +431,9 @@ struct SessionView: View {
                 }
                 Section("Display") {
                     Toggle("Color matching", isOn: $matchScreenColors)
-                    Toggle("Linear color conversion", isOn: $linearColorConversion)
                     LabeledContent("Brightness", value: "\(Int(screenBrightness * 100))%")
                     Slider(value: $screenBrightness, in: 0.4...1)
-                    Text("Compare linear conversion on and off if colors look washed out. Brightness dims only the Mac's screen.")
+                    Text("Brightness dims only the Mac's screen.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("Pointer") {
