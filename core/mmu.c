@@ -686,6 +686,9 @@ int hv_tlb_refill(HvCpu *cpu, uint64_t va, uint32_t flags) {
     int el = table ? 1 : 0;
     uint64_t off = va & PAGE_MASK;
     if (off + bytes > PAGE_MASK + 1) return 1; /* crosses into the next page: the helper */
+    /* In the page, but where the fast check cannot pass (it allows HV_TLB_ADJ bytes of every access, so a small one in a
+       page's last HV_TLB_ADJ bytes misses): a refill would come straight back here. */
+    if (bytes <= HV_TLB_ADJ + 1 && off + HV_TLB_ADJ > PAGE_MASK) return 1;
     HvWalk w;
     walk_begin(cpu);
     hv_mmu_walk(cpu, va, write ? HV_ACC_WRITE : HV_ACC_READ, el, &w);
