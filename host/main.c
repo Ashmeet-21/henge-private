@@ -179,6 +179,7 @@ static void prof_dump(const char *path) {
     FILE *f = fopen(path, "w");
     if (f) {
         fprintf(f, "total %llu idle %llu el0 %llu el1 %llu unknown %llu\n", (unsigned long long)prof_total, (unsigned long long)prof_idle, (unsigned long long)prof_el[0], (unsigned long long)prof_el[1], (unsigned long long)prof_unknown);
+        hv_kva_hist_dump(f);
         fprintf(f, "offsets");
         for (int k = 0; k < 12; k++) fprintf(f, " %llu", (unsigned long long)prof_off[k]);
         fprintf(f, "\n");

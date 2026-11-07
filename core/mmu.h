@@ -2,6 +2,7 @@
 #define HENGEVM_MMU_H
 
 #include <stdint.h>
+#include <stdio.h>
 
 #include "cpu.h"
 
@@ -33,6 +34,7 @@ void hv_mmu_walk(HvCpu *cpu, uint64_t va, HvAccess acc, int el, HvWalk *out);
 void hv_tlb_flush(HvCpu *cpu);
 void hv_tlb_flush_va(HvCpu *cpu, uint64_t va);
 void hv_tlb_flush_user(HvCpu *cpu);
+void hv_kva_hist_dump(FILE *f); /* HV_KVA_HIST, see mmu.c */
 /* A big range of kernel VAs: its kernel entries and cached branch targets, not every process's entries. */
 void hv_tlb_flush_kernel_range(HvCpu *cpu, uint64_t va, uint64_t len);
 void hv_tlb_flush_user_range(HvCpu *cpu, uint64_t va, uint64_t len);
