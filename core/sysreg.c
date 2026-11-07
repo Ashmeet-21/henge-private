@@ -352,8 +352,9 @@ void hv_tlbi_apply(HvCpu *cpu, uint32_t op1, uint32_t crn, uint32_t crm, uint32_
         uint64_t va = shift ? (uint64_t)((int64_t)((xt & 0x1fffffffffull) << (64 - 37)) >> (64 - 37 - shift)) : 0;
         uint64_t len = shift ? pages << shift : 0;
         if (!shift || len > (256ull << HV_TLB_PAGE_BITS)) {
-            /* Reserved granule or a big range: drop that half. */
-            if ((va >> 55) & 1 || !shift) hv_tlb_flush(cpu);
+            /* Reserved granule: everything. A big range: what of that half lies in it. */
+            if (!shift) hv_tlb_flush(cpu);
+            else if ((va >> 55) & 1) hv_tlb_flush_kernel_range(cpu, va, len);
             else {
                 hv_tlb_flush_user_range(cpu, va, len);
                 hv_tlb_stash_drop(cpu, all_asids ? -1 : (int)(xt >> 48));
