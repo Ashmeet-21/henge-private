@@ -327,6 +327,30 @@ void hv_tlb_flush_user_range(HvCpu *cpu, uint64_t va, uint64_t len) {
     }
 }
 
+/* A big range of kernel VAs. A full flush here also dropped every process's entries and both halves of the branch
+   caches, and macOS 27 sends ranges like this hundreds of times a second (a phone running it did 120-260 full flushes a
+   second, Sequoia none). Up to 64 MB page by page, as small ranges are; past that, a scan for kernel entries in the range
+   and the kernel half of the branch caches. */
+void hv_tlb_flush_kernel_range(HvCpu *cpu, uint64_t va, uint64_t len) {
+    if (cpu->m && cpu->m->stats_interval) cpu->m->stats.kernel_ranges++;
+    uint64_t first = va & ~(uint64_t)PAGE_MASK;
+    if (len <= (4096ull << HV_TLB_PAGE_BITS)) {
+        for (uint64_t p = first; p < va + len; p += 1ull << HV_TLB_PAGE_BITS) hv_tlb_flush_va_asid(cpu, p, -1);
+        return;
+    }
+    uint64_t lo = first & 0x00ffffffffffffffull, hi = (va + len) & 0x00ffffffffffffffull; /* tagged addresses: by the low 56 bits */
+    for (int t = 0; t < 3; t++)
+        for (uint32_t i = 0; i < HV_TLB_SIZE; i++) {
+            HvTlbEntry *e = hv_tlb_ent(cpu, i, t);
+            if (e->read_tag == HV_TLB_INVALID && e->exec_tag == HV_TLB_INVALID && e->write_tag == HV_TLB_INVALID) continue;
+            uint64_t tag = e->read_tag != HV_TLB_INVALID ? e->read_tag + HV_TLB_ADJ : e->exec_tag != HV_TLB_INVALID ? hv_exec_key(e->exec_tag, e->addend) : e->write_tag + HV_TLB_ADJ;
+            if (!((tag >> 55) & 1)) continue; /* a process's page */
+            uint64_t pg = tag & 0x00ffffffffffffffull;
+            if (pg < hi && pg + PAGE_MASK + 1 > lo) memset(e, 0x80, sizeof *e);
+        }
+    hv_ijc_reset(cpu, 1);
+}
+
 /* A page just got translated code: writes to it must take the slow path from now
    on, so drop just the write permission of the entries that map it. */
 static int maps_writable(const HvTlbEntry *e, const uint8_t *host_page) {

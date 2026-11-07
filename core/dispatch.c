@@ -685,8 +685,8 @@ static void print_stats(HvCpu *cpu, int force) {
                 RATE(smc_hold_ticks) / 240000.0);
         fprintf(stderr, "  light lookups failed/s: odd %.0f, filters full %.0f, no mapping %.0f, no block yet %.0f; walked %.0fK/s\n",
                 RATE(light_fail[0]), RATE(light_fail[1]), RATE(light_fail[2]), RATE(light_fail[3]), RATE(light_walks) / 1e3);
-        fprintf(stderr, "  big user-range TLBIs/s: %.0f TLB only in the range, %.0f with no cached targets to drop\n",
-                RATE(tlb_range_flushes), RATE(range_spared));
+        fprintf(stderr, "  big user-range TLBIs/s: %.0f TLB only in the range, %.0f with no cached targets to drop; big kernel ranges %.0f\n",
+                RATE(tlb_range_flushes), RATE(range_spared), RATE(kernel_ranges));
         fprintf(stderr, "  TLBIs left to other CPUs/s: raced %.0f, every address space's cached targets %.0f, big range %.0f, ASID or all %.0f\n",
                 RATE(posted_kind[0]), RATE(posted_kind[3]), RATE(posted_kind[1]), RATE(posted_kind[2]));
         fprintf(stderr, "  remote drop races/s: walking %.0f, filling %.0f, during %.0f\n", RATE(race_kind[0]), RATE(race_kind[1]), RATE(race_kind[2]));
