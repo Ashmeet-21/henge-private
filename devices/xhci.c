@@ -516,13 +516,22 @@ static void run_ep_in(HvXhci *x, int slot) {
             uint32_t want = trb[2] & 0x1ffff;
             uint32_t len = x->tp_rlen[x->tp_rhead % HV_TP_REPORTS];
             uint32_t n = want < len ? want : len;
-            wr(x, buf, x->tp_reports[x->tp_rhead % HV_TP_REPORTS], n);
+            const uint8_t *rep = x->tp_reports[x->tp_rhead % HV_TP_REPORTS];
+            wr(x, buf, rep, n);
             x->tp_rhead++;
             x->tp_delivered++;
             if (x->tp_delivered <= 16) fprintf(stderr, "hengevm: xhci: trackpad: %u bytes to the guest (delivered %llu)\n", n, (unsigned long long)x->tp_delivered);
-            if (len >= 30 && x->tp_multi_logs < 40) { /* two fingers or more: the gesture frames */
+            if (len >= 30 && x->tp_multi_logs < 40) { /* two fingers or more: dump the frame so we can watch them move */
                 x->tp_multi_logs++;
-                fprintf(stderr, "hengevm: xhci: trackpad: %d fingers to the guest\n", (int)((len - 12) / 9));
+                int nf = (int)((len - 12) / 9);
+                fprintf(stderr, "hengevm: xhci: trackpad: %d fingers:", nf);
+                for (int i = 0; i < nf; i++) {
+                    const uint8_t *b = rep + 12 + 9 * i;
+                    int xc = b[0] | ((b[1] & 0x1f) << 8); if (xc & 0x1000) xc -= 0x2000;
+                    int yc = ((b[1] >> 5) & 0x7) | (b[2] << 3) | ((b[3] & 0x3) << 11); if (yc & 0x1000) yc -= 0x2000;
+                    fprintf(stderr, " [id%d x%d y%d s%d]", b[8] & 0xf, xc, yc, (b[3] >> 5) & 7);
+                }
+                fprintf(stderr, "\n");
             }
             transfer_event(x, at, n < want ? CC_SHORT_PACKET : CC_SUCCESS, want - n, slot, dci);
         }
@@ -1018,7 +1027,10 @@ static uint32_t tp_now_ms(void) {
 /* Queue the current state as a report. */
 static void tp_queue(HvXhci *x) {
     uint8_t r[HV_TP_REPORT_LEN];
-    x->tp_ts = tp_now_ms();
+    /* Strictly increasing: two frames in the same millisecond would give the guest a
+       zero time delta (speed = distance / 0) and it can throw the frame away. */
+    uint32_t now = tp_now_ms();
+    x->tp_ts = now > x->tp_ts ? now : x->tp_ts + 1;
     int len = tp_build_report(x, r);
     if (x->tp_rtail - x->tp_rhead < HV_TP_REPORTS) {
         unsigned at = x->tp_rtail % HV_TP_REPORTS;
