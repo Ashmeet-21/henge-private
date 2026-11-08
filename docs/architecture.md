@@ -63,8 +63,9 @@ Magic Trackpad 2 on the xHCI USB bus (`devices/xhci.c`): Apple's vendor-defined
 multitouch format, report ID 2 with a 12-byte prefix and nine bytes a finger,
 in the pad's 8134 x 5206 sensor units. Because the guest's own multitouch
 engine sees a real Apple pad, it does the pointing, the scrolling and the
-gestures itself — the app sends only finger positions, taps (a quick press)
-and holds (a full press). The format follows the Linux kernel's
+gestures itself — the app sends only finger positions. Clicking is the volume
+buttons' job on iPhone (`VolumeClicks.swift`): up left, down right, hold to drag.
+The format follows the Linux kernel's
 `hid-magicmouse` MT2 support and VoodooInput's Magic Trackpad II emulation.
 
 ## The boot ROM

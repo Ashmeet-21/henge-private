@@ -11,7 +11,11 @@ Every change keeps its original author in the git history.
   a Magic Trackpad 2 (Apple's vendor multitouch format) on the xHCI USB bus, so the guest's
   own multitouch engine does the pointing and gestures: two-finger scroll, three-finger
   swipes for Spaces, Mission Control and App Exposé, two-finger taps for right-click, and so
-  on. A tap is a quick press; hold to press, then drag to grab.
+  on. The surface only points and gestures; clicking moved to the volume buttons.
+- **The volume buttons are the trackpad's buttons** (iPhone): up is left click, down is
+  right click, hold to drag. They're intercepted so they don't change volume while a Mac
+  runs, and the trackpad no longer tap-clicks or hold-drags, so there's no press/debounce
+  dead zone. A Settings toggle turns it off.
 - The session controls are now shown with a four-finger tap, leaving three fingers free for
   the Mac's own gestures.
 - `devices/xhci.c` generalises the xHCI host to two USB devices (the keyboard and the

@@ -6,6 +6,7 @@ struct SettingsView: View {
     @AppStorage(HardwareMouse.speedKey) private var mouseSpeed = 1.0
     @AppStorage(HardwareMouse.reverseKey) private var reverseScrolling = false
     @AppStorage(HardwareMouse.scrollSpeedKey) private var scrollSpeed = 0.3
+    @AppStorage(VolumeClicks.enabledKey) private var volumeButtons = true
     @AppStorage(EngineTuning.refreshKey) private var refreshRate = 60
     @AppStorage(EngineTuning.fastFlushKey) private var fastFlush = true
     @AppStorage(EngineTuning.wfiSpinKey) private var wfiSpin = false
@@ -53,6 +54,14 @@ struct SettingsView: View {
                             Slider(value: $scrollSpeed, in: 0.1...1.5)
                         }
                         Text("A Magic Keyboard or a Bluetooth mouse moves the Mac's pointer. Pointer speed changes apply the next time a Mac starts; scroll speed changes apply immediately.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                    .listRowBackground(Desk.card)
+                }
+                if !Device.isPad {
+                    Section("Trackpad") {
+                        Toggle("Volume buttons click", isOn: $volumeButtons)
+                        Text("The volume buttons become the trackpad's buttons: up is left click, down is right click, hold to drag. They don't change volume while a Mac is running. Applies the next time a Mac starts.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                     .listRowBackground(Desk.card)

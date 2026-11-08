@@ -147,6 +147,7 @@ struct SessionView: View {
             }
             HardwareKeys.releaseAll()
             HardwareMouse.shared.releaseButtons()
+            VolumeClicks.shared.releaseButtons()
         }
         .onChange(of: showDetails) { showing in
             if showing { HardwareKeys.releaseAll(); StickyKeys.shared.releaseAll() }
@@ -157,6 +158,7 @@ struct SessionView: View {
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true
             HardwareMouse.shared.start()
+            VolumeClicks.shared.start()
         }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
@@ -164,6 +166,7 @@ struct SessionView: View {
             StickyKeys.shared.releaseAll()
             HardwareKeys.releaseAll()
             HardwareMouse.shared.stop()
+            VolumeClicks.shared.stop()
         }
         .modifier(ExternalMacDisplayModifier(presentation: MacPresentation(display: display, aspect: mac.aspect)))
         .task { await run() }
