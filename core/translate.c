@@ -896,14 +896,20 @@ static void translate_mem(Emit *e, uint32_t insn, uint64_t pc) {
         translate_excl(e, insn, pc);
         return;
     }
-    if (e->slow_mem || op.kind == HV_MEM_EXCL || op.kind == HV_MEM_CASP) {
+    /* CASP on the host address, as the guest wrote it, when its two pairs are guest registers that live
+       in their own host registers (pairs must be even and consecutive: no stand-ins). macOS 27 runs tens of
+       thousands a second, and each took the helper. */
+    int casp = op.kind == HV_MEM_CASP;
+    if (casp && (is_stolen(op.rs) || is_stolen(op.rs + 1) || is_stolen(op.rt) || is_stolen((op.rt + 1) & 31))) casp = -1;
+    if (e->slow_mem || op.kind == HV_MEM_EXCL || casp < 0) {
         put_helper(e, pc, insn, HV_OP_MEM);
         return;
     }
+    if (casp) op.align = 1; /* a misaligned one goes to the helper, which raises the alignment fault */
     int literal = op.mode == HV_ADDR_LITERAL;
     int vec_kind = op.kind == HV_MEM_VEC_MULTI || op.kind == HV_MEM_VEC_SINGLE;
     int pair = op.kind == HV_MEM_PAIR;
-    int rmw = op.kind == HV_MEM_CAS || op.kind == HV_MEM_ATOMIC;
+    int rmw = op.kind == HV_MEM_CAS || op.kind == HV_MEM_ATOMIC || casp;
     int rm_used = op.mode == HV_ADDR_REG || (vec_kind && op.mode == HV_ADDR_POST && op.rm != 31);
 
     uint32_t used = 0;
@@ -911,6 +917,7 @@ static void translate_mem(Emit *e, uint32_t insn, uint64_t pc) {
     if (!op.vec) used |= 1u << op.rt | (pair ? 1u << op.rt2 : 0);
     if (rm_used) used |= 1u << op.rm;
     if (rmw) used |= 1u << op.rs;
+    if (casp) used |= 1u << (op.rs + 1) | 1u << op.rt | 1u << ((op.rt + 1) & 31);
     /* Guest x6, x7 and x15 live in the HvCpu: their host registers are as free as ever. */
     if (!hv_knob[HV_K_TEST3]) used &= ~(1u << 6 | 1u << 7 | 1u << 15);
     uint8_t s[3];
