@@ -36,6 +36,9 @@ jobs:
           # qemu (~140 MB) is not used by the pieces built here (libffi, glib, libslirp, rppairing): don't download it
           sed -i '' 's/ "$QEMU_SRC"//g' scripts/fetch_sources.sh
           grep -q QEMU_SRC scripts/fetch_sources.sh && { echo "qemu still listed in fetch_sources.sh"; exit 1; }
+          # libffi and libslirp ship in ci/sources (GitHub release downloads were failing); fetch skips files it has
+          (cd ../ci/sources && shasum -a 256 -c SHA256SUMS)
+          mkdir -p third_party/sources && cp ../ci/sources/*.tar.gz third_party/sources/
           # GitHub release downloads sometimes answer 504 for a while: try again rather than fail the build
           for try in 1 2 3 4 5 6; do ./scripts/fetch_sources.sh && break; [ $try = 6 ] && exit 1; echo "fetch failed, retry $try in 60 s"; sleep 60; done
           # glib's build fetches pcre2 from Meson's WrapDB, which also answers 504 at times
