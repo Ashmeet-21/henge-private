@@ -92,6 +92,9 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     /* Source layout for a multi-plane video surface. */
     uint32_t plane_count;
     uint64_t plane_from[4], plane_row[4], plane_h[4];
+    /* Each plane's sampled guest bytes when last copied: only the planes the guest changed are copied, so a CPU
+       write to one plane (a decoder refilling luma) does not wipe what the GPU drew into another (chroma, alpha). */
+    uint64_t plane_hash[4];
     /* A heap: private memory, a buffer over all of it. */
     id<MTLBuffer> heap_whole;
     /* A heap's or a private texture's copy in guest memory, and which side has the newest bytes. */
@@ -710,11 +713,10 @@ static IOSurfaceRef make_iosurface(HvObject *to, const uint8_t *desc, uint64_t a
     return made;
 }
 
-/* A sample of every 64th byte of the guest's pixels, to tell cheaply whether they changed. */
-static uint64_t guest_hash(HvObject *s) {
-    const uint8_t *from = s->mapped + s->first;
+/* A sample of every 64th byte, to tell cheaply whether pixels changed. */
+static uint64_t hash_bytes(const uint8_t *from, uint64_t len) {
     uint64_t hash = 0xcbf29ce484222325ull;
-    for (uint64_t i = 0; i + 8 <= s->alloc; i += 64) {
+    for (uint64_t i = 0; i + 8 <= len; i += 64) {
         uint64_t v;
         memcpy(&v, from + i, 8);
         hash = (hash ^ v) * 0x100000001b3ull;
@@ -722,13 +724,39 @@ static uint64_t guest_hash(HvObject *s) {
     return hash;
 }
 
+static uint64_t guest_hash(HvObject *s) { return hash_bytes(s->mapped + s->first, s->alloc); }
+
+/* Plane i of a multi-plane surface in the guest's memory, or 0 bytes if its layout does not fit the allocation. */
+static uint64_t plane_bytes(HvObject *s, uint32_t i) {
+    uint64_t row = s->plane_row[i], off = s->plane_from[i];
+    if (!row || off > s->alloc || s->plane_h[i] > (s->alloc - off) / row) return 0;
+    return row * s->plane_h[i];
+}
+
+/* Every plane's hash as the guest has it now, for a host surface already holding those pixels. */
+static void note_plane_hashes(HvObject *s) {
+    for (uint32_t i = 0; i < s->plane_count && i < 4; i++)
+        s->plane_hash[i] = hash_bytes(s->mapped + s->first + s->plane_from[i], plane_bytes(s, i));
+}
+
 /* Guest pixels into its IOSurface, when they changed. */
 static void sync_iosurface(HvObject *s) {
     if (!s->iosurface) return;
     const uint8_t *from = s->mapped + s->first;
-    uint64_t hash = guest_hash(s);
-    if (hash == s->content_hash) return;
-    s->content_hash = hash;
+    BOOL by_plane = s->plane_count && IOSurfaceGetPlaneCount(s->iosurface) >= s->plane_count;
+    uint64_t hashes[4] = {0};
+    uint32_t changed = 0;
+    if (by_plane) {
+        for (uint32_t i = 0; i < s->plane_count && i < 4; i++) {
+            hashes[i] = hash_bytes(from + s->plane_from[i], plane_bytes(s, i));
+            if (hashes[i] != s->plane_hash[i]) changed |= 1u << i;
+        }
+        if (!changed) return;
+    } else {
+        uint64_t hash = guest_hash(s);
+        if (hash == s->content_hash) return;
+        s->content_hash = hash;
+    }
     IOSurfaceLock(s->iosurface, 0, NULL);
     /* HV_PVG_HOST_DUMP=prefix (debugging): the host surface as it is just before the guest's pixels go over it,
        for the first few multi-plane surfaces, with its layout in a .txt beside it: did the GPU draw something here
@@ -753,10 +781,12 @@ static void sync_iosurface(HvObject *s) {
             fclose(f);
         }
     }
-    if (s->plane_count && IOSurfaceGetPlaneCount(s->iosurface) >= s->plane_count) {
+    if (by_plane) {
         /* IOSurface can choose different offsets and row strides from those
-           requested. Copy each video plane through its actual host layout. */
+           requested. Copy each changed video plane through its actual host layout. */
         for (uint32_t i = 0; i < s->plane_count && i < 4; i++) {
+            if (!(changed & 1u << i)) continue;
+            s->plane_hash[i] = hashes[i];
             uint8_t *dst = IOSurfaceGetBaseAddressOfPlane(s->iosurface, i);
             size_t dst_row = IOSurfaceGetBytesPerRowOfPlane(s->iosurface, i);
             size_t rows = MIN((size_t)s->plane_h[i], IOSurfaceGetHeightOfPlane(s->iosurface, i));
@@ -846,6 +876,7 @@ static void sync_iosurface(HvObject *s) {
                 CFRelease(made);
                 surface->iosurface = (IOSurfaceRef)CFRetain((__bridge CFTypeRef)shared);
                 surface->content_hash = guest_hash(surface);
+                note_plane_hashes(surface);
                 static int told;
                 if (told++ < 8) fprintf(stderr, "hengevm: pvg-metal: surface %llu shares the host surface of the same guest memory (%s)\n", h.mapping, pk.UTF8String);
             } else {
