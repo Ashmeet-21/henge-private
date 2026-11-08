@@ -1052,8 +1052,8 @@ static void translate_mem(Emit *e, uint32_t insn, uint64_t pc) {
     /* hv_tlb_refill's flags: bit 9 set (so never 0), bit 0 write, bits 2..1 the table, 8..3 bytes - 1 */
     uint32_t rflags = can_refill ? 1u << 9 | (uint32_t)(op.store ? 1 : 0) | (uint32_t)el_idx << 1 | (op.bytes - 1) << 3 : 0;
     put_ool(e, (Ool){.kind = OOL_SLOW, .pc = pc, .insn = insn, .nrestore = 3, .restore = {A, T, U},
-                     /* The exact recheck for a page's last 15 bytes costs 6 words in every access's slow path; without it
-                        (HV_RECHECK=0, the default) such an access takes the refill, which sends it to the helper. */
+                     /* The exact recheck for a page's last 15 bytes costs 6 words in every access's slow path (on by default,
+                        see machine.c); with HV_RECHECK=0 such an access takes the refill, which sends it to the helper. */
                      .recheck = hv_knob[HV_K_RECHECK] && !(op.align && op.bytes > 1) && op.bytes <= HV_TLB_ADJ + 1, .addr = (uint8_t)addr,
                      .t = (uint8_t)T, .u = (uint8_t)U, .bytes = (uint8_t)op.bytes,
                      .tag_off = tlb + (op.store ? 8 : 0), .retry = retry, .rflags = rflags});
@@ -1909,7 +1909,7 @@ static int translate_emit(HvMachine *m, HvBlock *b, const uint32_t *code, uint32
     e->flat = hv_knob[HV_K_TEST2];
     e->overflow = 0;
     e->flags = b->flags;
-    e->slow_mem = m->slow_mem;
+    e->slow_mem = m->slow_mem || hv_knob[HV_K_PREDSTAT]; /* HV_PREDSTAT (measuring): every access through hv_mem_emulate */
     e->page = b->va & ~((1ull << HV_TLB_PAGE_BITS) - 1);
     e->no_ijc = !m->chain;
     e->m = m;
