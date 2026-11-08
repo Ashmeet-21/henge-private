@@ -563,9 +563,10 @@ void hv_tlb_flush_va(HvCpu *cpu, uint64_t va) {
    this entry was there, it must not stay writable. */
 static void stash_drop(HvPerCpu *p, int asid);
 
-static void write_guard(HvCpu *cpu, HvRam *ram, uint64_t pg, uint32_t code, HvTlbEntry *e) {
-    /* Say where, so that the page becoming code drops just this entry (or, if
-       this CPU now maps it writable twice, makes the protector scan). */
+/* Say where, so that the page becoming code drops just this entry (or, if
+   this CPU now maps it writable twice, makes the protector scan). The check
+   that must follow, after a full fence, is write_guard's last two lines. */
+static void write_hint(HvCpu *cpu, HvRam *ram, uint64_t pg, uint32_t code) {
     uint64_t *hint = &ram->whint[pg * HV_MAX_CPUS + cpu->index];
     uint64_t mine = code + 1, old = __atomic_load_n(hint, __ATOMIC_RELAXED), now = old;
     const uint8_t *host_page = ram->host + (pg << HV_TLB_PAGE_BITS);
@@ -581,6 +582,10 @@ static void write_guard(HvCpu *cpu, HvRam *ram, uint64_t pg, uint32_t code, HvTl
         if (!have) now = place >= 0 ? (old & ~(0xffffull << (16 * place))) | mine << (16 * place) : HV_WHINT_MANY;
         if (now != old) __atomic_store_n(hint, now, __ATOMIC_RELAXED);
     }
+}
+
+static void write_guard(HvCpu *cpu, HvRam *ram, uint64_t pg, uint32_t code, HvTlbEntry *e) {
+    write_hint(cpu, ram, pg, code);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     if (__atomic_load_n(&ram->code_pages[pg], __ATOMIC_RELAXED)) e->write_tag = HV_TLB_INVALID;
 }
@@ -1102,6 +1107,10 @@ void hv_tlb_switch_user(HvCpu *cpu, uint64_t old, uint64_t now) {
             if (m->stats_interval) m->stats.stash_stale++;
             break;
         }
+        /* Writable entries: all their hints, one fence, then each page's code check (write_guard, batched: one fence per
+           switch instead of one per entry; every entry is in place before the fence and checked after it). */
+        uint16_t pend[HV_STASH_CAP];
+        uint32_t npend = 0;
         for (uint32_t j = 0; j < r->n; j++) {
             const HvTlbEntry *from = &r->ent[j];
             if (from->read_tag == HV_TLB_INVALID && from->write_tag == HV_TLB_INVALID && from->exec_tag == HV_TLB_INVALID)
@@ -1110,11 +1119,19 @@ void hv_tlb_switch_user(HvCpu *cpu, uint64_t old, uint64_t now) {
             *e = *from;
             cpu->user_fills[cpu->nuser_fills++] = r->slot[j];
             if (e->write_tag != HV_TLB_INVALID) {
-                const uint8_t *host = (const uint8_t *)(uintptr_t)(e->write_tag + HV_TLB_ADJ + e->addend);
+                const uint8_t *host = (const uint8_t *)(uintptr_t)(from->write_tag + HV_TLB_ADJ + from->addend);
                 HvRam *ram = ram_of_host(m, host);
                 if (!ram) e->write_tag = HV_TLB_INVALID;
-                else write_guard(cpu, ram, (uint64_t)(host - ram->host) >> HV_TLB_PAGE_BITS, r->slot[j], e);
+                else write_hint(cpu, ram, (uint64_t)(host - ram->host) >> HV_TLB_PAGE_BITS, r->slot[j]), pend[npend++] = (uint16_t)j;
             }
+        }
+        if (npend) __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        for (uint32_t q = 0; q < npend; q++) {
+            const HvTlbEntry *from = &r->ent[pend[q]];
+            const uint8_t *host = (const uint8_t *)(uintptr_t)(from->write_tag + HV_TLB_ADJ + from->addend);
+            HvRam *ram = ram_of_host(m, host);
+            if (ram && __atomic_load_n(&ram->code_pages[(uint64_t)(host - ram->host) >> HV_TLB_PAGE_BITS], __ATOMIC_RELAXED))
+                (&cpu->tlb[0] + r->slot[pend[q]])->write_tag = HV_TLB_INVALID;
         }
         if (m->stats_interval) m->stats.stash_hits++;
         if (m->stats_interval) m->stats.stash_entries += r->n;
