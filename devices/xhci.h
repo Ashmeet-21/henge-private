@@ -80,6 +80,7 @@ typedef struct HvXhci {
     uint64_t tp_delivered;
     uint32_t tp_reqs;   /* control requests logged, capped */
     uint32_t tp_db;     /* doorbells logged, capped */
+    uint32_t tp_multi_logs; /* multi-finger deliveries logged, capped */
     uint8_t tp_f1[8];   /* feature report 1: the header for the selected sensor register */
     int tp_f1_len;
 } HvXhci;

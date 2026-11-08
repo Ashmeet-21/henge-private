@@ -520,6 +520,10 @@ static void run_ep_in(HvXhci *x, int slot) {
             x->tp_rhead++;
             x->tp_delivered++;
             if (x->tp_delivered <= 16) fprintf(stderr, "hengevm: xhci: trackpad: %u bytes to the guest (delivered %llu)\n", n, (unsigned long long)x->tp_delivered);
+            if (len >= 30 && x->tp_multi_logs < 40) { /* two fingers or more: the gesture frames */
+                x->tp_multi_logs++;
+                fprintf(stderr, "hengevm: xhci: trackpad: %d fingers to the guest\n", (int)((len - 12) / 9));
+            }
             transfer_event(x, at, n < want ? CC_SHORT_PACKET : CC_SUCCESS, want - n, slot, dci);
         }
     }
@@ -740,6 +744,7 @@ static void reset(HvXhci *x) {
     x->tp_delivered = 0;
     x->tp_reqs = 0;
     x->tp_db = 0;
+    x->tp_multi_logs = 0;
     x->tp_f1_len = 0;
     for (int p = 0; p < HV_XHCI_PORTS; p++)
         x->portsc[p] = PORT_PP | PORT_CCS | PORT_CSC | (uint32_t)(p ? SPEED_HIGH : SPEED_FULL) << PORT_SPEED_SHIFT | 7u << PORT_PLS_SHIFT;
@@ -1077,6 +1082,16 @@ void hv_xhci_touch_button(HvXhci *x, int down) {
 
 void hv_xhci_poll(HvXhci *x) {
     if (!x) return;
+    /* The guest's gesture engine wants a steady stream of frames, not only ones on
+       touch changes: while fingers are down, keep reporting the state so a gesture
+       does not starve in the gaps between touch events. */
+    pthread_mutex_lock(&x->mu);
+    if (x->tp_mt) {
+        int active = 0;
+        for (int i = 0; i < HV_TP_FINGERS; i++) if (x->tp_fingers[i].in) { active = 1; break; }
+        if (active && tp_now_ms() - x->tp_ts >= 8) tp_queue(x);
+    }
+    pthread_mutex_unlock(&x->mu);
     for (int slot = 1; slot <= HV_XHCI_SLOTS; slot++)
         if (x->slots[slot].dev >= 0) run_ep_in(x, slot);
 }
