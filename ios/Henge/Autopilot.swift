@@ -12,6 +12,8 @@ import Foundation
 ///   type TEXT          typed into the Mac (the log shows only how long it is)
 ///   key CODE           a Linux key code (28 is Return, 1 is Escape)
 ///   cmd KEY            KEY (a character, or space) with Command held
+///   move X Y, click X Y  the pointer to a spot on the Mac's screen (its pixels), and a click there
+///   pointer            where the pointer is now, into the log
 ///   knob NAME VALUE    a translation knob (core/machine.h)
 ///   log TEXT           a marker in henge.log
 ///   stop               stop the Mac
@@ -76,6 +78,26 @@ enum Autopilot {
             await Keys.typeSlowly(arg)
         case "key":
             if let code = UInt16(arg) { Keys.press(code) }
+        case "move", "click": // guest display pixels: nudged there in small steps, as macOS accelerates big ones
+            let xy = arg.split(separator: " ").compactMap { Int32($0) }
+            guard xy.count == 2 else { HengeLog.log("autopilot", "\(parts[0]) wants X Y"); return }
+            var px: Int32 = 0, py: Int32 = 0
+            for _ in 0..<1500 {
+                guard henge_vm_pointer(&px, &py) == 0 else { break }
+                let dx = xy[0] - px, dy = xy[1] - py
+                if abs(dx) < 3 && abs(dy) < 3 { break }
+                henge_vm_mouse_move(max(-16, min(16, dx)), max(-16, min(16, dy)))
+                try? await Task.sleep(nanoseconds: 30_000_000)
+            }
+            if parts[0] == "click" {
+                henge_vm_mouse_button(0, 1)
+                try? await Task.sleep(nanoseconds: 120_000_000)
+                henge_vm_mouse_button(0, 0)
+            }
+        case "pointer":
+            var px: Int32 = 0, py: Int32 = 0
+            let rc = henge_vm_pointer(&px, &py)
+            HengeLog.log("autopilot", "pointer \(rc == 0 ? "at \(px), \(py)" : "not known yet")")
         case "cmd": // "cmd space", "cmd q": the key with Command held
             if let c = arg == "space" ? " " : arg.first { Keys.chord(125, c) }
         case "knob":

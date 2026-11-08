@@ -147,6 +147,10 @@ typedef struct HvCpu {
        are cleared. */
     uint16_t asid_cid[65536];
     uint16_t cid_asid[65536]; /* --stats: the ASID a user id was given to (to tell live tags from dead ones) */
+    /* The translation table base asid_cid[ASID] was given under: an ASID back with another table (xnu gives one hardware
+       ASID to more than one address space, and may follow a switch between them with a whole-TLB flush rather than one
+       by ASID) gets a fresh id, as the TLB stashes are keyed by the whole TTBR0. */
+    uint64_t asid_base[65536];
     uint32_t next_cid, kernel_gen;
     uint64_t ttbr0_changed_at; /* --stats: host time of the last TTBR0 change */
 

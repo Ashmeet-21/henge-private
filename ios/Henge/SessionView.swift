@@ -33,6 +33,10 @@ struct SessionView: View {
     @State private var showRevealHint = false
     @State private var pointerRefused = false
     @AppStorage("henge.controls.hintsShown") private var revealHintsShown = 0
+    /// Once per install: macOS's moving wallpapers and aerial screen saver are video, decoded by the emulated
+    /// CPUs (a phone ran about 30% faster with a still one).
+    @AppStorage("henge.tips.stillWallpaperShown") private var stillWallpaperTipShown = false
+    @State private var showWallpaperTip = false
     @State private var confirmStop = false
     @State private var shuttingDown = false   // macOS was asked to shut down: close once it has
     @State private var zoomCentre = CGPoint(x: 0.5, y: 0.5) // where the zoomed view is, 0...1 of the Mac's screen
@@ -113,6 +117,18 @@ struct SessionView: View {
                         .transition(.opacity)
                         .allowsHitTesting(false)
                 }
+                if showWallpaperTip && !showRevealHint && !pointerRefused {
+                    Label("For more speed, give this Mac a still wallpaper and set its screen saver to Never in System Settings.", systemImage: "speedometer")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(.white)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: min(full.width - 40, 520))
+                        .padding(.horizontal, 18).padding(.vertical, 12)
+                        .deskGlass(in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                        .position(x: full.width / 2, y: insets.top + 56)
+                        .transition(.opacity)
+                        .allowsHitTesting(false)
+                }
                 if let error { errorCard(error, layout) }
                 KeyboardCatcher(active: $typing).frame(width: 0, height: 0)
             }
@@ -122,6 +138,7 @@ struct SessionView: View {
             .animation(.easeInOut(duration: 0.25), value: typing)
             .animation(.easeInOut(duration: 0.25), value: controlsHidden)
             .animation(.easeInOut(duration: 0.25), value: showRevealHint)
+            .animation(.easeInOut(duration: 0.25), value: showWallpaperTip)
             .onReceive(NotificationCenter.default.publisher(for: UIPointerLockState.didChangeNotification)) { _ in
                 pointerRefused = PointerLock.refused
             }
@@ -642,6 +659,11 @@ struct SessionView: View {
                 HengeLog.log("perf", "blocks/s \(String(format: "%.0f", blocksPerSecond)), GPU frames/10s \(gpuFrames &- lastGPUFrames), "
                              + "network tx \(framesOut), rx \(framesIn), thermal \(Self.thermalLabel(heat))")
                 lastGPUFrames = gpuFrames
+            }
+            if tick == 60 && !stillWallpaperTipShown { // about when the desktop is up after a login
+                stillWallpaperTipShown = true
+                showWallpaperTip = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 10) { showWallpaperTip = false }
             }
             if tick % 30 == 0 { HengeLog.logFootprint("session") } // how close to the limit, for a memory kill leaves no crash report
             if tick % 60 == 0 { MacPreview.save(for: mac) }

@@ -12,10 +12,14 @@ DECLARE_PROGRAM(p_timer_irq);
 DECLARE_PROGRAM(p_uart);
 extern const char devices_programs_begin[], devices_programs_finish[];
 
-#ifndef WORK
-#define WORK "build"
-#endif
-#define RAM_SIZE (384ull << 20)
+/* HV_TEST_WORK, or the system temporary directory: two small disk images go there. */
+static const char *work_dir(void) {
+    const char *w = getenv("HV_TEST_WORK");
+    if (w && *w) return w;
+    w = getenv("TMPDIR");
+    return w && *w ? w : "/tmp";
+}
+#define RAM_SIZE (384ull << 20)   /* the large-transfer checks (PR #31) need room */
 
 static HvMachine m;
 static HvCpu cpu;
@@ -477,9 +481,11 @@ static void test_guest_programs(void) {
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (hv_machine_init(&m, 4 << 20) != 0) return 1;
-    const char *root_path = WORK "/test-root.img", *aux_path = WORK "/test-aux.img";
+    char root_path[1024], aux_path[1024];
+    snprintf(root_path, sizeof root_path, "%s/hv-test-root.img", work_dir());
+    snprintf(aux_path, sizeof aux_path, "%s/hv-test-aux.img", work_dir());
     if (make_disk(root_path, 1 << 20, 1) || make_disk(aux_path, 256 << 10, 2)) {
-        printf("cannot create test disks in %s\n", WORK);
+        printf("cannot create test disks in %s\n", work_dir());
         return 1;
     }
     static HvDisk root, aux;

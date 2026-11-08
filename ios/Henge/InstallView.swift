@@ -49,8 +49,22 @@ struct InstallView: View {
         DeskHeading("Version")
         VStack(spacing: 0) {
             ForEach(MacOSRelease.all) { r in
-                Button { release = r } label: { versionRow(r) }
-                    .buttonStyle(.plain)
+                HStack(spacing: 0) {
+                    Button { release = r } label: { versionRow(r) }
+                        .buttonStyle(.plain)
+                    if Installer.haveImage(r) && !installer.busy { // restore images are 15-25 GB: deleting one should be easy to find
+                        Button { confirmDeleteDownload = r } label: {
+                            Image(systemName: "trash")
+                                .font(.system(size: 15, weight: .medium))
+                                .foregroundStyle(Desk.dim)
+                                .frame(width: 44, height: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Delete the \(r.name) download")
+                        .padding(.trailing, 6)
+                    }
+                }
                     .contextMenu {
                         if Installer.haveImage(r) {
                             Button("Delete Download", role: .destructive) { confirmDeleteDownload = r }
