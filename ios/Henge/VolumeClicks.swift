@@ -270,19 +270,19 @@ final class VolumeClicks: NSObject {
         HengeLog.log("input", "volume intercept: capture session \(expensiveStream ? "WITH frame stream" : "minimal, no stream"); the interaction is hosted by CaptureInteractionView in the session")
     }
 
-    /// True press/release from the capture interaction: down on .began, up on .ended or
-    /// .cancelled. No timers, no guessing. Called by CaptureInteractionView.
+    /// True press/release from the capture interaction: the physical button *is* the mouse
+    /// button. Down on .began, up on .ended/.cancelled — no timers, no hold logic; macOS
+    /// decides click vs drag from how long it's held and whether the pad moves. The button
+    /// edge goes out first; the haptic is only feedback and must never sit in front of it.
+    /// Called by CaptureInteractionView.
     func captureButton(left: Bool, down: Bool) {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.active else { return }
-            if down {
-                if !(left ? self.leftDown : self.rightDown) {
-                    self.buzz.impactOccurred()
-                    HengeLog.log("input", "volume intercept: \(left ? "left" : "right") down")
-                }
-                self.setDown(true, left: left)
-            } else {
-                self.setDown(false, left: left)
+            let wasDown = left ? self.leftDown : self.rightDown
+            self.setDown(down, left: left)
+            if down && !wasDown {
+                self.buzz.impactOccurred()
+                HengeLog.log("input", "volume intercept: \(left ? "left" : "right") down")
             }
         }
     }
