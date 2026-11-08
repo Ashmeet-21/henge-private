@@ -43,6 +43,7 @@ final class VolumeClicks: NSObject {
         let button: Int32 = left ? 0 : 1
         let currently = left ? leftDown : rightDown
         guard currently != down else { return }
+        HengeLog.log("input", "mouse button: \(left ? "left" : "right") \(down ? "down" : "up") -> guest")
         henge_vm_mouse_button(button, down ? 1 : 0)
         if left { leftDown = down } else { rightDown = down }
     }
@@ -315,8 +316,14 @@ struct CaptureInteractionView: UIViewRepresentable {
         if #available(iOS 17.2, *) {
             // primary = volume down (right click), secondary = volume up (left click).
             let interaction = AVCaptureEventInteraction(
-                primary: { event in VolumeClicks.shared.captureButton(left: false, down: event.phase == .began) },
-                secondary: { event in VolumeClicks.shared.captureButton(left: true, down: event.phase == .began) }
+                primary: { event in
+                    HengeLog.log("input", "capture primary (vol down) phase=\(event.phase)")
+                    VolumeClicks.shared.captureButton(left: false, down: event.phase == .began)
+                },
+                secondary: { event in
+                    HengeLog.log("input", "capture secondary (vol up) phase=\(event.phase)")
+                    VolumeClicks.shared.captureButton(left: true, down: event.phase == .began)
+                }
             )
             interaction.isEnabled = true
             view.addInteraction(interaction)
