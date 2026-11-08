@@ -657,7 +657,23 @@ static void walk_end(HvCpu *cpu) {
     if (cpu->pc_state) __atomic_add_fetch(&cpu->pc_state->walk_seq, 1, __ATOMIC_RELEASE);
 }
 
+static HvRam *ram_of_host(HvMachine *m, const uint8_t *host);
+
 uint32_t hv_mmu_access(HvCpu *cpu, uint64_t va, HvAccess acc, int el, uint64_t *pa) {
+    /* The TLB entry first, as translated code trusts it: slow paths that are slow for another reason (a page's
+       last bytes, the access kind) need no walk (macOS 27: 100-250K a second). */
+    if (acc != HV_ACC_EXEC && cpu->m) {
+        const HvTlbEntry *e = hv_tlb_ent(cpu, (uint32_t)(va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), hv_tlb_table(cpu, el));
+        uint64_t tag = acc == HV_ACC_WRITE ? e->write_tag : e->read_tag;
+        if (tag != HV_TLB_INVALID && tag + HV_TLB_ADJ == (va & ~(uint64_t)PAGE_MASK)) {
+            const uint8_t *host = (const uint8_t *)(uintptr_t)(va + (uint64_t)e->addend);
+            HvRam *ram = ram_of_host(cpu->m, host);
+            if (ram) {
+                *pa = ram->pa + (uint64_t)(host - ram->host);
+                return 0;
+            }
+        }
+    }
     HvWalk w;
     walk_begin(cpu);
     hv_mmu_walk(cpu, va, acc, el, &w);
