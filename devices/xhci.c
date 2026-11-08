@@ -255,6 +255,66 @@ static void set_ep_state(HvXhci *x, int slot, int dci, uint32_t state) {
 
 static int tp_build_report(HvXhci *x, uint8_t *out);
 
+/* The Magic Trackpad 2's surface, in 0.01 mm (160.0 x 114.9 mm). The guest's driver
+   reads it out of the sensor-surface register to scale touches into millimetres. */
+#define HV_TP_PHYS_X 16000
+#define HV_TP_PHYS_Y 11490
+
+/* Before the guest's multitouch driver will use the pad it reads a handful of
+   sensor-configuration registers: it selects one by writing feature report 1, reads
+   report 1 back for a five-byte header giving the register's length, then reads the
+   register itself. These are the Magic Trackpad 2's answers, as VoodooInput's
+   simulator gives them (the I2C trackpad emulators talk the same protocol). Returns
+   the register's bytes, report ID first, or 0 for one we do not know. */
+static int tp_register(int rid, uint8_t *out) {
+    uint8_t wl = HV_TP_PHYS_X & 0xff, wh = (HV_TP_PHYS_X >> 8) & 0xff;
+    uint8_t hl = HV_TP_PHYS_Y & 0xff, hh = (HV_TP_PHYS_Y >> 8) & 0xff;
+    static const uint8_t d1[] = {0xd1, 0x81}; /* family ID */
+    static const uint8_t d3[] = {0xd3, 0x01, 0x16, 0x1e, 0x03, 0x95, 0x00, 0x14, 0x1e, 0x62, 0x05, 0x00, 0x00}; /* sensor rows/columns */
+    static const uint8_t d0[] = {0xd0, 0x02, 0x01, 0x00, 0x14, 0x01, 0x00, 0x1e, 0x00, 0x02, 0x14, 0x02, 0x01, 0x0e, 0x02, 0x00}; /* sensor region */
+    static const uint8_t a1[] = {0xa1, 0x00, 0x00, 0x05, 0x00, 0xfc, 0x01}; /* sensor region param */
+    static const uint8_t s7f[] = {0x7f, 0x00, 0x00, 0x00, 0x00};
+    switch (rid) {
+    case 0xd1: memcpy(out, d1, sizeof d1); return (int)sizeof d1;
+    case 0xd3: memcpy(out, d3, sizeof d3); return (int)sizeof d3;
+    case 0xd0: memcpy(out, d0, sizeof d0); return (int)sizeof d0;
+    case 0xa1: memcpy(out, a1, sizeof a1); return (int)sizeof a1;
+    case 0x7f: memcpy(out, s7f, sizeof s7f); return (int)sizeof s7f;
+    case 0xc8: out[0] = 0xc8; out[1] = 0x08; return 2;
+    case 0xd9: { /* sensor surface: width and height, then a fixed calibration tail */
+        const uint8_t d9[] = {0xd9, wl, wh, 0, 0, hl, hh, 0, 0, 0x44, 0xe3, 0x52, 0xff, 0xbd, 0x1e, 0xe4, 0x26};
+        memcpy(out, d9, sizeof d9); return (int)sizeof d9;
+    }
+    case 0xdb: { /* the whole sensor description: every register, length-prefixed */
+        const uint8_t db[] = {
+            0xdb, 0x01, 0x02, 0x00,
+            0xd1, 0x81, 0x0d, 0x00,
+            0xd3, 0x01, 0x16, 0x1e, 0x03, 0x95, 0x00, 0x14, 0x1e, 0x62, 0x05, 0x00, 0x00, 0x10, 0x00,
+            0xd0, 0x02, 0x01, 0x00, 0x14, 0x01, 0x00, 0x1e, 0x00, 0x02, 0x14, 0x02, 0x01, 0x0e, 0x02, 0x00, 0x07, 0x00,
+            0xa1, 0x00, 0x00, 0x05, 0x00, 0xfc, 0x01, 0x11, 0x00,
+            0xd9, wl, wh, 0, 0, hl, hh, 0, 0, 0x44, 0xe3, 0x52, 0xff, 0xbd, 0x1e, 0xe4, 0x26,
+            0x7f, 0x00, 0x00, 0x00, 0x00,
+        };
+        memcpy(out, db, sizeof db); return (int)sizeof db;
+    }
+    default: return 0;
+    }
+}
+
+/* Feature report 1 was written with a register ID: remember the five-byte header the
+   guest reads back next, telling it how long that register's answer is. */
+static void tp_select(HvXhci *x, int reg) {
+    uint8_t scratch[80];
+    int n = tp_register(reg, scratch);
+    if (n <= 0) { x->tp_f1_len = 0; return; }
+    x->tp_f1[0] = 0x01;
+    x->tp_f1[1] = (uint8_t)reg;
+    x->tp_f1[2] = 0x00;
+    x->tp_f1[3] = (uint8_t)((n - 1) & 0xff);
+    x->tp_f1[4] = (uint8_t)(((n - 1) >> 8) & 0xff);
+    x->tp_f1_len = 5;
+}
+
 /* Answer a SETUP on endpoint 0. Returns the reply length (data to send for IN
    requests), or -1 to stall. */
 static int control(HvXhci *x, int slot, const uint8_t setup[8], uint8_t *out, int max) {
@@ -310,11 +370,27 @@ static int control(HvXhci *x, int slot, const uint8_t setup[8], uint8_t *out, in
     } else if (type == 0x81 && req == 10) { /* GET_INTERFACE */
         tmp[0] = 0;
         src = tmp, len = 1;
-    } else if (type == 0xa1 && req == 1) { /* GET_REPORT: the report ID is the value's high byte */
+    } else if (type == 0xa1 && req == 1) { /* GET_REPORT: wValue is (type << 8) | report ID */
         if (x->slots[slot].dev == 0) src = x->state, len = 8;
         else {
-            int rid = value >> 8;
-            if (rid == 0x02) { /* the current touch state */
+            int rtype = value >> 8, rid = value & 0xff;
+            if (rtype == 3) { /* feature: the sensor-configuration registers */
+                if (rid == 0x01) { /* the header for the register just selected */
+                    if (!x->tp_f1_len) return -1;
+                    src = x->tp_f1;
+                    len = x->tp_f1_len;
+                } else if (rid == 0x00) {
+                    tmp[0] = 0x00; tmp[1] = 0x01;
+                    src = tmp; len = 2;
+                } else if (rid == 0x02) { /* multitouch mode: on */
+                    tmp[0] = 0x02; tmp[1] = 0x01;
+                    src = tmp; len = 2;
+                } else {
+                    len = tp_register(rid, tmp);
+                    if (!len) return -1;
+                    src = tmp;
+                }
+            } else if (rid == 0x02) { /* input: the current touch state */
                 pthread_mutex_lock(&x->mu);
                 len = tp_build_report(x, tmp);
                 pthread_mutex_unlock(&x->mu);
@@ -322,10 +398,9 @@ static int control(HvXhci *x, int slot, const uint8_t setup[8], uint8_t *out, in
             } else if (rid == 0x3f) { /* the vendor data channel: nothing on it */
                 memset(tmp, 0, 16);
                 len = 16;
-            } else { /* 0x44 is a constant report: all zeros, as far as we are concerned */
-                memset(tmp, 0, sizeof tmp);
-                len = max < (int)sizeof tmp ? max : (int)sizeof tmp;
-                src = tmp;
+            } else { /* 0x44 is a constant report: zeros, as far as we are concerned */
+                memset(out, 0, (size_t)max);
+                return max;
             }
         }
     } else if (type == 0xa1 && (req == 2 || req == 3)) { /* GET_IDLE, GET_PROTOCOL */
@@ -387,8 +462,11 @@ static void run_ep0(HvXhci *x, int slot) {
                     if (data[0] == 0x02 && (data[1] & 1)) {
                         x->tp_mt = 1; /* the guest switched the pad to multitouch */
                         fprintf(stderr, "hengevm: xhci: trackpad: multitouch on\n");
+                    } else if (data[0] == 0x01) {
+                        tp_select(x, data[1]); /* the guest selected a sensor register to read */
+                        fprintf(stderr, "hengevm: xhci: trackpad: select register %02x (%d bytes)\n", data[1], x->tp_f1_len ? x->tp_f1[3] : 0);
                     } else {
-                        fprintf(stderr, "hengevm: xhci: trackpad: set report %02x %02x (not the multitouch switch)\n", data[0], data[1]);
+                        fprintf(stderr, "hengevm: xhci: trackpad: set report %02x %02x\n", data[0], data[1]);
                     }
                 }
             }
@@ -661,6 +739,7 @@ static void reset(HvXhci *x) {
     x->tp_delivered = 0;
     x->tp_reqs = 0;
     x->tp_db = 0;
+    x->tp_f1_len = 0;
     for (int p = 0; p < HV_XHCI_PORTS; p++)
         x->portsc[p] = PORT_PP | PORT_CCS | PORT_CSC | (uint32_t)(p ? SPEED_HIGH : SPEED_FULL) << PORT_SPEED_SHIFT | 7u << PORT_PLS_SHIFT;
     update_irq(x);
