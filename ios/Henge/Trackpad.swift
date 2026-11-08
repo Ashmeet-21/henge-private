@@ -30,6 +30,7 @@ struct Trackpad: UIViewRepresentable {
         private var mostFingers = 0
         private var holding = false
         private var holdTimer: Timer?
+        private var touchesLogged = 0
         private let buzz = UIImpactFeedbackGenerator(style: .medium)
 
         override init(frame: CGRect) {
@@ -67,6 +68,10 @@ struct Trackpad: UIViewRepresentable {
                 fingers.append(Finger(touch: t, id: id))
                 let (x, y) = sensor(t)
                 henge_vm_touch(id, 0, x, y)
+                if touchesLogged < 12 {
+                    touchesLogged += 1
+                    HengeLog.log("input", "trackpad: finger \(id) down at \(x),\(y)")
+                }
             }
             mostFingers = max(mostFingers, fingers.count)
             if fingers.count >= 2 {

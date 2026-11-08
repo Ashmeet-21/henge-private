@@ -77,6 +77,7 @@ typedef struct HvXhci {
     uint8_t tp_rlen[HV_TP_REPORTS];
     uint32_t tp_rhead, tp_rtail;
     int tp_mt;         /* the guest switched us to multitouch mode (feature report 2) */
+    uint64_t tp_delivered;
 } HvXhci;
 
 HvXhci *hv_xhci_create(HvMachine *m, HvPcie *bus);

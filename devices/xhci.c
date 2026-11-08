@@ -42,6 +42,7 @@ enum { CC_SUCCESS = 1, CC_TRB_ERROR = 5, CC_STALL = 6, CC_SLOTS_FULL = 9, CC_SHO
 #define PORT_CEC (1u << 23)
 #define PORT_CHANGES (PORT_CSC | PORT_PEC | PORT_WRC | PORT_OCC | PORT_PRC | PORT_PLC | PORT_CEC)
 #define SPEED_FULL 1
+#define SPEED_HIGH 2
 
 /* ---- the devices' descriptors ---- */
 
@@ -69,10 +70,14 @@ static const uint8_t kbd_config_desc[34] = {
 
 static const char *const kbd_strings[] = {NULL, "HengeVM", "HengeVM USB Keyboard", "1"};
 
-/* Port 2: an Apple Magic Trackpad 2 (vendor 0x05AC, product 0x0265). The guest's
-   driver for that device expects two faces on report ID 2: a boot-mouse face, and
-   Apple's vendor-defined multitouch face (a 12-byte prefix plus nine bytes a
-   finger), which it gets by sending feature report ID 2, value 1. */
+/* Port 2: an Apple Magic Trackpad 2 (vendor 0x05AC, product 0x0265). The report
+   descriptor is the real device's: a boot-mouse face (report ID 2), a 16-byte
+   vendor data channel (report 0x3f) and a 1387-byte vendor blob (report 0x44).
+   The multitouch report is NOT declared anywhere: after the guest sends
+   feature report {2, 1}, the pad simply starts sending report ID 2 with a
+   12-byte prefix and nine bytes a finger, which the guest's driver knows by
+   the device ID. (The Linux kernel's hid-magicmouse does the same: it
+   registers the MT2's report ID 2 by hand, because the descriptor omits it.) */
 
 static const uint8_t tp_report_desc[] = {
     /* The mouse face: what the pad looks like before the guest switches it to multitouch. */
@@ -86,14 +91,22 @@ static const uint8_t tp_report_desc[] = {
     0x75, 0x08, 0x95, 0x02, 0x81, 0x06,
     0x95, 0x04, 0x75, 0x08, 0x81, 0x01,
     0xc0, 0xc0,
-    /* The multitouch face: Apple's vendor format, as the guest's Magic Trackpad 2
-       driver parses it (see the Linux kernel's hid-magicmouse MT2 support). */
+    /* A 16-byte vendor data channel (report 0x3f). */
     0x05, 0x0d, 0x09, 0x05, 0xa1, 0x01,       /* usage page (digitizer), usage (touch pad), collection (application) */
     0x06, 0x00, 0xff, 0x09, 0x0c,             /* vendor page 0xff00, usage 0x0c */
     0x15, 0x00, 0x26, 0xff, 0x00,
-    0x75, 0x08, 0x95, HV_TP_REPORT_LEN,       /* 12-byte prefix, up to ten fingers */
-    0x85, 0x02,
-    0x81, 0x02,
+    0x75, 0x08, 0x95, 0x10,
+    0x85, 0x3f,
+    0x81, 0x22,                               /* data, variable, volatile */
+    0xc0,
+    /* A 1387-byte vendor blob (report 0x44). */
+    0x06, 0x00, 0xff, 0x09, 0x0c,             /* vendor page 0xff00, usage 0x0c */
+    0xa1, 0x01,                               /* collection (application) */
+    0x06, 0x00, 0xff, 0x09, 0x0c,             /* usage 0x0c */
+    0x15, 0x00, 0x26, 0xff, 0x00,
+    0x85, 0x44,
+    0x75, 0x08, 0x96, 0x6b, 0x05,             /* 1387 bytes */
+    0x81, 0x00,                               /* constant */
     0xc0,
 };
 
@@ -289,13 +302,20 @@ static int control(HvXhci *x, int slot, const uint8_t setup[8], uint8_t *out, in
     } else if (type == 0x81 && req == 10) { /* GET_INTERFACE */
         tmp[0] = 0;
         src = tmp, len = 1;
-    } else if (type == 0xa1 && req == 1) { /* GET_REPORT */
+    } else if (type == 0xa1 && req == 1) { /* GET_REPORT: the report ID is the value's high byte */
         if (x->slots[slot].dev == 0) src = x->state, len = 8;
         else {
-            pthread_mutex_lock(&x->mu);
-            len = tp_build_report(x, tmp);
-            pthread_mutex_unlock(&x->mu);
-            src = tmp;
+            int rid = value >> 8;
+            if (rid == 0x02) { /* the current touch state */
+                pthread_mutex_lock(&x->mu);
+                len = tp_build_report(x, tmp);
+                pthread_mutex_unlock(&x->mu);
+                src = tmp;
+            } else if (rid == 0x3f) { /* the vendor data channel: nothing on it */
+                memset(tmp, 0, 16);
+                len = 16;
+            } else
+                return -1; /* 0x44 is a constant report: nothing to hand over */
         }
     } else if (type == 0xa1 && (req == 2 || req == 3)) { /* GET_IDLE, GET_PROTOCOL */
         tmp[0] = req == 3 ? 1 : 0;
@@ -401,6 +421,8 @@ static void run_ep_in(HvXhci *x, int slot) {
             uint32_t n = want < len ? want : len;
             wr(x, buf, x->tp_reports[x->tp_rhead % HV_TP_REPORTS], n);
             x->tp_rhead++;
+            x->tp_delivered++;
+            if (xlog() && x->tp_delivered <= 16) fprintf(stderr, "xhci: trackpad: %u bytes to the guest (delivered %llu)\n", n, (unsigned long long)x->tp_delivered);
             transfer_event(x, at, n < want ? CC_SHORT_PACKET : CC_SUCCESS, want - n, slot, dci);
         }
     }
@@ -563,9 +585,11 @@ static void run_commands(HvXhci *x) {
 
 /* ---- ports ---- */
 
+/* Port 1 is the full-speed keyboard; port 2 is the high-speed trackpad, as the real
+   Magic Trackpad 2 is. */
 static void port_connect(HvXhci *x) {
     for (int p = 0; p < HV_XHCI_PORTS; p++) {
-        x->portsc[p] = PORT_PP | PORT_CCS | PORT_CSC | (uint32_t)SPEED_FULL << PORT_SPEED_SHIFT | 7u << PORT_PLS_SHIFT;
+        x->portsc[p] = PORT_PP | PORT_CCS | PORT_CSC | (uint32_t)(p ? SPEED_HIGH : SPEED_FULL) << PORT_SPEED_SHIFT | 7u << PORT_PLS_SHIFT;
         port_event(x, p);
     }
 }
@@ -616,8 +640,9 @@ static void reset(HvXhci *x) {
     x->tp_ts = 0;
     x->tp_rhead = x->tp_rtail = 0;
     x->tp_mt = 0;
+    x->tp_delivered = 0;
     for (int p = 0; p < HV_XHCI_PORTS; p++)
-        x->portsc[p] = PORT_PP | PORT_CCS | PORT_CSC | (uint32_t)SPEED_FULL << PORT_SPEED_SHIFT | 7u << PORT_PLS_SHIFT;
+        x->portsc[p] = PORT_PP | PORT_CCS | PORT_CSC | (uint32_t)(p ? SPEED_HIGH : SPEED_FULL) << PORT_SPEED_SHIFT | 7u << PORT_PLS_SHIFT;
     update_irq(x);
 }
 
