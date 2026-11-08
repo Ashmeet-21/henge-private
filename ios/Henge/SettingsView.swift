@@ -6,7 +6,8 @@ struct SettingsView: View {
     @AppStorage(HardwareMouse.speedKey) private var mouseSpeed = 1.0
     @AppStorage(HardwareMouse.reverseKey) private var reverseScrolling = false
     @AppStorage(HardwareMouse.scrollSpeedKey) private var scrollSpeed = 0.3
-    @AppStorage(VolumeClicks.enabledKey) private var volumeButtons = true
+    @AppStorage(VolumeClicks.modeKey) private var volumeMode = VolumeClicks.Mode.delayHold
+    @AppStorage(VolumeClicks.streamKey) private var volumeExpensiveStream = false
     @AppStorage(EngineTuning.refreshKey) private var refreshRate = 60
     @AppStorage(EngineTuning.fastFlushKey) private var fastFlush = true
     @AppStorage(EngineTuning.wfiSpinKey) private var wfiSpin = false
@@ -60,8 +61,16 @@ struct SettingsView: View {
                 }
                 if !Device.isPad {
                     Section("Trackpad") {
-                        Toggle("Volume buttons click", isOn: $volumeButtons)
-                        Text("The volume buttons become the trackpad's buttons: up is left click, down is right click, hold to drag. They don't change volume while a Mac is running. Applies the next time a Mac starts.")
+                        Picker("Volume buttons click", selection: $volumeMode) {
+                            Text("Delay hold").tag(VolumeClicks.Mode.delayHold)
+                            Text("Tap then drag").tag(VolumeClicks.Mode.tapThenDrag)
+                            Text("Volume intercept (camera)").tag(VolumeClicks.Mode.intercept)
+                        }
+                        .pickerStyle(.menu)
+                        if volumeMode == .intercept {
+                            Toggle("DEBUG: USE EXPENSIVE STREAM", isOn: $volumeExpensiveStream)
+                        }
+                        Text("Up is left click, down is right click. Delay hold waits to see whether you're holding, so the click lags. Tap then drag clicks at once, then presses down if you keep holding (one click before each drag). Volume intercept uses the camera for true press/release — it runs the camera and shows the green dot. Applies the next time a Mac starts.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                     .listRowBackground(Desk.card)

@@ -13,9 +13,11 @@ Every change keeps its original author in the git history.
   swipes for Spaces, Mission Control and App Exposé, two-finger taps for right-click, and so
   on. The surface only points and gestures; clicking moved to the volume buttons.
 - **The volume buttons are the trackpad's buttons** (iPhone): up is left click, down is
-  right click, hold to drag. They're intercepted so they don't change volume while a Mac
-  runs, and the trackpad no longer tap-clicks or hold-drags, so there's no press/debounce
-  dead zone. A Settings toggle turns it off.
+  right click, and the trackpad no longer tap-clicks or hold-drags. Settings offers three
+  ways to read them, to A/B feel against heat in one build: *delay hold* (wait to detect a
+  hold, so the click lags), *tap then drag* (click at once, then press down if still held),
+  and *volume intercept* (camera-based true press/release, with a debug toggle to A/B
+  whether a real frame stream is needed).
 - The session controls are now shown with a four-finger tap, leaving three fingers free for
   the Mac's own gestures.
 - `devices/xhci.c` generalises the xHCI host to two USB devices (the keyboard and the
