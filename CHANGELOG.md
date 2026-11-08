@@ -11,13 +11,14 @@ Every change keeps its original author in the git history.
   a Magic Trackpad 2 (Apple's vendor multitouch format) on the xHCI USB bus, so the guest's
   own multitouch engine does the pointing and gestures: two-finger scroll, three-finger
   swipes for Spaces, Mission Control and App Exposé, two-finger taps for right-click, and so
-  on. The surface only points and gestures; clicking moved to the volume buttons.
-- **The volume buttons are the trackpad's buttons** (iPhone): up is left click, down is
-  right click, and the trackpad no longer tap-clicks or hold-drags. Settings offers three
-  ways to read them, to A/B feel against heat in one build: *delay hold* (wait to detect a
-  hold, so the click lags), *tap then drag* (click at once, then press down if still held),
-  and *volume intercept* (camera-based true press/release, with a debug toggle to A/B
-  whether a real frame stream is needed).
+  on. Settings > Trackpad picks the input mode: the touchscreen itself, or the volume buttons.
+- **Touchscreen mode**: a quick tap is a left click, a quick two-finger tap is a right click,
+  and touching then holding presses the button down so moving drags.
+- **Volume-button mode** (iPhone): up is left click, down is right click (or swap them), and
+  the surface only points and gestures. Settings offers three ways to read the buttons:
+  *delay hold* (wait to detect a hold, so the click lags), *tap then drag* (click at once,
+  then press down if still held), and *camera intercept* (true press/release via the camera;
+  it always runs a frame stream, which the capture interaction needs, so the camera stays on).
 - The session controls are now shown with a four-finger tap, leaving three fingers free for
   the Mac's own gestures.
 - `devices/xhci.c` generalises the xHCI host to two USB devices (the keyboard and the

@@ -5,9 +5,9 @@ import AVFAudio
 import AVFoundation
 import AVKit
 
-/// The volume buttons become the trackpad's buttons: up is left click, down is right
-/// click. There are three ways to read them, picked in Settings so they can be A/B'd
-/// for feel and heat in one build:
+/// The volume buttons become the trackpad's buttons when the input mode is "Volume
+/// buttons": up is left click, down is right click (or the reverse with Swap buttons).
+/// There are three ways to read them, picked in Settings:
 ///
 ///  - delayHold: the volume-change trick. iOS only reports volume *changes*, so we pin
 ///    the volume to the middle, read each step as up/down, and undo it. "Release" is
@@ -17,19 +17,27 @@ import AVKit
 ///    button is still held when the auto-repeat gives it away, it then presses down for
 ///    a drag. Instant click AND drag, at the cost of one click before every drag.
 ///  - intercept: AVCaptureEventInteraction, which delivers real press/release phases.
-///    It needs a live capture session, so the camera runs (heat + the green indicator).
-///    The "expensive stream" toggle A/B's whether a session with no output is enough or
-///    a real frame stream is required.
+///    It needs a live capture session with a real frame stream, so the camera runs
+///    (heat + the green indicator). A session with no output did not deliver events.
+///
+/// When the input mode is "Touchscreen" none of this runs — the trackpad surface itself
+/// tap-clicks, hold-drags and two-finger-right-clicks (see Trackpad).
 final class VolumeClicks: NSObject {
+    /// Where clicks come from: the touchscreen surface, or the volume buttons.
+    enum InputMode: String, CaseIterable {
+        case touchscreen, volumeButtons
+    }
     enum Mode: String, CaseIterable {
         case delayHold, tapThenDrag, intercept
     }
+    static let inputModeKey = "henge.trackpad.inputMode"
     static let modeKey = "henge.trackpad.volumeMode"
-    static let streamKey = "henge.trackpad.volumeExpensiveStream"
+    static let swapKey = "henge.trackpad.swapButtons"
     static let shared = VolumeClicks()
 
+    static var inputMode: InputMode { InputMode(rawValue: UserDefaults.standard.string(forKey: inputModeKey) ?? "") ?? .touchscreen }
     private var mode: Mode { Mode(rawValue: UserDefaults.standard.string(forKey: Self.modeKey) ?? "") ?? .delayHold }
-    private var expensiveStream: Bool { UserDefaults.standard.object(forKey: Self.streamKey) as? Bool ?? false }
+    private var swapButtons: Bool { UserDefaults.standard.object(forKey: Self.swapKey) as? Bool ?? false }
 
     private var active = false
     private let buzz = UIImpactFeedbackGenerator(style: .light)
@@ -43,7 +51,6 @@ final class VolumeClicks: NSObject {
         let button: Int32 = left ? 0 : 1
         let currently = left ? leftDown : rightDown
         guard currently != down else { return }
-        HengeLog.log("input", "mouse button: \(left ? "left" : "right") \(down ? "down" : "up") -> guest")
         henge_vm_mouse_button(button, down ? 1 : 0)
         if left { leftDown = down } else { rightDown = down }
     }
@@ -59,9 +66,13 @@ final class VolumeClicks: NSObject {
 
     func start() {
         guard !active else { return }
+        guard Self.inputMode == .volumeButtons else {
+            HengeLog.log("input", "volume buttons: off (input mode is touchscreen)")
+            return
+        }
         active = true
         buzz.prepare()
-        HengeLog.log("input", "volume buttons: mode \(mode.rawValue)")
+        HengeLog.log("input", "volume buttons: mode \(mode.rawValue), swap \(swapButtons)")
         switch mode {
         case .delayHold, .tapThenDrag: startVolumeKVO()
         case .intercept: startIntercept()
@@ -131,10 +142,11 @@ final class VolumeClicks: NSObject {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.observingVolume else { return }
             let volume = AVAudioSession.sharedInstance().outputVolume
-            let left: Bool
+            var left: Bool
             if volume > self.baseline + self.step { left = true }
             else if volume < self.baseline - self.step { left = false }
             else { return } /* our own reset back to the middle */
+            if self.swapButtons { left.toggle() }
             self.setVolume(self.baseline)
             if self.mode == .tapThenDrag { self.pressTapThenDrag(left: left) }
             else { self.pressDelayHold(left: left) }
@@ -258,17 +270,17 @@ final class VolumeClicks: NSObject {
         }
         session.beginConfiguration()
         session.addInput(input)
-        if expensiveStream {
-            let output = AVCaptureVideoDataOutput()
-            let discard = DiscardStream()
-            streamDelegate = discard /* the output only holds its delegate weakly */
-            output.setSampleBufferDelegate(discard, queue: DispatchQueue(label: "henge.volume.stream"))
-            if session.canAddOutput(output) { session.addOutput(output); streamOutput = output }
-        }
+        /* A session with no output did not deliver capture events; a real frame stream
+           is required, so it is always on. The frames are thrown away. */
+        let output = AVCaptureVideoDataOutput()
+        let discard = DiscardStream()
+        streamDelegate = discard /* the output only holds its delegate weakly */
+        output.setSampleBufferDelegate(discard, queue: DispatchQueue(label: "henge.volume.stream"))
+        if session.canAddOutput(output) { session.addOutput(output); streamOutput = output }
         session.commitConfiguration()
         captureSession = session
         DispatchQueue.global(qos: .userInitiated).async { session.startRunning() }
-        HengeLog.log("input", "volume intercept: capture session \(expensiveStream ? "WITH frame stream" : "minimal, no stream"); the interaction is hosted by CaptureInteractionView in the session")
+        HengeLog.log("input", "volume intercept: camera capture with frame stream; the interaction is hosted by CaptureInteractionView in the session")
     }
 
     /// True press/release from the capture interaction: the physical button *is* the mouse
@@ -276,9 +288,10 @@ final class VolumeClicks: NSObject {
     /// decides click vs drag from how long it's held and whether the pad moves. The button
     /// edge goes out first; the haptic is only feedback and must never sit in front of it.
     /// Called by CaptureInteractionView.
-    func captureButton(left: Bool, down: Bool) {
+    func captureButton(left rawLeft: Bool, down: Bool) {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.active else { return }
+            let left = self.swapButtons ? !rawLeft : rawLeft
             let wasDown = left ? self.leftDown : self.rightDown
             self.setDown(down, left: left)
             if down && !wasDown {
@@ -297,7 +310,7 @@ final class VolumeClicks: NSObject {
         streamDelegate = nil
     }
 
-    /// The "expensive stream" arm: frames really flow and are thrown away.
+    /// The frame stream the capture interaction needs to deliver events; frames are thrown away.
     private final class DiscardStream: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
         func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
             // deliberately empty
@@ -317,11 +330,9 @@ struct CaptureInteractionView: UIViewRepresentable {
             // primary = volume down (right click), secondary = volume up (left click).
             let interaction = AVCaptureEventInteraction(
                 primary: { event in
-                    HengeLog.log("input", "capture primary (vol down) phase=\(event.phase)")
                     VolumeClicks.shared.captureButton(left: false, down: event.phase == .began)
                 },
                 secondary: { event in
-                    HengeLog.log("input", "capture secondary (vol up) phase=\(event.phase)")
                     VolumeClicks.shared.captureButton(left: true, down: event.phase == .began)
                 }
             )

@@ -4,9 +4,15 @@ import UIKit
 /// A surface that works like a Mac's trackpad — it is one: the engine presents it on
 /// the Mac's USB bus as a Magic Trackpad 2, so the Mac's own multitouch engine sees
 /// the fingers: two scroll, three swipe between Spaces and to Mission Control, four
-/// show the session's hidden controls. It only points and gestures — clicking is the
-/// volume buttons' job (VolumeClicks), so a tap here does nothing. Only fingers count:
-/// a real trackpad or mouse goes through HardwareMouse.
+/// show the session's hidden controls.
+///
+/// Clicking depends on the input mode (Settings > Trackpad):
+///  - Touchscreen: the surface itself clicks. A quick tap is a left click, a quick
+///    two-finger tap is a right click, and touching then holding presses the button
+///    down so moving drags. These go out as mouse buttons alongside the pad's fingers.
+///  - Volume buttons: the surface only points and gestures; the clicks live on the
+///    volume keys (VolumeClicks), so a tap here does nothing.
+/// Only fingers count: a real trackpad or mouse goes through HardwareMouse.
 struct Trackpad: UIViewRepresentable {
     /// Four fingers tapped together: the session shows its hidden controls.
     static let revealTap = Notification.Name("henge.trackpad.revealTap")
@@ -18,6 +24,7 @@ struct Trackpad: UIViewRepresentable {
         /// The emulated pad's sensor, in the Magic Trackpad 2's own units.
         private static let sensorW: Int32 = 8134
         private static let sensorH: Int32 = 5206
+        private static let holdTime: TimeInterval = 0.4
         private static let tapTime: TimeInterval = 0.3
         private static let tapDistance: CGFloat = 8
 
@@ -29,6 +36,12 @@ struct Trackpad: UIViewRepresentable {
         private var travelled: CGFloat = 0
         private var mostFingers = 0
         private var touchesLogged = 0
+
+        /* Touchscreen-mode clicking. */
+        private var holding = false
+        private var holdTimer: Timer?
+        private let buzz = UIImpactFeedbackGenerator(style: .medium)
+        private var tapsClick: Bool { VolumeClicks.inputMode == .touchscreen }
 
         override init(frame: CGRect) {
             super.init(frame: frame)
@@ -64,6 +77,7 @@ struct Trackpad: UIViewRepresentable {
                 started = Date()
                 travelled = 0
                 mostFingers = 0
+                if tapsClick { buzz.prepare() }
             }
             for t in touches {
                 guard let id = freeIds.min() else { break }
@@ -77,6 +91,16 @@ struct Trackpad: UIViewRepresentable {
                 }
             }
             mostFingers = max(mostFingers, fingers.count)
+            guard tapsClick else { return }
+            if fingers.count >= 2 {
+                cancelHold()
+                if holding { /* a drag becomes a multi-finger gesture */
+                    holding = false
+                    henge_vm_mouse_button(0, 0)
+                }
+            } else {
+                armHold()
+            }
         }
 
         override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -89,6 +113,8 @@ struct Trackpad: UIViewRepresentable {
                 henge_vm_touch(fingers[i].id, 1, x, y)
                 moved = true
             }
+            /* Moving means pointing or a gesture, not a tap or a press-to-drag. */
+            if tapsClick && travelled >= Self.tapDistance && !holding { cancelHold() }
             /* One frame with every finger that moved, so the guest sees a gesture's
                fingers move together rather than one at a time. */
             if moved { henge_vm_touch_frame() }
@@ -108,12 +134,48 @@ struct Trackpad: UIViewRepresentable {
             guard !lifted.isEmpty else { return }
             for id in lifted { henge_vm_touch(id, 2, 0, 0) }
             guard fingers.isEmpty else { return } /* fingers still down: the gesture goes on */
-            /* The gesture is over. No tap-to-click: the buttons live on the volume
-               keys now, so lifting a finger is only a lift. */
+            /* The whole gesture is over. */
+            if tapsClick {
+                cancelHold()
+                let quick = Date().timeIntervalSince(started) < Self.tapTime
+                let still = travelled < Self.tapDistance
+                if holding {
+                    holding = false
+                    henge_vm_mouse_button(0, 0) /* let go of the drag */
+                } else if quick && still {
+                    if mostFingers == 1 { click(0) }      /* a tap is a left click */
+                    else if mostFingers == 2 { click(1) } /* a two-finger tap is a right click */
+                }
+            }
             if mostFingers >= 4, travelled < Self.tapDistance * 3, Date().timeIntervalSince(started) < Self.tapTime * 2 {
                 NotificationCenter.default.post(name: Trackpad.revealTap, object: nil)
             }
             StickyKeys.shared.releaseAll()
+        }
+
+        /// A brief press of a mouse button: down then up.
+        private func click(_ button: Int32) {
+            henge_vm_mouse_button(button, 1)
+            henge_vm_mouse_button(button, 0)
+            buzz.impactOccurred()
+        }
+
+        /// A finger that stays put presses the left button down, so moving it drags.
+        private func armHold() {
+            cancelHold()
+            let timer = Timer(timeInterval: Self.holdTime, repeats: false) { [weak self] _ in
+                guard let self, self.fingers.count == 1, self.travelled < Self.tapDistance else { return }
+                self.holding = true
+                henge_vm_mouse_button(0, 1)
+                self.buzz.impactOccurred()
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            holdTimer = timer
+        }
+
+        private func cancelHold() {
+            holdTimer?.invalidate()
+            holdTimer = nil
         }
     }
 }
