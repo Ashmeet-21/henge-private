@@ -270,9 +270,10 @@ final class VolumeClicks: NSObject {
         DispatchQueue.global(qos: .userInitiated).async { session.startRunning() }
 
         let host = keyWindow()?.rootViewController?.view ?? keyWindow()
-        let view = UIView(frame: host?.bounds ?? UIScreen.main.bounds)
+        let view = CaptureEventHostView(frame: host?.bounds ?? UIScreen.main.bounds)
         view.backgroundColor = .clear
-        view.isUserInteractionEnabled = false
+        /* Stay user-interactive: disabling it takes the interaction out of the event path.
+           The view passes touches through via hitTest instead. */
         // primary = volume down (right click), secondary = volume up (left click).
         let interaction = AVCaptureEventInteraction(
             primary: { [weak self] event in
@@ -286,7 +287,7 @@ final class VolumeClicks: NSObject {
         view.addInteraction(interaction)
         host?.addSubview(view)
         captureView = view
-        HengeLog.log("input", "volume intercept: capture \(expensiveStream ? "WITH frame stream" : "minimal, no stream")")
+        HengeLog.log("input", "volume intercept: capture \(expensiveStream ? "WITH frame stream" : "minimal, no stream"); host=\(host != nil), view in window=\(view.window != nil), interaction enabled=\(interaction.isEnabled)")
     }
 
     /// True press/release from the capture interaction: down on .began, up on .ended or
@@ -322,5 +323,12 @@ final class VolumeClicks: NSObject {
         func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
             // deliberately empty
         }
+    }
+
+    /// Hosts the capture interaction. It must stay user-interactive or the interaction
+    /// drops out of the event path, but it must not steal the trackpad's touches, so it
+    /// declines every hit test.
+    private final class CaptureEventHostView: UIView {
+        override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? { nil }
     }
 }
