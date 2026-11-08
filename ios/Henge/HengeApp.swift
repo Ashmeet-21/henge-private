@@ -11,6 +11,7 @@ struct HengeApp: App {
         // Order matters: HengeLog takes over stderr, so the engine's and the JIT
         // allocator's first lines land in Documents/henge.log too.
         HengeLog.start()
+        HengeLog.log("boot", "address space: \(henge_largest_reservation_gb()) GB can be reserved in one piece")
         EngineTuning.apply()
         HengeLog.logFootprint("app-launch")
         JITBootstrap.noteLaunchState()
@@ -72,6 +73,7 @@ struct RootView: View {
             jit.enableAtLaunchIfAsked()
         }
         .onChange(of: jit.attachGeneration) { _ in JITBootstrap.prewarm() } // the built-in helper attached
+        .task { await Autopilot.run { mac in running = mac } } // testing only: HENGE_AUTOPILOT
     }
 }
 

@@ -130,6 +130,15 @@ typedef struct HvCpu {
 #define HV_USER_FILLS 2048
     uint16_t user_fills[HV_USER_FILLS];
     uint32_t nuser_fills;
+    /* The same for kernel entries, so a whole-TLB flush (macOS 27 asks for hundreds a second) clears
+       what was filled since the last one instead of all four tables (2 MB). More than HV_KERNEL_FILLS: all. */
+#define HV_KERNEL_FILLS 4096
+    uint16_t kernel_fills[HV_KERNEL_FILLS];
+    uint32_t nkernel_fills;
+    /* ASIDs given a user id since the user half was last started over: that drop clears just these. */
+#define HV_ASID_LOG 512
+    uint16_t asid_log[HV_ASID_LOG];
+    uint32_t nasid_log;
     /* Indirect-branch cache salts live in bits 63..48, which no user VA sets and
        every kernel VA has all ones in, so each salt value names a distinct set
        of tags. User salts are per ASID (asid_cid[ASID], 0 = none yet), so a
@@ -139,6 +148,7 @@ typedef struct HvCpu {
     uint16_t asid_cid[65536];
     uint16_t cid_asid[65536]; /* --stats: the ASID a user id was given to (to tell live tags from dead ones) */
     uint32_t next_cid, kernel_gen;
+    uint64_t ttbr0_changed_at; /* --stats: host time of the last TTBR0 change */
 
     /* Generic timer: physical and virtual. The counter is host time scaled to 24 MHz. */
     uint64_t cntv_ctl, cntv_cval;
