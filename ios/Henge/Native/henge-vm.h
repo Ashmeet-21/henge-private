@@ -27,6 +27,8 @@ int henge_vm_state(void);
 /* Why it stopped (an HV_EXIT_* name), once state is 2. */
 const char *henge_vm_exit_reason(void);
 void henge_vm_stop(void);
+/* Testing: sets a translation knob (core/machine.h) in the running machine; nonzero if it exists. */
+int henge_vm_knob(const char *name, int value);
 
 /* Progress, for the session screen. */
 uint64_t henge_vm_blocks(void);            /* blocks the CPUs entered */
@@ -71,6 +73,7 @@ int henge_vm_boot_display(const uint8_t **pixels, int *width, int *height, int *
 
 /* The largest single mapping the address space takes right now, in MB (the
    increased virtual addressing entitlement raises it). */
+uint64_t henge_largest_reservation_gb(void); /* measuring: the biggest PROT_NONE reservation, in GB */
 uint64_t henge_largest_mapping_mb(void);
 /* Bytes this process may still allocate before jetsam (os_proc_available_memory). */
 size_t henge_available_memory(void);
