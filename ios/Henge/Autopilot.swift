@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 /// Testing a build on a phone nobody is holding. Henge follows Documents/henge-autopilot.txt when it is
 /// launched with HENGE_AUTOPILOT set, as in
@@ -15,6 +16,7 @@ import Foundation
 ///   move X Y, click X Y  the pointer to a spot on the Mac's screen (its pixels), and a click there
 ///   pointer            where the pointer is now, into the log
 ///   knob NAME VALUE    a translation knob (core/machine.h)
+///   snap [NAME]        the Mac's screen (1920x1080) into Documents/NAME.jpg (snap.jpg)
 ///   log TEXT           a marker in henge.log
 ///   stop               stop the Mac
 ///   exit               quit Henge
@@ -105,6 +107,15 @@ enum Autopilot {
             if kv.count == 2, let value = Int32(kv[1]) {
                 let found = henge_vm_knob(String(kv[0]), value)
                 HengeLog.log("autopilot", found != 0 ? "knob \(kv[0]) = \(value)" : "no knob \(kv[0]) (or no Mac running)")
+            }
+        case "snap": // the Mac's screen, full size, into Documents/snap.jpg (or NAME.jpg): "snap", "snap safari"
+            let name = arg.isEmpty ? "snap" : arg
+            let url = docs.appendingPathComponent("\(name).jpg")
+            if let image = MacPreview.capture(width: 1920, height: 1080),
+               let data = UIImage(cgImage: image).jpegData(compressionQuality: 0.9), (try? data.write(to: url, options: .atomic)) != nil {
+                HengeLog.log("autopilot", "snap \(url.lastPathComponent), \(data.count / 1024) KB")
+            } else {
+                HengeLog.log("autopilot", "snap: no screen to read")
             }
         case "log": // already in the log; the wall clock too, to line it up with things measured elsewhere
             HengeLog.log("autopilot", String(format: "at %.3f", Date().timeIntervalSince1970))
