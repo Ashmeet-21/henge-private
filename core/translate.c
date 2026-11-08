@@ -194,8 +194,35 @@ static void link_here(Emit *e, uint32_t at, int from_cold) {
     plink(e, at, from_cold, e->n, e->in_cold);
 }
 
-/* ldr xR, =value */
+/* xR = value with MOVZ or MOVN and then MOVKs, if that takes at most max instructions. */
+static int put_mov_imm(Emit *e, int reg, uint64_t value, int max) {
+    int zeros = 0, ones = 0;
+    for (int i = 0; i < 4; i++) {
+        uint16_t h = (uint16_t)(value >> 16 * i);
+        zeros += h == 0, ones += h == 0xffff;
+    }
+    int inverted = ones > zeros; /* kernel addresses: start from all ones */
+    int n = 4 - (inverted ? ones : zeros);
+    if ((n ? n : 1) > max) return 0;
+    uint16_t skip = inverted ? 0xffff : 0;
+    int first = 1;
+    for (uint32_t i = 0; i < 4; i++) {
+        uint16_t h = (uint16_t)(value >> 16 * i);
+        if (h == skip) continue;
+        if (first) put(e, (inverted ? 0x92800000u : 0xd2800000u) | i << 21 | (uint32_t)(inverted ? (uint16_t)~h : h) << 5 | (uint32_t)reg);
+        else put(e, 0xf2800000u | i << 21 | (uint32_t)h << 5 | (uint32_t)reg); /* movk */
+        first = 0;
+    }
+    if (first) put(e, (inverted ? 0x92800000u : 0xd2800000u) | (uint32_t)reg); /* 0 or all ones */
+    return 1;
+}
+
+/* ldr xR, =value. The pool sits after the cold code, so a hot block's literal is a load from a line the data
+   cache rarely holds (5% of translated-code samples on the Mac): values that take at most three MOVZ/MOVN/MOVK
+   (nearly all addresses, user and kernel) can be built in the register instead, in as many words: HV_MOVIMM=1
+   (off: no measured gain on the Mac mix, 2026-11-08). */
 static void put_lit(Emit *e, int reg, uint64_t value) {
+    if (hv_knob[HV_K_MOVIMM] && put_mov_imm(e, reg, value, 3)) return;
     e->pool[e->npool] = value;
     e->fix[e->nfix++] = (LitFix){e->n, FIX_LDR, e->npool++, (uint8_t)(e->in_cold && !e->flat)};
     put(e, 0x58000000u | reg);
