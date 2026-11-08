@@ -218,7 +218,6 @@ final class VolumeClicks: NSObject {
     // MARK: - Capture-event path (intercept)
 
     private var captureSession: AVCaptureSession?
-    private var captureView: UIView?
     private var streamOutput: AVCaptureVideoDataOutput?
     private var streamDelegate: DiscardStream?
 
@@ -268,31 +267,12 @@ final class VolumeClicks: NSObject {
         session.commitConfiguration()
         captureSession = session
         DispatchQueue.global(qos: .userInitiated).async { session.startRunning() }
-
-        let host = keyWindow()?.rootViewController?.view ?? keyWindow()
-        let view = CaptureEventHostView(frame: host?.bounds ?? UIScreen.main.bounds)
-        view.backgroundColor = .clear
-        /* Stay user-interactive: disabling it takes the interaction out of the event path.
-           The view passes touches through via hitTest instead. */
-        // primary = volume down (right click), secondary = volume up (left click).
-        let interaction = AVCaptureEventInteraction(
-            primary: { [weak self] event in
-                self?.captureButton(left: false, down: event.phase == .began)
-            },
-            secondary: { [weak self] event in
-                self?.captureButton(left: true, down: event.phase == .began)
-            }
-        )
-        interaction.isEnabled = true
-        view.addInteraction(interaction)
-        host?.addSubview(view)
-        captureView = view
-        HengeLog.log("input", "volume intercept: capture \(expensiveStream ? "WITH frame stream" : "minimal, no stream"); host=\(host != nil), view in window=\(view.window != nil), interaction enabled=\(interaction.isEnabled)")
+        HengeLog.log("input", "volume intercept: capture session \(expensiveStream ? "WITH frame stream" : "minimal, no stream"); the interaction is hosted by CaptureInteractionView in the session")
     }
 
     /// True press/release from the capture interaction: down on .began, up on .ended or
-    /// .cancelled. No timers, no guessing.
-    private func captureButton(left: Bool, down: Bool) {
+    /// .cancelled. No timers, no guessing. Called by CaptureInteractionView.
+    func captureButton(left: Bool, down: Bool) {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.active else { return }
             if down {
@@ -314,8 +294,6 @@ final class VolumeClicks: NSObject {
         }
         streamOutput = nil
         streamDelegate = nil
-        captureView?.removeFromSuperview()
-        captureView = nil
     }
 
     /// The "expensive stream" arm: frames really flow and are thrown away.
@@ -324,11 +302,32 @@ final class VolumeClicks: NSObject {
             // deliberately empty
         }
     }
+}
 
-    /// Hosts the capture interaction. It must stay user-interactive or the interaction
-    /// drops out of the event path, but it must not steal the trackpad's touches, so it
-    /// declines every hit test.
-    private final class CaptureEventHostView: UIView {
+/// Hosts the capture interaction inside the SwiftUI view hierarchy — that is where the
+/// system routes capture events; a stray subview added to the window does not get them.
+/// The view declines hit tests so it never steals the trackpad's touches, but stays
+/// user-interactive so the interaction remains in the event path.
+struct CaptureInteractionView: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIView {
+        let view = PassthroughView()
+        view.backgroundColor = .clear
+        if #available(iOS 17.2, *) {
+            // primary = volume down (right click), secondary = volume up (left click).
+            let interaction = AVCaptureEventInteraction(
+                primary: { event in VolumeClicks.shared.captureButton(left: false, down: event.phase == .began) },
+                secondary: { event in VolumeClicks.shared.captureButton(left: true, down: event.phase == .began) }
+            )
+            interaction.isEnabled = true
+            view.addInteraction(interaction)
+            HengeLog.log("input", "volume intercept: interaction installed in the session view hierarchy")
+        }
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {}
+
+    private final class PassthroughView: UIView {
         override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? { nil }
     }
 }

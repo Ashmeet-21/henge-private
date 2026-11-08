@@ -33,6 +33,7 @@ struct SessionView: View {
     @State private var showRevealHint = false
     @State private var pointerRefused = false
     @AppStorage("henge.controls.hintsShown") private var revealHintsShown = 0
+    @AppStorage(VolumeClicks.modeKey) private var volumeMode = VolumeClicks.Mode.delayHold
     @State private var confirmStop = false
     @State private var zoomCentre = CGPoint(x: 0.5, y: 0.5) // where the zoomed view is, 0...1 of the Mac's screen
     @State private var map: UIImage?
@@ -79,6 +80,13 @@ struct SessionView: View {
                 Trackpad()
                     .frame(width: layout.touch.width, height: layout.touch.height)
                     .position(x: layout.touch.midX, y: layout.touch.midY)
+                if volumeMode == .intercept {
+                    // The capture interaction must live in the SwiftUI hierarchy to receive
+                    // the volume-button events; it passes touches through to the trackpad.
+                    CaptureInteractionView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .allowsHitTesting(false)
+                }
                 if !layout.fillsPhone {
                     uprightControls(layout)
                 } else {
