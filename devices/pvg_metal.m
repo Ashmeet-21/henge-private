@@ -876,11 +876,27 @@ static void sync_iosurface(HvObject *s) {
         t.swizzle = MTLTextureSwizzleChannelsMake(MTLTextureSwizzleRed, MTLTextureSwizzleGreen, MTLTextureSwizzleBlue, MTLTextureSwizzleAlpha);
     }
     o->surface = surface;
+    /* The plane the texture is over, after the description in the guest's record (PGSerializedTextureDescriptor
+       then plane and rotation, 16 bits each: record +0x24 for v1, +0x2c for v2, the record starting at ref).
+       macOS draws video and Safari's page tiles one plane at a time (R8 luma, RG8 chroma, R8 alpha): every view
+       made over plane 0 left plane 1 empty, so chroma read back as zero (all green) and alpha as zero (blank pages). */
+    uint16_t plane;
+    memcpy(&plane, h.d + (h.tag == 0x39 ? 0x28 : 0x20), 2);
+    if (surface->iosurface && plane >= IOSurfaceGetPlaneCount(surface->iosurface)) {
+        [self complain:[NSString stringWithFormat:@"surface %llu: texture on plane %u of %zu; using plane 0", h.mapping, plane,
+                        IOSurfaceGetPlaneCount(surface->iosurface)]];
+        plane = 0;
+    }
+    if (plane) {
+        static int told;
+        if (told++ < 8) fprintf(stderr, "hengevm: pvg-metal: surface %llu: texture %lux%lu format %lu on plane %u\n", h.mapping,
+                                (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat, plane);
+    }
     if (surface->iosurface) {
-        o->object = [device newTextureWithDescriptor:t iosurface:surface->iosurface plane:0];
+        o->object = [device newTextureWithDescriptor:t iosurface:surface->iosurface plane:plane];
         if (!o->object) { /* video formats cannot be drawn into */
             t.usage = MTLTextureUsageShaderRead;
-            o->object = [device newTextureWithDescriptor:t iosurface:surface->iosurface plane:0];
+            o->object = [device newTextureWithDescriptor:t iosurface:surface->iosurface plane:plane];
         }
     }
     else o->object = [(id<MTLBuffer>)surface->object newTextureWithDescriptor:t offset:surface->first bytesPerRow:surface->row];
@@ -889,7 +905,7 @@ static void sync_iosurface(HvObject *s) {
         t.storageMode = MTLStorageModePrivate;
         o->object = [device newTextureWithDescriptor:t]; /* something to bind: it stays empty */
     }
-    mapped_textures[key] = o->object;
+    if (!plane) mapped_textures[key] = o->object;
 }
 
 - (HvObject *)object:(uint32_t)ref task:(uint32_t)task {
