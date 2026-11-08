@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
 
 #include "machine.h"
 
@@ -1000,10 +1001,19 @@ static int tp_build_report(HvXhci *x, uint8_t *out) {
     return 12 + 9 * n;
 }
 
-/* Queue the current state as a report; the timestamp climbs by one per report. */
+/* The report timestamp is milliseconds on a monotonic clock, as the real pad sends
+   it: the guest divides position deltas by timestamp deltas to get finger speed, so
+   a per-report counter would read every drag as ten times faster than it is. */
+static uint32_t tp_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint32_t)((uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000);
+}
+
+/* Queue the current state as a report. */
 static void tp_queue(HvXhci *x) {
     uint8_t r[HV_TP_REPORT_LEN];
-    x->tp_ts++;
+    x->tp_ts = tp_now_ms();
     int len = tp_build_report(x, r);
     if (x->tp_rtail - x->tp_rhead < HV_TP_REPORTS) {
         unsigned at = x->tp_rtail % HV_TP_REPORTS;
@@ -1028,9 +1038,7 @@ void hv_xhci_touch(HvXhci *x, int id, int phase, int px, int py) {
             f->id = id;
             f->x = px;
             f->y = py;
-            f->state = 3; /* near */
-            tp_queue(x);
-            f->state = 4; /* contact */
+            f->state = 4; /* contact: a touch, not a hover, so the guest tracks it at once */
             tp_queue(x);
         }
     } else {

@@ -48,9 +48,16 @@ struct Trackpad: UIViewRepresentable {
         /// Where the finger is on the pad's sensor, in its units.
         private func sensor(_ t: UITouch) -> (Int32, Int32) {
             let p = t.location(in: self)
-            let x = min(max(p.x / bounds.width, 0), 1)
-            let y = min(max(p.y / bounds.height, 0), 1)
-            return (Int32(x * Double(Self.sensorW)), Int32(y * Double(Self.sensorH)))
+            // One scale for both axes. The view and the pad's sensor are different
+            // shapes, so stretching the view to fill the sensor would make a finger
+            // move the pointer further on one axis than the other. Map the view to a
+            // centred part of the sensor at a single scale instead.
+            let w = max(Double(bounds.width), 1), h = max(Double(bounds.height), 1)
+            let scale = min(Double(Self.sensorW) / w, Double(Self.sensorH) / h)
+            let x = (Double(p.x) - w / 2) * scale + Double(Self.sensorW) / 2
+            let y = (Double(p.y) - h / 2) * scale + Double(Self.sensorH) / 2
+            return (Int32(min(max(x, 0), Double(Self.sensorW))),
+                    Int32(min(max(y, 0), Double(Self.sensorH))))
         }
 
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
