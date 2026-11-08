@@ -229,6 +229,7 @@ final class Installer: NSObject, ObservableObject {
         }
         // In the list before anything else: stopping the restore system can take a while, and if Henge is
         // stopped meanwhile (the phone locked) a finished Mac must not be left on the disk unlisted.
+        try? (mac.osName ?? "").write(to: mac.directory.appendingPathComponent(Machines.installedMarker), atomically: true, encoding: .utf8)
         Machines.shared.add(mac)
         HengeLog.log("install", "\(mac.name): restore finished, added to the Macs")
         if henge_vm_state() == 1 { henge_vm_stop() }
