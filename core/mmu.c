@@ -144,8 +144,16 @@ void hv_tlb_flush(HvCpu *cpu) {
     if (cpu->m) cpu->m->stats.reset_why[0]++;
     hv_ijc_reset(cpu, 0); /* mappings changed: branch targets cached by VA are no longer trusted */
     hv_ijc_reset(cpu, 1);
-    memset(cpu->tlb, 0x80, sizeof cpu->tlb);
+    /* Only the entries filled since the last flush can be valid (both logs, unless one ran over). */
+    uint32_t nu = cpu->nuser_fills, nk = cpu->nkernel_fills;
+    if (nu <= HV_USER_FILLS && nk <= HV_KERNEL_FILLS) {
+        for (uint32_t k = 0; k < nu; k++) memset(&cpu->tlb[cpu->user_fills[k]], 0x80, sizeof cpu->tlb[0]);
+        for (uint32_t k = 0; k < nk; k++) memset(&cpu->tlb[cpu->kernel_fills[k]], 0x80, sizeof cpu->tlb[0]);
+    } else {
+        memset(cpu->tlb, 0x80, sizeof cpu->tlb);
+    }
     cpu->nuser_fills = 0;
+    cpu->nkernel_fills = 0;
     hv_tlb_stash_drop(cpu, -1);
 }
 
@@ -199,6 +207,7 @@ void hv_ucode_add(HvCpu *cpu, uint64_t va) {
     for (; m->ucode[i]; i = (i + 1) & ((1u << HV_UCODE_BITS) - 1))
         if (m->ucode[i] == key) return;
     if (m->ucode_count >= (1u << HV_UCODE_BITS) / 2) { /* half full: start the user half over */
+        ucode_clear(m);
         hv_ijc_reset(cpu, 0);
         hv_ijc_switch(cpu);
         cid = (uint32_t)(cpu->ijc_salt[0] >> 48);
@@ -217,6 +226,7 @@ static uint16_t fresh_cid(HvCpu *cpu) {
         ijc_clear(cpu, 0);
         ucode_clear(cpu->pc_state);
         memset(cpu->asid_cid, 0, sizeof cpu->asid_cid);
+        cpu->nasid_log = 0;
         cpu->next_cid = 1;
     }
     if (cpu->pc_state && cpu->pc_state->cid_chunks) memset(cpu->pc_state->cid_chunks[cpu->next_cid], 0, sizeof cpu->pc_state->cid_chunks[0]);
@@ -250,6 +260,8 @@ void hv_ijc_switch(HvCpu *cpu) {
     if (!cpu->asid_cid[asid]) {
         cpu->asid_cid[asid] = fresh_cid(cpu);
         cpu->cid_asid[cpu->asid_cid[asid]] = (uint16_t)asid;
+        if (cpu->nasid_log < HV_ASID_LOG) cpu->asid_log[cpu->nasid_log] = (uint16_t)asid;
+        if (cpu->nasid_log <= HV_ASID_LOG) cpu->nasid_log++;
     }
     cpu->ijc_salt[0] = (uint64_t)cpu->asid_cid[asid] << 48;
 }
@@ -279,8 +291,14 @@ void hv_ijc_reset(HvCpu *cpu, int kernel) {
         cpu->ijc_salt[1] = (uint64_t)cpu->kernel_gen << 48;
         return;
     }
-    memset(cpu->asid_cid, 0, sizeof cpu->asid_cid);
-    ucode_clear(cpu->pc_state); /* every user id is new now */
+    /* Every process gets a new user id: clear the ids given since the last time (all, if the log ran over).
+       The (id, page) set keeps the dead ids' pages (no live id matches them) until it is half full. */
+    if (cpu->nasid_log <= HV_ASID_LOG)
+        for (uint32_t k = 0; k < cpu->nasid_log; k++) cpu->asid_cid[cpu->asid_log[k]] = 0;
+    else
+        memset(cpu->asid_cid, 0, sizeof cpu->asid_cid);
+    cpu->nasid_log = 0;
+    if (cpu->pc_state) cpu->pc_state->last_fill[0] = 0;
     hv_ijc_switch(cpu);
 }
 
@@ -597,6 +615,9 @@ static void tlb_fill(HvCpu *cpu, uint64_t va, int el, const HvWalk *w) {
     if (!((page_va >> 55) & 1)) {
         if (cpu->nuser_fills < HV_USER_FILLS) cpu->user_fills[cpu->nuser_fills] = (uint16_t)hv_tlb_code(slot, table);
         if (cpu->nuser_fills <= HV_USER_FILLS) cpu->nuser_fills++;
+    } else {
+        if (cpu->nkernel_fills < HV_KERNEL_FILLS) cpu->kernel_fills[cpu->nkernel_fills] = (uint16_t)hv_tlb_code(slot, table);
+        if (cpu->nkernel_fills <= HV_KERNEL_FILLS) cpu->nkernel_fills++;
     }
     e->addend = (int64_t)((uint64_t)(uintptr_t)(ram->host + (page_pa - ram->pa)) - page_va);
     e->read_tag = w->r ? page_va - HV_TLB_ADJ : HV_TLB_INVALID;
