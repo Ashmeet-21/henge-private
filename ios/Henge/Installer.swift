@@ -200,9 +200,11 @@ final class Installer: NSObject, ObservableObject {
 
     private func install(_ mac: VirtualMac, ipsw: URL, cpus: Int) async throws {
         guard JITBootstrap.ready else { throw message("Turn on JIT first: the installer runs the Mac's own restore system, which needs it.") }
-        // The restore needs 2 GB, whatever the Mac is set to use afterwards.
+        // The restore needs 2 GB, whatever the Mac is set to use afterwards, and gets at most 4 GB: the restore system
+        // caches the ~15 GB it writes, so it fills all the memory it is given, and 10 GB of a 12 GB iPhone's RAM in use
+        // (it is outside Henge's footprint, so iOS does not stop it) stalls the whole phone two thirds of the way through.
         var restoring = mac
-        restoring.ramMB = max(mac.ramMB, 2048)
+        restoring.ramMB = min(max(mac.ramMB, 2048), 4096)
         let ram = GuestMemory.prepare(restoring)
         guard ram >= 2048 else { throw message("Installing needs a few more GB of free storage for the Mac's memory.") }
         let work = mac.directory.appendingPathComponent("restore", isDirectory: true)
