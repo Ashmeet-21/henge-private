@@ -588,6 +588,14 @@ static void *input_thread(void *unused) {
         else if (sscanf(line, "wait %d", &x) == 1) sleep((unsigned)x);
         else if (!strncmp(line, "type ", 5)) type_text(line + 5);
         else if (!strncmp(line, "prof ", 5)) prof_dump(line + 5);
+        else if (!strncmp(line, "balloon ", 8)) { /* MB the guest should hand back (HV_BALLOON set at boot) */
+            HvVmapple *bd = hv_vm_board();
+            if (!bd || !bd->balloon) fprintf(stderr, "hengevm: no balloon (set HV_BALLOON)\n");
+            else {
+                hv_virtio_balloon_set_target(bd->balloon, (uint64_t)atoll(line + 8) << 20);
+                fprintf(stderr, "hengevm: balloon: the guest has handed over %llu MB\n", (unsigned long long)(hv_virtio_balloon_actual(bd->balloon) >> 20));
+            }
+        }
         else if (!strncmp(line, "knob ", 5)) {
             char name[32];
             if (sscanf(line, "knob %31s %d", name, &x) == 2 && !hv_knob_set(hv_vm_machine(), name, x))

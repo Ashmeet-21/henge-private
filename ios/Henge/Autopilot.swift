@@ -16,6 +16,7 @@ import UIKit
 ///   move X Y, click X Y  the pointer to a spot on the Mac's screen (its pixels), and a click there
 ///   pointer            where the pointer is now, into the log
 ///   knob NAME VALUE    a translation knob (core/machine.h)
+///   balloon MB         ask the Mac for that much of its memory back (HV_BALLOON set), log what it gave
 ///   snap [NAME]        the Mac's screen (1920x1080) into Documents/NAME.jpg (snap.jpg)
 ///   log TEXT           a marker in henge.log
 ///   stop               stop the Mac
@@ -117,6 +118,9 @@ enum Autopilot {
             } else {
                 HengeLog.log("autopilot", "snap: no screen to read")
             }
+        case "balloon": // "balloon 2048": ask the Mac to hand 2 GB of its memory back (needs HV_BALLOON in henge-env.txt)
+            let got = henge_vm_balloon(Int(arg) ?? -1)
+            HengeLog.log("autopilot", got < 0 ? "no balloon (set HV_BALLOON in henge-env.txt)" : "balloon: the Mac has handed over \(got) MB")
         case "log": // already in the log; the wall clock too, to line it up with things measured elsewhere
             HengeLog.log("autopilot", String(format: "at %.3f", Date().timeIntervalSince1970))
         case "stop":
