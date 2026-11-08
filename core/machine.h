@@ -74,7 +74,9 @@ typedef struct HvStats {
     uint64_t stash_saves, stash_hits, stash_entries; /* user TLB entries kept across process switches */
     uint64_t code_protects;   /* pages that became code (every CPU's TLB scanned for writable entries) */
     uint64_t tlb_miss_kind[4]; /* TLB misses: EL0 empty, EL0 other page there, EL1 empty, EL1 other page there */
-    uint64_t slow_why[6];     /* slow accesses by cause: MMIO, code-page write, page end, TLB miss, other, TLB entry there but mismatched */
+    uint64_t slow_why[6];
+    uint64_t small_pages;     /* of the TLB misses above: the guest maps the page with a granule under 16 KB (4 KB), which the TLB cannot hold */
+    struct { uint64_t mb, n; } small_at[8]; /* where (VA >> 20, bit 0 = EL1) the first 8 such regions were */     /* slow accesses by cause: MMIO, code-page write, page end, TLB miss, other, TLB entry there but mismatched */
     uint64_t slow_kind[12];   /* hv_mem_emulate calls by HV_MEM_* kind */
     uint64_t light_kind[4];
     uint64_t light_fail[4];

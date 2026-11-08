@@ -696,6 +696,10 @@ static void print_stats(HvCpu *cpu, int force) {
         fprintf(stderr, "  slow mem causes K/s: mmio %.0f code-page write %.0f page end %.0f tlb miss %.0f other %.0f entry-but-tag %.0f\n",
                 RATE(slow_why[0]) / 1e3, RATE(slow_why[1]) / 1e3, RATE(slow_why[2]) / 1e3, RATE(slow_why[3]) / 1e3,
                 RATE(slow_why[4]) / 1e3, RATE(slow_why[5]) / 1e3);
+        fprintf(stderr, "  slow mem on pages mapped under 16 KB: %.0fK/s; at (MB, el)", RATE(small_pages) / 1e3);
+        for (int i = 0; i < 8 && s->small_at[i].mb; i++)
+            fprintf(stderr, " %llx/%d x%llu", (unsigned long long)(s->small_at[i].mb >> 1), (int)(s->small_at[i].mb & 1), (unsigned long long)s->small_at[i].n);
+        fprintf(stderr, "\n");
         fprintf(stderr, "  slow mem K/s: single %.0f pair %.0f literal %.0f ldra %.0f ordered %.0f excl %.0f cas %.0f casp %.0f atomic %.0f vec %.0f/%.0f\n",
                 RATE(slow_kind[0]) / 1e3, RATE(slow_kind[1]) / 1e3, RATE(slow_kind[2]) / 1e3, RATE(slow_kind[3]) / 1e3,
                 RATE(slow_kind[4]) / 1e3, RATE(slow_kind[5]) / 1e3, RATE(slow_kind[6]) / 1e3, RATE(slow_kind[7]) / 1e3,
