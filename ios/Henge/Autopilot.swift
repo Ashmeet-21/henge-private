@@ -84,8 +84,8 @@ enum Autopilot {
                 let found = henge_vm_knob(String(kv[0]), value)
                 HengeLog.log("autopilot", found != 0 ? "knob \(kv[0]) = \(value)" : "no knob \(kv[0]) (or no Mac running)")
             }
-        case "log":
-            break // already in the log
+        case "log": // already in the log; the wall clock too, to line it up with things measured elsewhere
+            HengeLog.log("autopilot", String(format: "at %.3f", Date().timeIntervalSince1970))
         case "stop":
             henge_vm_stop()
         case "exit":
