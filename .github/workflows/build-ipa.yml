@@ -25,6 +25,11 @@ jobs:
           rustup target add aarch64-apple-ios || { brew install rustup && rustup-init -y && . "$HOME/.cargo/env" && rustup target add aarch64-apple-ios; }
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           mkdir -p "$HOME/Desktop"
+      # Husk's source tarballs come from GitHub release downloads, which can answer 504 for an hour: keep them
+      - uses: actions/cache@v4
+        with:
+          path: husk/third_party/sources
+          key: husk-sources-${{ hashFiles('husk/scripts/sources.sh') }}
       - name: Husk dependencies (libslirp, glib, on-device pairing)
         working-directory: husk
         run: |
