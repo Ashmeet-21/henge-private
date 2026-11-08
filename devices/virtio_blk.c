@@ -66,8 +66,9 @@ static uint32_t readable(const HvVirtqElem *e) {
    host file, so a disk image stops only ever growing when macOS deletes files. */
 static uint8_t discard(HvVirtioBlk *b, const HvVirtqElem *e, int zero) {
     struct { uint64_t sector; uint32_t n, flags; } seg;
+    if (readable(e) < 16) return S_UNSUPP;
     uint32_t len = readable(e) - 16;
-    if (readable(e) < 16 || len % sizeof seg || len / sizeof seg > DISCARD_MAX_SEG) return S_UNSUPP;
+    if (len % sizeof seg || len / sizeof seg > DISCARD_MAX_SEG) return S_UNSUPP;
     for (uint32_t at = 16; at < 16 + len; at += sizeof seg) {
         if (hv_virtq_read(&b->vio, e, at, &seg, sizeof seg) != sizeof seg) return S_IOERR;
         if (seg.n > DISCARD_MAX_SECTORS || (seg.flags & ~1u) || (!zero && seg.flags)) return S_UNSUPP;
@@ -76,8 +77,7 @@ static uint8_t discard(HvVirtioBlk *b, const HvVirtqElem *e, int zero) {
         uint64_t total = __atomic_add_fetch(&b->discarded, (uint64_t)seg.n * 512, __ATOMIC_RELAXED);
         uint64_t n = __atomic_add_fetch(&b->discards, 1, __ATOMIC_RELAXED);
         if (n == 1 || n % 1024 == 0)
-            fprintf(stderr, "virtio-blk %s: %llu %s ranges so far, %.1f MB handed back
-", b->disk->offset ? "aux" : "root",
+            fprintf(stderr, "virtio-blk %s: %llu %s ranges so far, %.1f MB handed back\n", b->disk->offset ? "aux" : "root",
                     (unsigned long long)n, zero ? "zero/discard" : "discard", total / 1048576.0);
     }
     return S_OK;
