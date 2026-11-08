@@ -475,24 +475,14 @@ static HengeDualMapping henge_self_dual_mapping(size_t bytes)
 __attribute__((used, aligned(16384))) static uint8_t g_jit_reserve[HENGE_JIT_HOLD_BYTES + (16u << 10)];
 static bool g_jit_reserve_released;
 
-/* Give the reserved block back for the debugger's allocation, if it is the size asked for
-   and it actually sits below where generated code runs. The block lives in the app's own
-   image, which is not always loaded low: when it lands above the JIT limit, releasing it
-   just invites the debugger to place the region in that high hole, which the allocator then
-   rejects -- the launch-to-launch "sometimes JIT is off" failure. Keep it held in that case
-   so the debugger takes a hole elsewhere. */
+/* Give the reserved block back for the debugger's allocation, if it is the size asked for. */
 static void henge_ios_jit_release_low_hold(size_t bytes)
 {
     if (g_jit_reserve_released || bytes > HENGE_JIT_HOLD_BYTES) return;
     vm_address_t start = ((vm_address_t)g_jit_reserve + 16383) & ~(vm_address_t)16383;
-    g_jit_reserve_released = true;
-    if (start + bytes > HENGE_JIT_LOW_LIMIT) {
-        HENGE_LOG("reserved block at %#lx is above the JIT limit %#llx; keeping it held so the region goes elsewhere",
-                  (unsigned long)start, (unsigned long long)HENGE_JIT_LOW_LIMIT);
-        return;
-    }
     kern_return_t kr = vm_deallocate(mach_task_self(), start, HENGE_JIT_HOLD_BYTES);
     HENGE_LOG("released the reserved block at %#lx for the JIT region: %s", (unsigned long)start, mach_error_string(kr));
+    g_jit_reserve_released = true;
 }
 
 /* The address space, for working out where a JIT region can go: every mapping, and the gaps of 256 MiB or more. */
