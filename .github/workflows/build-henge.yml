@@ -16,7 +16,8 @@ name: Build Henge IPA
 on:
   workflow_dispatch: {}
   push:
-    branches: {}
+    branches:
+      - '**'
 
 env:
   HUSK: ${{ github.workspace }}/Husk
