@@ -719,6 +719,29 @@ static void sync_iosurface(HvObject *s) {
     if (hash == s->content_hash) return;
     s->content_hash = hash;
     IOSurfaceLock(s->iosurface, 0, NULL);
+    /* HV_PVG_HOST_DUMP=prefix (debugging): the host surface as it is just before the guest's pixels go over it,
+       for the first few multi-plane surfaces, with its layout in a .txt beside it: did the GPU draw something here
+       that this copy throws away? */
+    const char *host_dump = getenv("HV_PVG_HOST_DUMP");
+    static int host_dumped;
+    if (host_dump && s->plane_count && host_dumped < 12) {
+        char path[1100];
+        snprintf(path, sizeof path, "%s-%d.bin", host_dump, host_dumped);
+        FILE *f = fopen(path, "wb");
+        if (f) fwrite(IOSurfaceGetBaseAddress(s->iosurface), 1, IOSurfaceGetAllocSize(s->iosurface), f), fclose(f);
+        snprintf(path, sizeof path, "%s-%d.txt", host_dump, host_dumped++);
+        f = fopen(path, "w");
+        if (f) {
+            fprintf(f, "fourcc %08x w %zu h %zu alloc %zu guest %llu\n", IOSurfaceGetPixelFormat(s->iosurface), IOSurfaceGetWidth(s->iosurface),
+                    IOSurfaceGetHeight(s->iosurface), IOSurfaceGetAllocSize(s->iosurface), (unsigned long long)s->alloc);
+            for (size_t i = 0; i < IOSurfaceGetPlaneCount(s->iosurface); i++)
+                fprintf(f, "plane %zu off %ld row %zu h %zu w %zu bpe %zu\n", i,
+                        (long)((uint8_t *)IOSurfaceGetBaseAddressOfPlane(s->iosurface, i) - (uint8_t *)IOSurfaceGetBaseAddress(s->iosurface)),
+                        IOSurfaceGetBytesPerRowOfPlane(s->iosurface, i), IOSurfaceGetHeightOfPlane(s->iosurface, i),
+                        IOSurfaceGetWidthOfPlane(s->iosurface, i), IOSurfaceGetBytesPerElementOfPlane(s->iosurface, i));
+            fclose(f);
+        }
+    }
     if (s->plane_count && IOSurfaceGetPlaneCount(s->iosurface) >= s->plane_count) {
         /* IOSurface can choose different offsets and row strides from those
            requested. Copy each video plane through its actual host layout. */
