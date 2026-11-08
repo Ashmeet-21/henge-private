@@ -30,7 +30,8 @@ jobs:
         run: |
           # GitHub release downloads sometimes answer 504 for a while: try again rather than fail the build
           for try in 1 2 3 4 5 6; do ./scripts/fetch_sources.sh && break; [ $try = 6 ] && exit 1; echo "fetch failed, retry $try in 60 s"; sleep 60; done
-          ./scripts/build_ios.sh libffi glib libslirp
+          # glib's build fetches pcre2 from Meson's WrapDB, which also answers 504 at times
+          for try in 1 2 3 4 5; do ./scripts/build_ios.sh libffi glib libslirp && break; [ $try = 5 ] && exit 1; echo "dependency build failed, retry $try in 90 s"; sleep 90; done
           ./scripts/build_rppairing_ios.sh
       - name: Henge
         run: |
