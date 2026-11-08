@@ -93,6 +93,7 @@ struct Trackpad: UIViewRepresentable {
         }
 
         override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+            var moved = false
             for t in touches where t.type != .indirectPointer {
                 guard let i = fingers.firstIndex(where: { $0.touch == t }) else { continue }
                 let now = t.location(in: self), before = t.previousLocation(in: self)
@@ -100,7 +101,11 @@ struct Trackpad: UIViewRepresentable {
                 if travelled >= Self.tapDistance, !holding { cancelHold() }
                 let (x, y) = sensor(t)
                 henge_vm_touch(fingers[i].id, 1, x, y)
+                moved = true
             }
+            /* One frame with every finger that moved, so the guest sees a gesture's
+               fingers move together rather than one at a time. */
+            if moved { henge_vm_touch_frame() }
         }
 
         override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) { lift(touches) }

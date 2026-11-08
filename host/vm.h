@@ -75,6 +75,7 @@ void hv_vm_mouse_hwheel(int dx);
 /* The Magic Trackpad 2 on the USB bus: a finger on it. phase: 0 down, 1 move, 2 up; id a
    stable 1..15 per touch; x, y in sensor units (HV_TP_SENSOR_* in devices/xhci.h). */
 void hv_vm_touch(int id, int phase, int x, int y);
+void hv_vm_touch_frame(void); /* commit one frame with every finger that moved */
 void hv_vm_touch_button(int down); /* the pad's full press (a click) */
 /* Where the guest has its pointer, in display pixels. 0, or -1 before it has one. */
 int hv_vm_pointer(int *x, int *y);

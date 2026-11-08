@@ -399,6 +399,8 @@ void hv_vm_touch(int id, int phase, int x, int y) {
     hv_xhci_touch(board.usb, id, phase, x, y);
 }
 
+void hv_vm_touch_frame(void) { hv_xhci_touch_frame(board.usb); }
+
 void hv_vm_touch_button(int down) { hv_xhci_touch_button(board.usb, down); }
 
 int hv_vm_pointer(int *x, int *y) {

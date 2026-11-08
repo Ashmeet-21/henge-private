@@ -1054,7 +1054,8 @@ void hv_xhci_touch(HvXhci *x, int id, int phase, int px, int py) {
                 f->x = px;
                 f->y = py;
                 if (f->state == 3) f->state = 4;
-                tp_queue(x);
+                /* no report yet: the caller commits one frame holding every finger that
+                   moved, so the guest sees them move together instead of one at a time */
             } else {
                 f->state = 7; /* stop */
                 tp_queue(x);
@@ -1065,6 +1066,16 @@ void hv_xhci_touch(HvXhci *x, int id, int phase, int px, int py) {
             break;
         }
     }
+    pthread_mutex_unlock(&x->mu);
+    hv_machine_wake(x->m);
+}
+
+/* Commit one frame with the current state of all the fingers: a move batch ends
+   here, so a gesture's fingers all land in the same report. */
+void hv_xhci_touch_frame(HvXhci *x) {
+    if (!x) return;
+    pthread_mutex_lock(&x->mu);
+    tp_queue(x);
     pthread_mutex_unlock(&x->mu);
     hv_machine_wake(x->m);
 }
@@ -1082,16 +1093,6 @@ void hv_xhci_touch_button(HvXhci *x, int down) {
 
 void hv_xhci_poll(HvXhci *x) {
     if (!x) return;
-    /* The guest's gesture engine wants a steady stream of frames, not only ones on
-       touch changes: while fingers are down, keep reporting the state so a gesture
-       does not starve in the gaps between touch events. */
-    pthread_mutex_lock(&x->mu);
-    if (x->tp_mt) {
-        int active = 0;
-        for (int i = 0; i < HV_TP_FINGERS; i++) if (x->tp_fingers[i].in) { active = 1; break; }
-        if (active && tp_now_ms() - x->tp_ts >= 8) tp_queue(x);
-    }
-    pthread_mutex_unlock(&x->mu);
     for (int slot = 1; slot <= HV_XHCI_SLOTS; slot++)
         if (x->slots[slot].dev >= 0) run_ep_in(x, slot);
 }

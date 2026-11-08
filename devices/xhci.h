@@ -91,8 +91,12 @@ void hv_xhci_key(HvXhci *x, uint8_t usage, int down);
 /* The same, by Linux input key code (what the host UI produces). */
 void hv_xhci_key_linux(HvXhci *x, uint16_t code, int down);
 /* Any thread: a Magic Trackpad 2 touch. phase: 0 down, 1 move, 2 up. id: a
-   stable 1..15 for this touch; x, y in sensor units (HV_TP_SENSOR_*). */
+   stable 1..15 for this touch; x, y in sensor units (HV_TP_SENSOR_*). Down and up
+   report at once; a move only updates the finger, and hv_xhci_touch_frame commits
+   one report for all the fingers that moved together. */
 void hv_xhci_touch(HvXhci *x, int id, int phase, int px, int py);
+/* Any thread: send one frame with every finger's current state (ends a move batch). */
+void hv_xhci_touch_frame(HvXhci *x);
 /* Any thread: the pad's full press (a click), down or up. */
 void hv_xhci_touch_button(HvXhci *x, int down);
 /* CPU thread: hand waiting reports to the guest. */
