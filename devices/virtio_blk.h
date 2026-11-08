@@ -31,6 +31,8 @@ typedef struct HvVirtioBlk {
     HvVirtio vio;
     HvDisk *disk;
     uint64_t requests, errors;
+    int discard_on;                 /* F_DISCARD/F_WRITE_ZEROES offered (writable disk, HV_BLK_DISCARD not 0) */
+    uint64_t discards, discarded;   /* ranges handled, bytes handed back to the host */
     HvVblkReq *ring;
     uint32_t submitted;  /* CPU thread: requests handed to the worker */
     uint32_t completed;  /* workers: requests done (in any order) */
