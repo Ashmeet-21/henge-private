@@ -257,8 +257,10 @@ void hv_ijc_switch(HvCpu *cpu) {
         cpu->ijc_salt[0] = (uint64_t)fresh_cid(cpu) << 48;
         return;
     }
-    if (!cpu->asid_cid[asid]) {
+    uint64_t base = cpu->ttbr0_el1 & OA_MASK & ~1ull;
+    if (!cpu->asid_cid[asid] || cpu->asid_base[asid] != base) {
         cpu->asid_cid[asid] = fresh_cid(cpu);
+        cpu->asid_base[asid] = base;
         cpu->cid_asid[cpu->asid_cid[asid]] = (uint16_t)asid;
         if (cpu->nasid_log < HV_ASID_LOG) cpu->asid_log[cpu->nasid_log] = (uint16_t)asid;
         if (cpu->nasid_log <= HV_ASID_LOG) cpu->nasid_log++;
@@ -561,9 +563,10 @@ void hv_tlb_flush_va(HvCpu *cpu, uint64_t va) {
    this entry was there, it must not stay writable. */
 static void stash_drop(HvPerCpu *p, int asid);
 
-static void write_guard(HvCpu *cpu, HvRam *ram, uint64_t pg, uint32_t code, HvTlbEntry *e) {
-    /* Say where, so that the page becoming code drops just this entry (or, if
-       this CPU now maps it writable twice, makes the protector scan). */
+/* Say where, so that the page becoming code drops just this entry (or, if
+   this CPU now maps it writable twice, makes the protector scan). The check
+   that must follow, after a full fence, is write_guard's last two lines. */
+static void write_hint(HvCpu *cpu, HvRam *ram, uint64_t pg, uint32_t code) {
     uint64_t *hint = &ram->whint[pg * HV_MAX_CPUS + cpu->index];
     uint64_t mine = code + 1, old = __atomic_load_n(hint, __ATOMIC_RELAXED), now = old;
     const uint8_t *host_page = ram->host + (pg << HV_TLB_PAGE_BITS);
@@ -579,6 +582,10 @@ static void write_guard(HvCpu *cpu, HvRam *ram, uint64_t pg, uint32_t code, HvTl
         if (!have) now = place >= 0 ? (old & ~(0xffffull << (16 * place))) | mine << (16 * place) : HV_WHINT_MANY;
         if (now != old) __atomic_store_n(hint, now, __ATOMIC_RELAXED);
     }
+}
+
+static void write_guard(HvCpu *cpu, HvRam *ram, uint64_t pg, uint32_t code, HvTlbEntry *e) {
+    write_hint(cpu, ram, pg, code);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     if (__atomic_load_n(&ram->code_pages[pg], __ATOMIC_RELAXED)) e->write_tag = HV_TLB_INVALID;
 }
@@ -657,7 +664,23 @@ static void walk_end(HvCpu *cpu) {
     if (cpu->pc_state) __atomic_add_fetch(&cpu->pc_state->walk_seq, 1, __ATOMIC_RELEASE);
 }
 
+static HvRam *ram_of_host(HvMachine *m, const uint8_t *host);
+
 uint32_t hv_mmu_access(HvCpu *cpu, uint64_t va, HvAccess acc, int el, uint64_t *pa) {
+    /* The TLB entry first, as translated code trusts it: slow paths that are slow for another reason (a page's
+       last bytes, the access kind) need no walk (macOS 27: 100-250K a second). */
+    if (acc != HV_ACC_EXEC && cpu->m) {
+        const HvTlbEntry *e = hv_tlb_ent(cpu, (uint32_t)(va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), hv_tlb_table(cpu, el));
+        uint64_t tag = acc == HV_ACC_WRITE ? e->write_tag : e->read_tag;
+        if (tag != HV_TLB_INVALID && tag + HV_TLB_ADJ == (va & ~(uint64_t)PAGE_MASK)) {
+            const uint8_t *host = (const uint8_t *)(uintptr_t)(va + (uint64_t)e->addend);
+            HvRam *ram = ram_of_host(cpu->m, host);
+            if (ram) {
+                *pa = ram->pa + (uint64_t)(host - ram->host);
+                return 0;
+            }
+        }
+    }
     HvWalk w;
     walk_begin(cpu);
     hv_mmu_walk(cpu, va, acc, el, &w);
@@ -693,6 +716,47 @@ int hv_tlbi_drop_remote_va(HvCpu *target, uint64_t va, int asid) {
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     int ok = __atomic_load_n(&p->walk_seq, __ATOMIC_SEQ_CST) == s1 && /* no fill in between */
              __atomic_load_n(&p->ijc_seq, __ATOMIC_SEQ_CST) == c1;
+    if (!ok) {
+        if (target->m->stats_interval) target->m->stats.race_kind[2]++;
+    } else if (fetched) {
+        hv_cpu_kick(target);
+    }
+    return ok;
+}
+
+/* hv_tlbi_drop_remote_va for npages pages from va at once (big range TLBIs, HV_RANGE_DROP): one pass over the
+   stashes instead of one per page, then each page's TLB slots and cached branch targets, all inside one
+   walk_seq/ijc_seq window. Same answers: 1 done, 0 raced (try again), -1 only the target can do it. */
+static void stash_drop_range(HvPerCpu *p, uint64_t va, uint64_t npages, int asid);
+
+int hv_tlbi_drop_remote_range(HvCpu *target, uint64_t va, uint64_t npages, int asid) {
+    HvPerCpu *p = target->pc_state;
+    uint32_t s1 = __atomic_load_n(&p->walk_seq, __ATOMIC_SEQ_CST);
+    if (s1 & 1) { if (target->m->stats_interval) target->m->stats.race_kind[0]++; return 0; }
+    uint32_t c1 = __atomic_load_n(&p->ijc_seq, __ATOMIC_SEQ_CST);
+    if (c1 & 1) { if (target->m->stats_interval) target->m->stats.race_kind[1]++; return 0; }
+    if (!((va >> 55) & 1)) stash_drop_range(p, va, npages, asid);
+    int fetched = 0;
+    for (uint64_t i = 0; i < npages && i < HV_TLB_SIZE; i++) { /* past HV_TLB_SIZE pages the slots come round again */
+        uint32_t idx = (uint32_t)((va >> HV_TLB_PAGE_BITS) + i) & (HV_TLB_SIZE - 1);
+        for (int t = 0; t < 3; t++) {
+            HvTlbEntry *e = hv_tlb_ent(target, idx, t);
+            uint64_t x = __atomic_load_n(&e->exec_tag, __ATOMIC_RELAXED);
+            /* the slot whatever its tag, as for one page; fetched if it holds code from the range */
+            if (x != HV_TLB_INVALID) {
+                uint64_t off = ((hv_exec_key(x, e->addend) & 0x00ffffffffffc000ull) - (va & 0x00ffffffffffc000ull)) & 0x00ffffffffffffffull;
+                if (off < (npages << HV_TLB_PAGE_BITS)) fetched = 1;
+            }
+            __atomic_store_n(&e->read_tag, HV_TLB_INVALID, __ATOMIC_RELAXED);
+            __atomic_store_n(&e->write_tag, HV_TLB_INVALID, __ATOMIC_RELAXED);
+            __atomic_store_n(&e->exec_tag, HV_TLB_INVALID, __ATOMIC_RELAXED);
+        }
+    }
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    for (uint64_t i = 0; i < npages; i++)
+        if (!ijc_drop_va(target, va + (i << HV_TLB_PAGE_BITS), asid, 1)) return -1;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    int ok = __atomic_load_n(&p->walk_seq, __ATOMIC_SEQ_CST) == s1 && __atomic_load_n(&p->ijc_seq, __ATOMIC_SEQ_CST) == c1;
     if (!ok) {
         if (target->m->stats_interval) target->m->stats.race_kind[2]++;
     } else if (fetched) {
@@ -945,6 +1009,29 @@ static void stash_drop_va(HvPerCpu *p, uint64_t va, int asid) {
     }
 }
 
+/* stash_drop_va for npages pages from va, in one pass. */
+static void stash_drop_range(HvPerCpu *p, uint64_t va, uint64_t npages, int asid) {
+    uint64_t lo = va & 0x00ffffffffffffffull & ~(uint64_t)PAGE_MASK, span = npages << HV_TLB_PAGE_BITS;
+    for (int i = 0; i < HV_STASHES; i++) {
+        HvTlbStash *s = &p->stash[i];
+        uint64_t t = __atomic_load_n(&s->ttbr0, __ATOMIC_SEQ_CST);
+        if (!t || (asid >= 0 && (int)(t >> 48) != asid)) continue;
+        uint32_t n = __atomic_load_n(&s->n, __ATOMIC_RELAXED);
+        if (n > HV_STASH_CAP) n = HV_STASH_CAP;
+        for (uint32_t k = 0; k < n; k++) {
+            HvTlbEntry *e = &s->ent[k];
+            uint64_t rt = __atomic_load_n(&e->read_tag, __ATOMIC_RELAXED), wt = __atomic_load_n(&e->write_tag, __ATOMIC_RELAXED),
+                     xt = __atomic_load_n(&e->exec_tag, __ATOMIC_RELAXED);
+            if (rt == HV_TLB_INVALID && wt == HV_TLB_INVALID && xt == HV_TLB_INVALID) continue;
+            uint64_t tag = rt != HV_TLB_INVALID ? rt + HV_TLB_ADJ : xt != HV_TLB_INVALID ? hv_exec_key(xt, e->addend) : wt + HV_TLB_ADJ;
+            if ((((tag & 0x00ffffffffffffffull & ~(uint64_t)PAGE_MASK) - lo) & 0x00ffffffffffffffull) >= span) continue;
+            __atomic_store_n(&e->read_tag, HV_TLB_INVALID, __ATOMIC_RELAXED);
+            __atomic_store_n(&e->write_tag, HV_TLB_INVALID, __ATOMIC_RELAXED);
+            __atomic_store_n(&e->exec_tag, HV_TLB_INVALID, __ATOMIC_RELAXED);
+        }
+    }
+}
+
 void hv_tlb_stash_drop(HvCpu *cpu, int asid) {
     if (cpu->pc_state) stash_drop(cpu->pc_state, asid);
 }
@@ -959,6 +1046,68 @@ static HvRam *ram_of_host(HvMachine *m, const uint8_t *host) {
     for (int i = 0; i < m->nram; i++)
         if ((uint64_t)(host - m->ram[i].host) < m->ram[i].size) return &m->ram[i];
     return NULL;
+}
+
+/* HV_SWITCH_FLUSH=2 (checking): every entry this CPU holds, in its TLB and in the stashes it would bring back, walked again
+   in its own address space. Returns how many no longer match the page tables (a walk fault, or another page), so that
+   a whole-TLB flush that is left out would have dropped something the guest expects gone. A cleared access flag alone
+   is counted apart (stats) and not as out of date: xnu ages pages with its own TLBIs. */
+int hv_tlb_check_all(HvCpu *cpu) {
+    HvMachine *m = cpu->m;
+    HvPerCpu *p = cpu->pc_state;
+    uint64_t ttbr0 = cpu->ttbr0_el1;
+    int bad = 0;
+    static int told;
+    for (int pass = -1; pass < (p ? HV_STASHES : 0); pass++) {
+        uint32_t n = 3 * HV_TLB_SIZE;
+        const HvTlbStash *s = NULL;
+        if (pass >= 0) {
+            s = &p->stash[pass];
+            uint64_t t = __atomic_load_n(&s->ttbr0, __ATOMIC_ACQUIRE);
+            if (!t || __atomic_load_n(&s->gen, __ATOMIC_ACQUIRE) != s->saved_gen) continue; /* would not be brought back */
+            n = s->n > HV_STASH_CAP ? HV_STASH_CAP : s->n;
+            cpu->ttbr0_el1 = t;
+        }
+        for (uint32_t k = 0; k < n; k++) {
+            const HvTlbEntry *e;
+            int table;
+            if (!s) table = (int)(k / HV_TLB_SIZE), e = hv_tlb_ent(cpu, k % HV_TLB_SIZE, table);
+            else table = hv_tlb_tmajor ? s->slot[k] >> HV_TLB_BITS : s->slot[k] & 3, e = &s->ent[k];
+            uint64_t rt = e->read_tag, wt = e->write_tag, xt = e->exec_tag;
+            if (rt == HV_TLB_INVALID && wt == HV_TLB_INVALID && xt == HV_TLB_INVALID) continue;
+            uint64_t va = rt != HV_TLB_INVALID ? rt + HV_TLB_ADJ : wt != HV_TLB_INVALID ? wt + HV_TLB_ADJ : hv_exec_key(xt, e->addend);
+            if (s && (va >> 55) & 1) continue; /* stashes hold the user half only */
+            HvWalk w;
+            hv_mmu_walk(cpu, va, rt != HV_TLB_INVALID || wt != HV_TLB_INVALID ? HV_ACC_READ : HV_ACC_EXEC, table ? 1 : 0, &w);
+            if (m->stats_interval) m->stats.flush_check_entries++;
+            const char *why = NULL;
+            if (w.fsc >= HV_FSC_ACCESS(0) && w.fsc <= HV_FSC_ACCESS(3)) {
+                if (m->stats_interval) m->stats.flush_check_af++;
+                continue;
+            }
+            if (w.fsc >= HV_FSC_PERMISSION(0) && w.fsc <= HV_FSC_PERMISSION(3)) continue; /* PAN or EL: not about where the page is */
+            if (w.fsc) why = "no mapping";
+            else {
+                uint64_t page_pa = w.pa & ~(uint64_t)PAGE_MASK;
+                const uint8_t *host = (const uint8_t *)(uintptr_t)(va + (uint64_t)e->addend);
+                HvRam *ram = ram_of_host(m, host);
+                if (!ram || ram->pa + (uint64_t)(host - ram->host) != page_pa) why = "another page";
+            }
+            if (why) {
+                bad++;
+                if (told++ < 16)
+                    fprintf(stderr, "hengevm: switch-flush check: %s entry (table %d, va %llx, ttbr0 %llx) is out of date: %s (fsc %x)\n",
+                            s ? "stashed" : "live", table, (unsigned long long)va, (unsigned long long)cpu->ttbr0_el1, why, w.fsc);
+            }
+        }
+        cpu->ttbr0_el1 = ttbr0;
+    }
+    cpu->ttbr0_el1 = ttbr0;
+    if (m->stats_interval) {
+        m->stats.flush_checked++;
+        if (bad) m->stats.flush_check_bad++;
+    }
+    return bad;
 }
 
 /* TTBR0 went from old to now (a process switch): keep old's user entries
@@ -1022,6 +1171,10 @@ void hv_tlb_switch_user(HvCpu *cpu, uint64_t old, uint64_t now) {
             if (m->stats_interval) m->stats.stash_stale++;
             break;
         }
+        /* Writable entries: all their hints, one fence, then each page's code check (write_guard, batched: one fence per
+           switch instead of one per entry; every entry is in place before the fence and checked after it). */
+        uint16_t pend[HV_STASH_CAP];
+        uint32_t npend = 0;
         for (uint32_t j = 0; j < r->n; j++) {
             const HvTlbEntry *from = &r->ent[j];
             if (from->read_tag == HV_TLB_INVALID && from->write_tag == HV_TLB_INVALID && from->exec_tag == HV_TLB_INVALID)
@@ -1030,11 +1183,19 @@ void hv_tlb_switch_user(HvCpu *cpu, uint64_t old, uint64_t now) {
             *e = *from;
             cpu->user_fills[cpu->nuser_fills++] = r->slot[j];
             if (e->write_tag != HV_TLB_INVALID) {
-                const uint8_t *host = (const uint8_t *)(uintptr_t)(e->write_tag + HV_TLB_ADJ + e->addend);
+                const uint8_t *host = (const uint8_t *)(uintptr_t)(from->write_tag + HV_TLB_ADJ + from->addend);
                 HvRam *ram = ram_of_host(m, host);
                 if (!ram) e->write_tag = HV_TLB_INVALID;
-                else write_guard(cpu, ram, (uint64_t)(host - ram->host) >> HV_TLB_PAGE_BITS, r->slot[j], e);
+                else write_hint(cpu, ram, (uint64_t)(host - ram->host) >> HV_TLB_PAGE_BITS, r->slot[j]), pend[npend++] = (uint16_t)j;
             }
+        }
+        if (npend) __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        for (uint32_t q = 0; q < npend; q++) {
+            const HvTlbEntry *from = &r->ent[pend[q]];
+            const uint8_t *host = (const uint8_t *)(uintptr_t)(from->write_tag + HV_TLB_ADJ + from->addend);
+            HvRam *ram = ram_of_host(m, host);
+            if (ram && __atomic_load_n(&ram->code_pages[(uint64_t)(host - ram->host) >> HV_TLB_PAGE_BITS], __ATOMIC_RELAXED))
+                (&cpu->tlb[0] + r->slot[pend[q]])->write_tag = HV_TLB_INVALID;
         }
         if (m->stats_interval) m->stats.stash_hits++;
         if (m->stats_interval) m->stats.stash_entries += r->n;

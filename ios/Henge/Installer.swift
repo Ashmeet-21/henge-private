@@ -48,6 +48,9 @@ final class Installer: NSObject, ObservableObject {
     @Published private(set) var machineName = ""
 
     private var session: URLSession?
+    /* Background time, so a moment out of the foreground (a notification, iPhone Mirroring reconnecting)
+       does not suspend the restore at once; iOS gives about 30 s. */
+    private var grace = UIBackgroundTaskIdentifier.invalid
     private var downloadContinuation: CheckedContinuation<URL, Error>?
     nonisolated(unsafe) private var downloadTarget: URL? // set before the task starts, read by the delegate
     private var lastResumeData: Data?
@@ -79,12 +82,21 @@ final class Installer: NSObject, ObservableObject {
 
     func reset() { if !busy { phase = .idle } }
 
+    private func endGrace() {
+        guard grace != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(grace)
+        grace = .invalid
+    }
+
     func start(_ release: MacOSRelease, name: String, ramMB: Int, cpus: Int, keepImage: Bool) {
         guard !busy else { return }
         machineName = name
         UIApplication.shared.isIdleTimerDisabled = true // the screen locking would suspend the download and the restore
+        grace = UIApplication.shared.beginBackgroundTask(withName: "Henge install") {
+            MainActor.assumeIsolated { Installer.shared.endGrace() }
+        }
         Task {
-            defer { UIApplication.shared.isIdleTimerDisabled = false }
+            defer { UIApplication.shared.isIdleTimerDisabled = false; endGrace() }
             var made: VirtualMac?
             do {
                 try checkSpace(release)
@@ -97,7 +109,6 @@ final class Installer: NSObject, ObservableObject {
                 made = mac
                 phase = .installing
                 try await install(mac, ipsw: ipsw, cpus: cpus)
-                Machines.shared.add(mac)
                 if !keepImage { try? FileManager.default.removeItem(at: ipsw) }
                 HengeLog.log("install", "\(name): installed \(release.name)")
                 phase = .done("\(release.name) is installed on \(name). Quit Henge (swipe it away) and open it again, then tap Start.")
@@ -188,11 +199,14 @@ final class Installer: NSObject, ObservableObject {
 
     private func install(_ mac: VirtualMac, ipsw: URL, cpus: Int) async throws {
         guard JITBootstrap.ready else { throw message("Turn on JIT first: the installer runs the Mac's own restore system, which needs it.") }
-        // The restore needs 2 GB, whatever the Mac is set to use afterwards.
+        // The restore needs 2 GB, whatever the Mac is set to use afterwards, and gets at most 4 GB: the restore system
+        // caches the ~15 GB it writes, so it fills all the memory it is given, and 10 GB of a 12 GB iPhone's RAM in use
+        // (it is outside Henge's footprint, so iOS does not stop it) stalls the whole phone two thirds of the way through.
         var restoring = mac
-        restoring.ramMB = max(mac.ramMB, 2048)
+        restoring.ramMB = min(max(mac.ramMB, 2048), 4096)
         let ram = GuestMemory.prepare(restoring)
         guard ram >= 2048 else { throw message("Installing needs a few more GB of free storage for the Mac's memory.") }
+        setenv("HV_WRITE_CACHE", "0", 1) // the ~15 GB the restore writes goes straight to storage (host/disk.c); this process runs no other Mac
         let work = mac.directory.appendingPathComponent("restore", isDirectory: true)
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
         var buffer = [CChar](repeating: 0, count: 256)
@@ -213,6 +227,11 @@ final class Installer: NSObject, ObservableObject {
                 throw message("The machine stopped during the restore (\(String(cString: henge_vm_exit_reason()))).")
             }
         }
+        // In the list before anything else: stopping the restore system can take a while, and if Henge is
+        // stopped meanwhile (the phone locked) a finished Mac must not be left on the disk unlisted.
+        try? (mac.osName ?? "").write(to: mac.directory.appendingPathComponent(Machines.installedMarker), atomically: true, encoding: .utf8)
+        Machines.shared.add(mac)
+        HengeLog.log("install", "\(mac.name): restore finished, added to the Macs")
         if henge_vm_state() == 1 { henge_vm_stop() }
         try? FileManager.default.removeItem(at: work)
     }

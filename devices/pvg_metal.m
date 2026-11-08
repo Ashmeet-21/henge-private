@@ -92,6 +92,9 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     /* Source layout for a multi-plane video surface. */
     uint32_t plane_count;
     uint64_t plane_from[4], plane_row[4], plane_h[4];
+    /* Each plane's sampled guest bytes when last copied: only the planes the guest changed are copied, so a CPU
+       write to one plane (a decoder refilling luma) does not wipe what the GPU drew into another (chroma, alpha). */
+    uint64_t plane_hash[4];
     /* A heap: private memory, a buffer over all of it. */
     id<MTLBuffer> heap_whole;
     /* A heap's or a private texture's copy in guest memory, and which side has the newest bytes. */
@@ -99,6 +102,8 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     BOOL host_valid, guest_stale;
     /* What this one is made from, kept for as long as it lives. */
     HvObject *parent;
+    /* A multi-plane surface's key in the replay's planar table, while it counts as one of its users. */
+    NSString *planar_key;
 }
 @end
 
@@ -122,6 +127,11 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     NSMutableDictionary<NSNumber *, NSMutableDictionary<NSNumber *, HvObject *> *> *tasks;
     NSMutableDictionary<NSNumber *, id<MTLTexture>> *mapped_textures;
     NSMutableDictionary<NSNumber *, HvObject *> *surfaces;
+    /* Multi-plane surfaces' host IOSurfaces by the guest memory they stand for: each process maps a surface
+       under its own mapping id, and what one draws (macOS 27's WebKit draws pages into b3a8 tiles in its GPU
+       process) has to be what another reads (WindowServer). */
+    NSMutableDictionary<NSString *, id> *planar;
+    NSMutableDictionary<NSString *, NSNumber *> *planar_uses; /* mappings using each: the entry goes with the last one */
     NSMutableSet<NSString *> *complaints;
     uint64_t execs, draws, failed, heap_bytes, synced, remaps;
     /* Work the GPU has not finished. Stamps are given back in the order they came: the
@@ -706,23 +716,80 @@ static IOSurfaceRef make_iosurface(HvObject *to, const uint8_t *desc, uint64_t a
     return made;
 }
 
-/* Guest pixels into its IOSurface, when they changed. A sample of every 64th byte says so cheaply. */
-static void sync_iosurface(HvObject *s) {
-    if (!s->iosurface) return;
-    const uint8_t *from = s->mapped + s->first;
+/* A sample of every 64th byte, to tell cheaply whether pixels changed. */
+static uint64_t hash_bytes(const uint8_t *from, uint64_t len) {
     uint64_t hash = 0xcbf29ce484222325ull;
-    for (uint64_t i = 0; i + 8 <= s->alloc; i += 64) {
+    for (uint64_t i = 0; i + 8 <= len; i += 64) {
         uint64_t v;
         memcpy(&v, from + i, 8);
         hash = (hash ^ v) * 0x100000001b3ull;
     }
-    if (hash == s->content_hash) return;
-    s->content_hash = hash;
-    IOSurfaceLock(s->iosurface, 0, NULL);
-    if (s->plane_count && IOSurfaceGetPlaneCount(s->iosurface) >= s->plane_count) {
-        /* IOSurface can choose different offsets and row strides from those
-           requested. Copy each video plane through its actual host layout. */
+    return hash;
+}
+
+static uint64_t guest_hash(HvObject *s) { return hash_bytes(s->mapped + s->first, s->alloc); }
+
+/* Plane i of a multi-plane surface in the guest's memory, or 0 bytes if its layout does not fit the allocation. */
+static uint64_t plane_bytes(HvObject *s, uint32_t i) {
+    uint64_t row = s->plane_row[i], off = s->plane_from[i];
+    if (!row || off > s->alloc || s->plane_h[i] > (s->alloc - off) / row) return 0;
+    return row * s->plane_h[i];
+}
+
+/* Every plane's hash as the guest has it now, for a host surface already holding those pixels. */
+static void note_plane_hashes(HvObject *s) {
+    for (uint32_t i = 0; i < s->plane_count && i < 4; i++)
+        s->plane_hash[i] = hash_bytes(s->mapped + s->first + s->plane_from[i], plane_bytes(s, i));
+}
+
+/* Guest pixels into its IOSurface, when they changed. */
+static void sync_iosurface(HvObject *s) {
+    if (!s->iosurface) return;
+    const uint8_t *from = s->mapped + s->first;
+    BOOL by_plane = s->plane_count && IOSurfaceGetPlaneCount(s->iosurface) >= s->plane_count;
+    uint64_t hashes[4] = {0};
+    uint32_t changed = 0;
+    if (by_plane) {
         for (uint32_t i = 0; i < s->plane_count && i < 4; i++) {
+            hashes[i] = hash_bytes(from + s->plane_from[i], plane_bytes(s, i));
+            if (hashes[i] != s->plane_hash[i]) changed |= 1u << i;
+        }
+        if (!changed) return;
+    } else {
+        uint64_t hash = guest_hash(s);
+        if (hash == s->content_hash) return;
+        s->content_hash = hash;
+    }
+    IOSurfaceLock(s->iosurface, 0, NULL);
+    /* HV_PVG_HOST_DUMP=prefix (debugging): the host surface as it is just before the guest's pixels go over it,
+       for the first few multi-plane surfaces, with its layout in a .txt beside it: did the GPU draw something here
+       that this copy throws away? */
+    const char *host_dump = getenv("HV_PVG_HOST_DUMP");
+    static int host_dumped;
+    if (host_dump && s->plane_count && host_dumped < 12) {
+        char path[1100];
+        snprintf(path, sizeof path, "%s-%d.bin", host_dump, host_dumped);
+        FILE *f = fopen(path, "wb");
+        if (f) fwrite(IOSurfaceGetBaseAddress(s->iosurface), 1, IOSurfaceGetAllocSize(s->iosurface), f), fclose(f);
+        snprintf(path, sizeof path, "%s-%d.txt", host_dump, host_dumped++);
+        f = fopen(path, "w");
+        if (f) {
+            fprintf(f, "fourcc %08x w %zu h %zu alloc %zu guest %llu\n", IOSurfaceGetPixelFormat(s->iosurface), IOSurfaceGetWidth(s->iosurface),
+                    IOSurfaceGetHeight(s->iosurface), IOSurfaceGetAllocSize(s->iosurface), (unsigned long long)s->alloc);
+            for (size_t i = 0; i < IOSurfaceGetPlaneCount(s->iosurface); i++)
+                fprintf(f, "plane %zu off %ld row %zu h %zu w %zu bpe %zu\n", i,
+                        (long)((uint8_t *)IOSurfaceGetBaseAddressOfPlane(s->iosurface, i) - (uint8_t *)IOSurfaceGetBaseAddress(s->iosurface)),
+                        IOSurfaceGetBytesPerRowOfPlane(s->iosurface, i), IOSurfaceGetHeightOfPlane(s->iosurface, i),
+                        IOSurfaceGetWidthOfPlane(s->iosurface, i), IOSurfaceGetBytesPerElementOfPlane(s->iosurface, i));
+            fclose(f);
+        }
+    }
+    if (by_plane) {
+        /* IOSurface can choose different offsets and row strides from those
+           requested. Copy each changed video plane through its actual host layout. */
+        for (uint32_t i = 0; i < s->plane_count && i < 4; i++) {
+            if (!(changed & 1u << i)) continue;
+            s->plane_hash[i] = hashes[i];
             uint8_t *dst = IOSurfaceGetBaseAddressOfPlane(s->iosurface, i);
             size_t dst_row = IOSurfaceGetBytesPerRowOfPlane(s->iosurface, i);
             size_t rows = MIN((size_t)s->plane_h[i], IOSurfaceGetHeightOfPlane(s->iosurface, i));
@@ -801,13 +868,37 @@ static void sync_iosurface(HvObject *s) {
         surfaces[key] = surface;
         if (desc[0x3e] >= 2) {
             surface->alloc = alloc;
-            surface->iosurface = make_iosurface(surface, desc, alloc);
-            if (!surface->iosurface) {
-                NSMutableString *m = [NSMutableString stringWithFormat:@"surface %llu: no IOSurface for its planes (alloc %llu):", h.mapping, alloc];
-                for (int i = 0; i < 96; i++) [m appendFormat:@" %08x", ((const uint32_t *)desc)[i]];
-                [self complain:m];
+            IOSurfaceRef made = make_iosurface(surface, desc, alloc);
+            /* The same guest memory, format and size under another mapping id (another process): the same host
+               IOSurface, or what that process drew is not what this one sees. Its pixels are already there (or
+               drawn over since), so they are not copied again now. */
+            NSString *pk = [NSString stringWithFormat:@"%x/%08x/%llux%llu/%llu", pages[0] & ~1u, surface->fourcc,
+                            (unsigned long long)sw, (unsigned long long)sh, (unsigned long long)alloc];
+            id shared = planar[pk];
+            if (shared && made) {
+                CFRelease(made);
+                surface->iosurface = (IOSurfaceRef)CFRetain((__bridge CFTypeRef)shared);
+                surface->content_hash = guest_hash(surface);
+                note_plane_hashes(surface);
+                surface->planar_key = pk;
+                planar_uses[pk] = @(planar_uses[pk].unsignedIntValue + 1);
+                static int told;
+                if (told++ < 8) fprintf(stderr, "hengevm: pvg-metal: surface %llu shares the host surface of the same guest memory (%s)\n", h.mapping, pk.UTF8String);
+            } else {
+                surface->iosurface = made;
+                if (made) {
+                    if (planar.count >= 512) [planar removeAllObjects], [planar_uses removeAllObjects]; /* old ones only lose their sharing */
+                    planar[pk] = (__bridge id)made;
+                    planar_uses[pk] = @1;
+                    surface->planar_key = pk;
+                }
+                if (!surface->iosurface) {
+                    NSMutableString *m = [NSMutableString stringWithFormat:@"surface %llu: no IOSurface for its planes (alloc %llu):", h.mapping, alloc];
+                    for (int i = 0; i < 96; i++) [m appendFormat:@" %08x", ((const uint32_t *)desc)[i]];
+                    [self complain:m];
+                }
+                sync_iosurface(surface);
             }
-            sync_iosurface(surface);
         }
         fprintf(stderr, "hengevm: pvg-metal: surface %llu: %lux%lu format %lu, row %llu, %llu KB, fourcc %c%c%c%c planes %u\n", h.mapping, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat, row, alloc >> 10, desc[7], desc[6], desc[5], desc[4], desc[0x3e]);
     }
@@ -823,11 +914,30 @@ static void sync_iosurface(HvObject *s) {
         t.swizzle = MTLTextureSwizzleChannelsMake(MTLTextureSwizzleRed, MTLTextureSwizzleGreen, MTLTextureSwizzleBlue, MTLTextureSwizzleAlpha);
     }
     o->surface = surface;
+    /* The plane the texture is over, after the description in the guest's record (PGSerializedTextureDescriptor
+       then plane and rotation, 16 bits each: record +0x24 for v1, +0x2c for v2, the record starting at ref).
+       macOS draws video and Safari's page tiles one plane at a time (R8 luma, RG8 chroma, R8 alpha): every view
+       made over plane 0 left plane 1 empty, so chroma read back as zero (all green) and alpha as zero (blank pages). */
+    uint16_t plane;
+    memcpy(&plane, h.d + (h.tag == 0x39 ? 0x28 : 0x20), 2);
+    static int plane0 = -1; /* HV_PVG_PLANE0 (testing): every view on plane 0, as before this was read */
+    if (plane0 < 0) plane0 = getenv("HV_PVG_PLANE0") != NULL;
+    if (plane0) plane = 0;
+    if (surface->iosurface && plane >= IOSurfaceGetPlaneCount(surface->iosurface)) {
+        [self complain:[NSString stringWithFormat:@"surface %llu: texture on plane %u of %zu; using plane 0", h.mapping, plane,
+                        IOSurfaceGetPlaneCount(surface->iosurface)]];
+        plane = 0;
+    }
+    if (plane) {
+        static int told;
+        if (told++ < 8) fprintf(stderr, "hengevm: pvg-metal: surface %llu: texture %lux%lu format %lu on plane %u\n", h.mapping,
+                                (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat, plane);
+    }
     if (surface->iosurface) {
-        o->object = [device newTextureWithDescriptor:t iosurface:surface->iosurface plane:0];
+        o->object = [device newTextureWithDescriptor:t iosurface:surface->iosurface plane:plane];
         if (!o->object) { /* video formats cannot be drawn into */
             t.usage = MTLTextureUsageShaderRead;
-            o->object = [device newTextureWithDescriptor:t iosurface:surface->iosurface plane:0];
+            o->object = [device newTextureWithDescriptor:t iosurface:surface->iosurface plane:plane];
         }
     }
     else o->object = [(id<MTLBuffer>)surface->object newTextureWithDescriptor:t offset:surface->first bytesPerRow:surface->row];
@@ -836,7 +946,7 @@ static void sync_iosurface(HvObject *s) {
         t.storageMode = MTLStorageModePrivate;
         o->object = [device newTextureWithDescriptor:t]; /* something to bind: it stays empty */
     }
-    mapped_textures[key] = o->object;
+    if (!plane) mapped_textures[key] = o->object;
 }
 
 - (HvObject *)object:(uint32_t)ref task:(uint32_t)task {
@@ -2323,6 +2433,8 @@ HvPvgMetal *hv_pvg_metal_create(HvPvgLite *lite) {
         r->tasks = [NSMutableDictionary new];
         r->mapped_textures = [NSMutableDictionary new];
         r->surfaces = [NSMutableDictionary new];
+        r->planar = [NSMutableDictionary new];
+        r->planar_uses = [NSMutableDictionary new];
         r->complaints = [NSMutableSet new];
         r->shot = getenv("HV_PVG_SHOT");
         cp_start(r);
@@ -2433,6 +2545,21 @@ void hv_pvg_metal_cursor_moved(HvPvgMetal *m) {
 void hv_pvg_metal_unmap(HvPvgMetal *m, uint32_t mapping) {
     HvReplay *r = (__bridge HvReplay *)m;
     dispatch_async(r->worker, ^{
+        /* The last mapping of a shared multi-plane surface takes its table entry along: the entry holds the host
+           IOSurface (4K video frames are 27-65 MB of Henge's own memory), and the guest reuses its memory for others. */
+        HvObject *s = r->surfaces[@(mapping)];
+        NSString *pk = s ? s->planar_key : nil;
+        if (pk) {
+            s->planar_key = nil;
+            if ((__bridge IOSurfaceRef)r->planar[pk] == s->iosurface) { /* still this one's entry (the table may have been emptied since) */
+                unsigned uses = r->planar_uses[pk].unsignedIntValue;
+                if (uses > 1) r->planar_uses[pk] = @(uses - 1);
+                else {
+                    [r->planar removeObjectForKey:pk];
+                    [r->planar_uses removeObjectForKey:pk];
+                }
+            }
+        }
         [r->surfaces removeObjectForKey:@(mapping)];
         [r->mapped_textures removeObjectForKey:@(mapping)];
     });

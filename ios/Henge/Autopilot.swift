@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 /// Testing a build on a phone nobody is holding. Henge follows Documents/henge-autopilot.txt when it is
 /// launched with HENGE_AUTOPILOT set, as in
@@ -12,7 +13,11 @@ import Foundation
 ///   type TEXT          typed into the Mac (the log shows only how long it is)
 ///   key CODE           a Linux key code (28 is Return, 1 is Escape)
 ///   cmd KEY            KEY (a character, or space) with Command held
+///   move X Y, click X Y  the pointer to a spot on the Mac's screen (its pixels), and a click there
+///   pointer            where the pointer is now, into the log
 ///   knob NAME VALUE    a translation knob (core/machine.h)
+///   balloon MB         ask the Mac for that much of its memory back (HV_BALLOON set), log what it gave
+///   snap [NAME]        the Mac's screen (1920x1080) into Documents/NAME.jpg (snap.jpg)
 ///   log TEXT           a marker in henge.log
 ///   stop               stop the Mac
 ///   exit               quit Henge
@@ -76,6 +81,26 @@ enum Autopilot {
             await Keys.typeSlowly(arg)
         case "key":
             if let code = UInt16(arg) { Keys.press(code) }
+        case "move", "click": // guest display pixels: nudged there in small steps, as macOS accelerates big ones
+            let xy = arg.split(separator: " ").compactMap { Int32($0) }
+            guard xy.count == 2 else { HengeLog.log("autopilot", "\(parts[0]) wants X Y"); return }
+            var px: Int32 = 0, py: Int32 = 0
+            for _ in 0..<1500 {
+                guard henge_vm_pointer(&px, &py) == 0 else { break }
+                let dx = xy[0] - px, dy = xy[1] - py
+                if abs(dx) < 3 && abs(dy) < 3 { break }
+                henge_vm_mouse_move(max(-16, min(16, dx)), max(-16, min(16, dy)))
+                try? await Task.sleep(nanoseconds: 30_000_000)
+            }
+            if parts[0] == "click" {
+                henge_vm_mouse_button(0, 1)
+                try? await Task.sleep(nanoseconds: 120_000_000)
+                henge_vm_mouse_button(0, 0)
+            }
+        case "pointer":
+            var px: Int32 = 0, py: Int32 = 0
+            let rc = henge_vm_pointer(&px, &py)
+            HengeLog.log("autopilot", "pointer \(rc == 0 ? "at \(px), \(py)" : "not known yet")")
         case "cmd": // "cmd space", "cmd q": the key with Command held
             if let c = arg == "space" ? " " : arg.first { Keys.chord(125, c) }
         case "knob":
@@ -84,6 +109,18 @@ enum Autopilot {
                 let found = henge_vm_knob(String(kv[0]), value)
                 HengeLog.log("autopilot", found != 0 ? "knob \(kv[0]) = \(value)" : "no knob \(kv[0]) (or no Mac running)")
             }
+        case "snap": // the Mac's screen, full size, into Documents/snap.jpg (or NAME.jpg): "snap", "snap safari"
+            let name = arg.isEmpty ? "snap" : arg
+            let url = docs.appendingPathComponent("\(name).jpg")
+            if let image = MacPreview.capture(width: 1920, height: 1080),
+               let data = UIImage(cgImage: image).jpegData(compressionQuality: 0.9), (try? data.write(to: url, options: .atomic)) != nil {
+                HengeLog.log("autopilot", "snap \(url.lastPathComponent), \(data.count / 1024) KB")
+            } else {
+                HengeLog.log("autopilot", "snap: no screen to read")
+            }
+        case "balloon": // "balloon 2048": ask the Mac to hand 2 GB of its memory back (needs HV_BALLOON in henge-env.txt)
+            let got = henge_vm_balloon(Int(arg) ?? -1)
+            HengeLog.log("autopilot", got < 0 ? "no balloon (set HV_BALLOON in henge-env.txt)" : "balloon: the Mac has handed over \(got) MB")
         case "log": // already in the log; the wall clock too, to line it up with things measured elsewhere
             HengeLog.log("autopilot", String(format: "at %.3f", Date().timeIntervalSince1970))
         case "stop":

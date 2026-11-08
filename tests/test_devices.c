@@ -12,7 +12,13 @@ DECLARE_PROGRAM(p_timer_irq);
 DECLARE_PROGRAM(p_uart);
 extern const char devices_programs_begin[], devices_programs_finish[];
 
-#define WORK "/Volumes/macOS Storage/husk-work/hengevm"
+/* HV_TEST_WORK, or the system temporary directory: two small disk images go there. */
+static const char *work_dir(void) {
+    const char *w = getenv("HV_TEST_WORK");
+    if (w && *w) return w;
+    w = getenv("TMPDIR");
+    return w && *w ? w : "/tmp";
+}
 #define RAM_SIZE (64ull << 20)
 
 static HvMachine m;
@@ -370,6 +376,74 @@ static void test_virtio_net(void) {
     check("RX used length", used_len, 76);
 }
 
+/* The memory balloon: a new target reaches the driver (config change interrupt), inflated 16 KB pages go back
+   to the OS (with the RAM file under the board, as holes: they read as zero at once), a page with only some
+   of its 4 KB quarters stays, a driver listing one page number per 16 KB page works too, and deflate counts. */
+static void put_pfns(uint64_t buf, const uint32_t *pfn, int n) { memcpy(ram(buf), pfn, 4u * n); }
+
+static void test_virtio_balloon(void) {
+    int slot = (int)find_slot(0x1af4, 0x1045, 0);
+    check("virtio-balloon enumerated (HV_BALLOON)", slot >= 0 && slot < 32, 1);
+    if (slot < 0 || slot >= 32 || !board.balloon) return;
+    HvVirtioBalloon *b = board.balloon;
+    check("balloon has the RAM file", b->ram_fd >= 0, 1);
+    uint64_t bar = VMAPPLE_PCIE_MMIO + 0x300000;
+    uint64_t ring = setup_virtio(slot, bar, VMAPPLE_MEM + 0x1000000);
+    uint64_t inq = ring, deq = ring + 0x4000, list = VMAPPLE_MEM + 0x1800000, pages = VMAPPLE_MEM + 0x2000000;
+    rd8(bar + 0x1000); /* clear the ISR */
+    hv_virtio_balloon_set_target(b, 1 << 20);
+    hv_virtio_balloon_poll(b);
+    check("num_pages in 4 KB pages", rd32(bar + 0x2000), 256);
+    check("config change in the ISR", rd8(bar + 0x1000) & 2, 2);
+    /* three 16 KB pages of 0x5a: the first and third listed whole, the second missing a quarter */
+    memset(ram(pages), 0x5a, 3 * 0x4000);
+    uint32_t p0 = (uint32_t)(pages >> 12);
+    uint32_t pfn[11] = {p0, p0 + 1, p0 + 2, p0 + 3, p0 + 4, p0 + 5, p0 + 7, p0 + 8, p0 + 9, p0 + 10, p0 + 11};
+    put_pfns(list, pfn, 11);
+    put_desc(inq, 0, list, 44, 0, 0);
+    offer(inq, 0);
+    wr16(bar + 0x3000, 0);
+    check("inflate element used", used_idx(inq), 1);
+    check("two whole pages given back", b->given_back, 2);
+    check("the page missing a quarter kept", b->partial, 1);
+    check("given-back page reads zero", rd32(pages), 0);
+    check("given-back page's end reads zero", rd32(pages + 0x3ffc), 0);
+    check("kept page keeps its bytes", rd8(pages + 0x4000), 0x5a);
+    check("third page reads zero", rd32(pages + 0x8000), 0);
+    /* a driver that lists one page number per 16 KB page (quarter 0 only) */
+    memset(ram(pages + 0xc000), 0x77, 2 * 0x4000);
+    uint32_t whole[2] = {p0 + 12, p0 + 16};
+    put_pfns(list, whole, 2);
+    put_desc(inq, 1, list, 8, 0, 0);
+    offer(inq, 1);
+    wr16(bar + 0x3000, 0);
+    check("one number per 16 KB page: both given back", b->given_back, 4);
+    check("...and read zero", rd8(pages + 0x10000) | rd8(pages + 0xc000), 0);
+    /* the driver says how much it holds */
+    wr32(bar + 0x2000 + 4, 256);
+    check("actual read back", hv_virtio_balloon_actual(b), 1 << 20);
+    check("num_pages stays the host's", (wr32(bar + 0x2000, 7), rd32(bar + 0x2000)), 256);
+    /* deflate the first page */
+    put_pfns(list, pfn, 4);
+    put_desc(deq, 0, list, 16, 0, 0);
+    offer(deq, 0);
+    wr16(bar + 0x3000 + 4, 1);
+    check("deflate element used", used_idx(deq), 1);
+    check("deflated page taken back", b->taken_back, 1);
+    check("page numbers outside RAM ignored", b->out_of_ram, 0);
+    /* anonymous RAM (the phone's): pages are marked reusable */
+    HvVirtioBalloon *a = hv_virtio_balloon_create(&m, board.pcie, board.ram, VMAPPLE_MEM, RAM_SIZE, -1);
+    int aslot = (int)find_slot(0x1af4, 0x1045, 1);
+    uint64_t abar = VMAPPLE_PCIE_MMIO + 0x380000;
+    uint64_t aring = setup_virtio(aslot, abar, VMAPPLE_MEM + 0x1100000);
+    put_pfns(list + 0x1000, pfn, 4);
+    put_desc(aring, 0, list + 0x1000, 16, 0, 0);
+    offer(aring, 0);
+    wr16(abar + 0x3000, 0);
+    check("anonymous: page given back", a->given_back, 1);
+    check("anonymous: madvise did not fail", a->failed, 0);
+}
+
 /* FIPS-197 appendix C.1: AES-128, key 000102..0f, plaintext 00112233..ff. */
 static void test_aes(void) {
     const uint64_t fifo = VMAPPLE_AES_1 + 0x200, src = VMAPPLE_MEM + 0x500000, dst = src + 0x100;
@@ -442,15 +516,24 @@ static void test_guest_programs(void) {
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (hv_machine_init(&m, 4 << 20) != 0) return 1;
-    const char *root_path = WORK "/test-root.img", *aux_path = WORK "/test-aux.img";
+    char root_path[1024], aux_path[1024];
+    snprintf(root_path, sizeof root_path, "%s/hv-test-root.img", work_dir());
+    snprintf(aux_path, sizeof aux_path, "%s/hv-test-aux.img", work_dir());
     if (make_disk(root_path, 1 << 20, 1) || make_disk(aux_path, 256 << 10, 2)) {
-        printf("cannot create test disks in %s\n", WORK);
+        printf("cannot create test disks in %s\n", work_dir());
         return 1;
     }
     static HvDisk root, aux;
     hv_disk_open(&root, root_path, 0, 0);
     hv_disk_open(&aux, aux_path, 16384, 0); /* as with auxiliary.bin: skip the 16 KB header */
     HvCfgParams cfg = {.nr_cpus = 1, .ecid = 0x1234, .mac_en0 = {2, 0, 0, 0x12, 0x34, 0x56}};
+    /* The balloon, over guest RAM in a file (holes read as zero at once) */
+    char ram_path[1024];
+    snprintf(ram_path, sizeof ram_path, "%s/hv-test-ram", work_dir());
+    setenv("HV_BALLOON", "0", 1);
+    setenv("HV_RAM_FILE", ram_path, 1);
+    setenv("HV_RAM_NO_LEDGER", "1", 1);
+    setenv("HV_RAM_NO_PREFAULT", "1", 1);
     static const uint8_t mac[6] = {2, 0, 0, 0x12, 0x34, 0x56};
     if (hv_vmapple_create(&board, &m, &cpu, RAM_SIZE, &root, &aux, &cfg, mac) != 0) return 1;
     hv_vmapple_reset_cpu(&board);
@@ -462,6 +545,7 @@ int main(void) {
     test_bdif(&root, &aux);
     test_virtio_blk(&aux);
     test_virtio_net();
+    test_virtio_balloon();
     test_aes();
     /* MSI frame: valid type register, doorbell pends the INTID */
     check("msi type valid", rd32(VMAPPLE_GIC_MSI + 8) >> 31, 1);

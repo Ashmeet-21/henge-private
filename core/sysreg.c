@@ -390,7 +390,11 @@ void hv_tlbi_apply(HvCpu *cpu, uint32_t op1, uint32_t crn, uint32_t crm, uint32_
            local TLBI VMALLE1, to drop the old region's global entries. Here every process's user entries are put
            aside under its own TTBR0 and its cached branch targets under its own ASID, so nothing of the old one
            can be seen; such a flush, within 20 us of a TTBR0 change, is left out. */
-        if (crm == 7 && hv_knob[HV_K_SWITCHFLUSH] && since_switch < 480) {
+        /* HV_SWITCH_FLUSH=2: one in 32 is checked first (hv_tlb_check_all, too slow for all of macOS 27's ~800/s) and done
+           if any entry kept no longer matches the page tables. */
+        static _Thread_local uint32_t nth;
+        if (crm == 7 && hv_knob[HV_K_SWITCHFLUSH] && since_switch < 480 &&
+            (hv_knob[HV_K_SWITCHFLUSH] < 2 || (nth++ & 31) || !hv_tlb_check_all(cpu))) {
             if (cpu->m->stats_interval) cpu->m->stats.flush_skipped++;
             return;
         }
@@ -478,7 +482,8 @@ int hv_sysreg_sys(HvCpu *cpu, uint32_t insn, uint64_t pc) {
             if (by_range && ((xt >> 46) & 3) == 2) { /* 16 KB granule, as xnu uses */
                 npages = (((xt >> 39) & 31) + 1) << (5 * ((xt >> 44) & 3) + 1);
                 va = (uint64_t)((int64_t)((xt & 0x1fffffffffull) << (64 - 37)) >> (64 - 37 - 14));
-                if (npages > 32) npages = 0;
+                /* HV_RANGE_DROP=N: ranges up to N pages are done from here too, in one pass (hv_tlbi_drop_remote_range) */
+                if (npages > (hv_knob[HV_K_RANGEDROP] > 32 ? (uint64_t)hv_knob[HV_K_RANGEDROP] : 32)) npages = 0;
             } else if (by_va) {
                 npages = 1;
             }
@@ -490,7 +495,14 @@ int hv_sysreg_sys(HvCpu *cpu, uint32_t insn, uint64_t pc) {
                    A drop that raced a page walk or cache fill of c's (they are
                    short) is tried again a few times first. */
                 int done = npages > 0, why = !npages ? (by_range ? 1 : 2) : 0;
-                for (uint64_t p = 0; done && p < npages; p++) {
+                if (done && npages > 1 && hv_knob[HV_K_RANGEDROP] > 0) {
+                    int r = 0;
+                    for (int t = 0; t < 4 && (r = hv_tlbi_drop_remote_range(c, va, npages, asid)) == 0; t++)
+                        for (int s = 0; s < 64; s++) __asm__ volatile("yield");
+                    done = r == 1;
+                    if (r < 0) why = 3;
+                }
+                else for (uint64_t p = 0; done && p < npages; p++) {
                     uint64_t pva = va + (p << HV_TLB_PAGE_BITS);
                     int r = 0;
                     for (int t = 0; t < 4 && (r = hv_tlbi_drop_remote_va(c, pva, asid)) == 0; t++)

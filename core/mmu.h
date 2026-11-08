@@ -56,7 +56,8 @@ void hv_ijc_drop_asid(HvCpu *cpu, uint16_t asid);
 /* TTBR0 changed: use the new address space's user entries. */
 void hv_ijc_switch(HvCpu *cpu);
 void hv_tlb_flush_va_asid(HvCpu *cpu, uint64_t va, int asid); /* asid -1: every address space */
-void hv_tlb_flush_va_page(HvCpu *cpu, uint64_t va, int asid); /* one page: stashes lose only its entries */
+void hv_tlb_flush_va_page(HvCpu *cpu, uint64_t va, int asid);
+int hv_tlb_check_all(HvCpu *cpu); /* one page: stashes lose only its entries */
 void hv_ijc_drop_va(HvCpu *cpu, uint64_t va, int asid);
 /* Translated code's TLB miss: walk and fill without the full helper (see mmu.c). */
 int hv_tlb_refill(HvCpu *cpu, uint64_t va, uint32_t flags);
@@ -70,6 +71,8 @@ void *hv_ijc_resolve(HvCpu *cpu, uint64_t va, uint32_t flags);
 /* asid -1: all. 1: done; 0: raced the target's own page walk or cache fill
    (try again); -1: the target has to do it itself. */
 int hv_tlbi_drop_remote_va(HvCpu *target, uint64_t va, int asid);       /* just the cached branch targets in the page */
+/* The same for npages pages from va in one go (big range TLBIs; HV_RANGE_DROP sets how big). */
+int hv_tlbi_drop_remote_range(HvCpu *target, uint64_t va, uint64_t npages, int asid);
 void hv_ijc_drop_range(HvCpu *cpu, uint64_t va, uint64_t len, int asid);
 void hv_ucode_add(HvCpu *cpu, uint64_t va); /* a user target was cached in this page (current address space) */
 void hv_tlb_protect_code(HvCpu *cpu, const uint8_t *host_page);

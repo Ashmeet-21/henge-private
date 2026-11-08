@@ -283,6 +283,68 @@ int main(void) {
         }
     }
 
+    /* Another CPU's big range TLBI (64 user pages of ASID 5: over the 32 done from here by default). With HV_RANGE_DROP it is done from here in one pass:
+       the second CPU's TLB slots and stashed entries in the range go, the rest stay, nothing is queued for it.
+       Without, it is queued for that CPU to do (as before) and only happens when it does. */
+    {
+        static HvCpu cpu2;
+        hv_cpu_reset_index(&cpu2, &m, 1);
+        cpu2.sctlr_el1 = cpu.sctlr_el1, cpu2.tcr_el1 = cpu.tcr_el1, cpu2.mair_el1 = cpu.mair_el1;
+        cpu2.ttbr0_el1 = 5ull << 48 | (cpu.ttbr0_el1 & 0x0000fffffffffffeull); /* running ASID 5: its live entries are that one's */
+        HvPerCpu *p2 = cpu2.pc_state;
+        const uint64_t base = 0x100000000ull;
+        const int32_t ks[6] = {0, 1, 32, 63, 64, 100};
+        for (int knob = 1; knob >= 0; knob--) {
+            hv_knob[HV_K_RANGEDROP] = knob ? 1024 : 0;
+            hv_tlb_flush(&cpu2);
+            for (int k = 0; k < 6; k++) {
+                uint64_t va = base + ((uint64_t)ks[k] << 14);
+                HvTlbEntry *t = hv_tlb_ent(&cpu2, (va >> 14) & (HV_TLB_SIZE - 1), 0);
+                t->read_tag = va - HV_TLB_ADJ;
+                t->addend = 0;
+            }
+            /* a stashed (switched-out) address space of ASID 5: one page inside the range, one past it */
+            HvTlbStash *st = &p2->stash[0];
+            st->ttbr0 = 5ull << 48 | 0x4000;
+            st->n = 2;
+            st->ent[0] = (HvTlbEntry){.read_tag = base + (40ull << 14) - HV_TLB_ADJ, .write_tag = HV_TLB_INVALID, .exec_tag = HV_TLB_INVALID};
+            st->ent[1] = (HvTlbEntry){.read_tag = base + (200ull << 14) - HV_TLB_ADJ, .write_tag = HV_TLB_INVALID, .exec_tag = HV_TLB_INVALID};
+            p2->nreq = 0, p2->req_flags = 0;
+            cpu.el = 1;
+            cpu.x[1] = 5ull << 48 | 2ull << 46 | 0ull << 44 | 31ull << 39 | ((base >> 14) & 0x1fffffffffull); /* (31+1) << 1 = 64 pages */
+            hv_sysreg_sys(&cpu, 0xd5088221u, 0); /* tlbi rvae1is, x1 */
+            int queued = p2->nreq != 0 || p2->req_flags != 0;
+            checks++;
+            if (queued == knob) {
+                printf("  FAIL remote range, HV_RANGE_DROP %d: %s\n", knob ? 1024 : 0, queued ? "queued for the other CPU" : "not queued");
+                failures++;
+            }
+            if (!knob) hv_cpu_process_requests(&cpu2); /* what it does when it next runs */
+            for (int k = 0; k < 6; k++) {
+                uint64_t va = base + ((uint64_t)ks[k] << 14);
+                int dropped = hv_tlb_ent(&cpu2, (va >> 14) & (HV_TLB_SIZE - 1), 0)->read_tag == HV_TLB_INVALID;
+                checks++;
+                if (dropped != (ks[k] < 64)) {
+                    printf("  FAIL remote range (knob %d), page %d: %s\n", knob, ks[k], dropped ? "dropped" : "kept");
+                    failures++;
+                }
+            }
+            if (knob) { /* the stash is the dropping CPU's job only on this path; the target's own TLBI handles it otherwise */
+                checks += 2;
+                if (st->ent[0].read_tag != HV_TLB_INVALID) printf("  FAIL remote range kept a stashed page in the range\n"), failures++;
+                if (st->ent[1].read_tag == HV_TLB_INVALID) printf("  FAIL remote range dropped a stashed page past the range\n"), failures++;
+            }
+            st->ttbr0 = 0, st->n = 0;
+        }
+        hv_knob[HV_K_RANGEDROP] = 0;
+        /* A target in the middle of a page walk: raced, so it is queued instead. */
+        hv_tlb_flush(&cpu2);
+        __atomic_store_n(&p2->walk_seq, p2->walk_seq | 1, __ATOMIC_SEQ_CST);
+        checks++;
+        if (hv_tlbi_drop_remote_range(&cpu2, base, 64, 5) != 0) printf("  FAIL remote range ignored a page walk in progress\n"), failures++;
+        __atomic_store_n(&p2->walk_seq, p2->walk_seq + 1, __ATOMIC_SEQ_CST);
+    }
+
     printf("%d checks, %d failures\n", checks, failures);
     return failures != 0;
 }
