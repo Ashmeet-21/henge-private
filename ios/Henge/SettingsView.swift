@@ -6,6 +6,7 @@ struct SettingsView: View {
     @AppStorage(HardwareMouse.speedKey) private var mouseSpeed = 1.0
     @AppStorage(HardwareMouse.reverseKey) private var reverseScrolling = false
     @AppStorage(Trackpad.scrollSpeedKey) private var trackpadScroll = Trackpad.defaultScrollSpeed
+    @AppStorage(HardwareMouse.scrollSpeedKey) private var scrollSpeed = 0.3
     @AppStorage(Device.smallCodeRegionKey) private var smallCodeRegion = Device.smallCodeRegionByDefault
     @AppStorage(Device.ramOnStorageKey) private var ramOnStorage = Device.hasLittleMemory
     @AppStorage(EngineTuning.fastFlushKey) private var fastFlush = true
@@ -13,6 +14,7 @@ struct SettingsView: View {
     @AppStorage(EngineTuning.superblocksKey) private var superblocks = false
     @AppStorage(ThermalGovernor.enabledKey) private var keepCool = true
     @AppStorage(EngineTuning.refreshKey) private var refreshRate = 60
+    @AppStorage(JITBootstrap.codeCacheKey) private var codeCacheMB = JITBootstrap.defaultCodeCacheMB
 
     var body: some View {
         NavigationStack {
@@ -79,11 +81,34 @@ struct SettingsView: View {
                             Slider(value: $mouseSpeed, in: 0.5...3)
                         }
                         Toggle("Reverse scrolling", isOn: $reverseScrolling)
-                        Text("A Magic Keyboard or a Bluetooth mouse moves the Mac's pointer. Changes apply the next time a Mac starts.")
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Scroll speed")
+                            Slider(value: $scrollSpeed, in: 0.1...1.5)
+                        }
+                        Text("A Magic Keyboard or a Bluetooth mouse moves the Mac's pointer. Pointer speed changes apply the next time a Mac starts; scroll speed changes apply immediately.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                     .listRowBackground(Desk.card)
                 }
+                Section("Performance") {
+                    Picker("Mac refresh rate", selection: $refreshRate) {
+                        Text("60 Hz").tag(60)
+                        Text("120 Hz").tag(120)
+                    }
+                    .pickerStyle(.segmented)
+                    Toggle("Faster disk writes", isOn: $fastFlush)
+                    Toggle("Quicker wake from idle", isOn: $wfiSpin)
+                    Toggle("Superblocks (experimental)", isOn: $superblocks)
+                    Picker("Code cache", selection: $codeCacheMB) {
+                        Text("1 GB").tag(1024)
+                        Text("1.5 GB").tag(1536)
+                    }
+                    Text("A bigger code cache empties less often and takes more memory; Henge picks 1.5 GB where there is room for it. Applies the next time Henge opens. If JIT stops turning on, choose 1 GB.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Text("60 Hz leaves more of the emulated CPU to apps. Faster disk writes order them without waiting for a full sync; a sudden power loss could lose the last ones. Quicker wake keeps an idle CPU watching for work for 50 µs, at some battery cost. Superblocks let translated code run past conditional branches. Changes apply the next time a Mac starts.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                .listRowBackground(Desk.card)
                 Section("Log") {
                     ShareLink(item: HengeLog.logFileURL) { Label("Share henge.log", systemImage: "square.and.arrow.up") }
                 }

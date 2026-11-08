@@ -28,11 +28,40 @@ enum Device {
         return choices
     }
 
+    /// Preserve the iPad's shape while reducing the virtual GPU's pixel work.
+    static var performanceScreen: (width: Int, height: Int) {
+        let fit = fittingScreen
+        return (1600, Int((Double(fit.height) * 5 / 6 / 8).rounded()) * 8)
+    }
+
+    /// The panel itself, on its side: every physical pixel, and its real size in mm so that macOS
+    /// sees a Retina density and draws at 2x (looks like half the pixels, sharp as the iPad's own UI).
+    /// Every iPad with an M chip is 264 ppi.
+    static var retinaScreen: (width: Int, height: Int) {
+        let n = UIScreen.main.nativeBounds.size
+        return (Int(max(n.width, n.height)) / 8 * 8, Int(min(n.width, n.height)) / 8 * 8)
+    }
+    static var retinaMM: (width: Int, height: Int) {
+        let s = retinaScreen
+        return (Int((Double(s.width) / 264 * 25.4).rounded()), Int((Double(s.height) / 264 * 25.4).rounded()))
+    }
+
     /// How much memory to suggest for a new Mac: what leaves this device room for iOS.
     static var suggestedRAMGB: Int {
         let mb = ProcessInfo.processInfo.physicalMemory >> 20
         // About 6 GB: a 4 GB Mac ran the phone out of memory once booted (jetsam vm-pageshortage); 3 GB ran.
-        return mb >= 10_000 ? 8 : mb >= 7_000 ? 6 : 3
+        // m4 fork: an 8 GB iPad (7.4 GB usable) thrashes and kills the Mac at 6 GB: 16 GB devices only.
+        return mb >= 14_000 ? 8 : mb >= 10_000 ? 6 : mb >= 7_000 ? 4 : 3
+    }
+
+    /// The choices for a Mac's memory, in GB.
+    static let memoryChoices = 1...16
+
+    /// What a choice risks on this device, if anything. An install always gets at least 2 GB (Installer.install).
+    static func memoryNote(_ gb: Int) -> String? {
+        if gb < 4 && !hasLittleMemory { return "macOS has little room under 4 GB, so it can be very slow." }
+        if gb > suggestedRAMGB { return "More than \(suggestedRAMGB) GB is a lot for this \(name): iOS may close Henge when macOS gets busy." }
+        return nil
     }
 
     /// A device with about 6 GB (A14, A15 and A16 iPads and iPhones). iOS has no swap on these, so a 4 GB
@@ -56,9 +85,6 @@ enum Device {
     /// CPUs for a new Mac. A phone with about 6 GB has two fast cores: a third or fourth virtual CPU lands on
     /// a slow one, and every CPU then waits on the slowest whenever page tables change.
     static var defaultCPUs: Int { hasLittleMemory ? 2 : 4 }
-
-    /// The sizes offered for a Mac's memory.
-    static var memoryChoices: [Int] { hasLittleMemory ? [3, 4, 6] : [4, 6, 8] }
 
     /// The virtual CPU offers Armv8.5 instructions (core/sysreg.c), and macOS uses them. They run as
     /// they are, so the chip needs them too: A14, M1 and later, which is iPhone13,x and iPad13,x up.
@@ -87,7 +113,17 @@ enum HardwareKeys {
     /// Sends the presses that are keys, and returns the rest.
     static func send(_ presses: Set<UIPress>, down: Bool) -> Set<UIPress> {
         var rest = Set<UIPress>()
-        for press in presses {
+        // A chord can arrive in one unordered Set. Press modifiers first and
+        // release them last so the guest sees the intended shortcut.
+        let ordered = presses.sorted { a, b in
+            let aCode = a.key?.keyCode.rawValue ?? 0
+            let bCode = b.key?.keyCode.rawValue ?? 0
+            let aModifier = (0xe0...0xe7).contains(aCode)
+            let bModifier = (0xe0...0xe7).contains(bCode)
+            if aModifier != bModifier { return down ? aModifier : !aModifier }
+            return aCode < bCode
+        }
+        for press in ordered {
             guard let raw = press.key?.keyCode.rawValue, raw >= 0x04, raw <= 0xe7 else {
                 rest.insert(press)
                 continue
@@ -133,6 +169,15 @@ enum PointerLock {
             root.setNeedsUpdateOfPrefersPointerLocked()
         }
     }
+
+    /// iPadOS only locks the pointer to an app that fills the screen: in a window (Stage Manager, or iPadOS 26's windows)
+    /// the request is ignored and the system pointer stays separate from the Mac's (#18). An iPhone never locks it, and
+    /// its apps are always full screen, so the hint is for iPad only.
+    static var refused: Bool {
+        guard Device.isPad, wanted, GCMouse.current != nil else { return false }
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.filter { $0.activationState == .foregroundActive }
+        return !scenes.isEmpty && !scenes.contains { $0.pointerLockState?.isLocked == true }
+    }
 }
 
 /// A Magic Keyboard's trackpad or a mouse, while a Mac is running. GameController gives the raw motion,
@@ -141,6 +186,7 @@ final class HardwareMouse {
     static let shared = HardwareMouse()
     static let speedKey = "henge.mouse.speed"
     static let reverseKey = "henge.mouse.reverse"
+    static let scrollSpeedKey = "henge.mouse.scrollSpeed"
 
     private var observers: [NSObjectProtocol] = []
     private var mice: [GCMouse] = []
@@ -149,11 +195,14 @@ final class HardwareMouse {
     private var speed: Float = 1
     private var reverse = false
     private var scrollsLogged = 0 // the first few, to see what a device's raw values look like
+    private var lastScrollFirst: Float = 0, lastScrollSecond: Float = 0
 
     func start() {
         let defaults = UserDefaults.standard
         speed = defaults.object(forKey: Self.speedKey) == nil ? 1 : Float(defaults.double(forKey: Self.speedKey))
         reverse = defaults.bool(forKey: Self.reverseKey)
+        lastScrollFirst = 0
+        lastScrollSecond = 0
         GCMouse.mice().forEach(attach)
         observers.append(NotificationCenter.default.addObserver(forName: .GCMouseDidConnect, object: nil, queue: .main) { [weak self] note in
             if let mouse = note.object as? GCMouse { self?.attach(mouse) }
@@ -223,20 +272,38 @@ final class HardwareMouse {
         }
     }
 
-    /// GameController puts the wheel's vertical motion on the pad's first axis, negative going up, and
-    /// its horizontal motion on the second. macOS accelerates the wheel by about the square of what it
-    /// is sent (see Trackpad's scroll), so this sends the root: one notch, a value of 1, is about 40 pixels.
+    /// GameController puts vertical motion on the first axis and horizontal on the second.
+    /// macOS accelerates wheel units roughly quadratically, so use a tunable square root
+    /// and cap each event to keep a small pad gesture from jumping across a page.
     private func scrolled(_ first: Float, _ second: Float) {
+        // GameController reports both axis states when either one changes. On a
+        // Magic Keyboard it calls us twice per movement, with one stale axis in
+        // each call; sending both values doubles the scroll and adds sideways drift.
+        let verticalChanged = first != lastScrollFirst
+        let horizontalChanged = second != lastScrollSecond
+        lastScrollFirst = first
+        lastScrollSecond = second
+        let mostlyVertical = abs(first) > 2 * abs(second)
+        let mostlyHorizontal = abs(second) > 2 * abs(first)
+        let verticalRaw = verticalChanged && !mostlyHorizontal ? -first : 0
+        let horizontalRaw = horizontalChanged && !mostlyVertical ? second : 0
+        let defaults = UserDefaults.standard
+        let configured = defaults.object(forKey: Self.scrollSpeedKey) == nil
+            ? 0.3 : defaults.double(forKey: Self.scrollSpeedKey)
+        let scale = Float(configured.isFinite ? min(max(configured, 0.1), 1.5) : 0.3)
+        let way: Int32 = reverse ? -1 : 1
+        let horizontal = way * Self.wheelUnits(horizontalRaw, scale: scale)
+        let vertical = way * Self.wheelUnits(verticalRaw, scale: scale)
         if scrollsLogged < 24 {
             scrollsLogged += 1
-            HengeLog.log("input", "scroll raw: \(first), \(second)")
+            HengeLog.log("input", "scroll raw: \(first), \(second); units: \(horizontal), \(vertical)")
         }
-        let way: Int32 = reverse ? -1 : 1
-        henge_vm_mouse_scroll(way * Self.wheelUnits(second), way * Self.wheelUnits(-first))
+        if horizontal != 0 || vertical != 0 { henge_vm_mouse_scroll(horizontal, vertical) }
     }
 
-    private static func wheelUnits(_ value: Float) -> Int32 {
-        let units = Int32((22 * abs(value).squareRoot()).rounded())
+    private static func wheelUnits(_ value: Float, scale: Float) -> Int32 {
+        guard value.isFinite else { return 0 }
+        let units = Int32(min(32, (22 * scale * abs(value).squareRoot()).rounded()))
         return value < 0 ? -units : units
     }
 }

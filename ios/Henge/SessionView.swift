@@ -1,4 +1,5 @@
 import SwiftUI
+import GameController
 
 /// A running Mac. Upright, its screen sits above a trackpad; on its side the screen fills the device
 /// and is its own trackpad. Zoomed in, the screen fills the device either way and follows the pointer.
@@ -17,13 +18,20 @@ struct SessionView: View {
     @State private var framesIn: UInt64 = 0
     @State private var log: [String] = []
     @State private var started = Date()
+    @State private var thermalState = ProcessInfo.processInfo.thermalState
     @AppStorage("henge.cpus") private var cpus = Device.defaultCPUs
+    @AppStorage("henge.matchScreenColors") private var matchScreenColors = true
+    @AppStorage("henge.display.brightness") private var screenBrightness = 1.0
+    @AppStorage("henge.cursor.scale") private var cursorScale = Device.isPad ? 1 : 3
+    @AppStorage("henge.cursor.sharp") private var sharpCursor = true
+    @AppStorage(HardwareMouse.scrollSpeedKey) private var scrollSpeed = 0.3
 
     @State private var typing = false
     @State private var zoomed = false
     @State private var showDetails = false
     @State private var controlsHidden = false
     @State private var showRevealHint = false
+    @State private var pointerRefused = false
     @AppStorage("henge.controls.hintsShown") private var revealHintsShown = 0
     @State private var confirmStop = false
     @State private var shuttingDown = false   // macOS was asked to shut down: close once it has
@@ -77,6 +85,16 @@ struct SessionView: View {
                 } else {
                     floatingControls(layout)
                 }
+                if pointerRefused && !showRevealHint {
+                    Label("Make Henge full screen to use the trackpad or mouse as the Mac's", systemImage: "cursorarrow.rays")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 18).padding(.vertical, 12)
+                        .deskGlass(in: Capsule())
+                        .position(x: full.width / 2, y: insets.top + 40)
+                        .transition(.opacity)
+                        .allowsHitTesting(false)
+                }
                 if showRevealHint {
                     Label("Tap with three fingers to show the controls", systemImage: "hand.tap")
                         .font(.system(size: 15, weight: .medium))
@@ -96,6 +114,12 @@ struct SessionView: View {
             .animation(.easeInOut(duration: 0.25), value: typing)
             .animation(.easeInOut(duration: 0.25), value: controlsHidden)
             .animation(.easeInOut(duration: 0.25), value: showRevealHint)
+            .onReceive(NotificationCenter.default.publisher(for: UIPointerLockState.didChangeNotification)) { _ in
+                pointerRefused = PointerLock.refused
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .GCMouseDidConnect)) { _ in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { pointerRefused = PointerLock.refused }
+            }
             .onReceive(NotificationCenter.default.publisher(for: Trackpad.threeFingerTap)) { _ in
                 controlsHidden = false
                 showRevealHint = false
@@ -128,6 +152,12 @@ struct SessionView: View {
             HardwareKeys.releaseAll()
             HardwareMouse.shared.releaseButtons()
         }
+        .onChange(of: showDetails) { showing in
+            if showing { HardwareKeys.releaseAll(); StickyKeys.shared.releaseAll() }
+        }
+        .onChange(of: confirmStop) { showing in
+            if showing { HardwareKeys.releaseAll(); StickyKeys.shared.releaseAll() }
+        }
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true
             HardwareMouse.shared.start()
@@ -139,7 +169,7 @@ struct SessionView: View {
             HardwareKeys.releaseAll()
             HardwareMouse.shared.stop()
         }
-        .modifier(ExternalMacDisplayModifier(display: display, aspect: mac.aspect))
+        .modifier(ExternalMacDisplayModifier(presentation: MacPresentation(display: display, aspect: mac.aspect)))
         .task { await run() }
         .task { await Sharing.followMacClipboard() }
     }
@@ -421,6 +451,26 @@ struct SessionView: View {
                     LabeledContent("Network frames", value: "\(framesOut) out, \(framesIn) in")
                     LabeledContent("Up", value: "\(Int(Date().timeIntervalSince(started))) s")
                 }
+                Section("Display") {
+                    Toggle("Color matching", isOn: $matchScreenColors)
+                    LabeledContent("Brightness", value: "\(Int(screenBrightness * 100))%")
+                    Slider(value: $screenBrightness, in: 0.4...1)
+                    Text("Brightness dims only the Mac's screen.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                Section("Pointer") {
+                    Picker("Size", selection: $cursorScale) {
+                        Text("1×").tag(1)
+                        Text("2×").tag(2)
+                        Text("3×").tag(3)
+                    }
+                    .pickerStyle(.segmented)
+                    Toggle("Sharp edges", isOn: $sharpCursor)
+                    LabeledContent("Scroll speed", value: String(format: "%.1f×", scrollSpeed))
+                    Slider(value: $scrollSpeed, in: 0.1...1.5)
+                    Text("The Mac supplies a small pointer image. Enlarging it can look blurry; 1× is the sharpest on an iPad. Scroll speed changes apply immediately.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
                 Section("Sharing") {
                     LabeledContent("Clipboard and folder", value: helperRunning ? "On" : "Not set up")
                     if !helperRunning {
@@ -464,6 +514,16 @@ struct SessionView: View {
 
     // MARK: Running
 
+    private static func thermalLabel(_ state: ProcessInfo.ThermalState) -> String {
+        switch state {
+        case .nominal: return "Normal"
+        case .fair: return "Warm"
+        case .serious: return "Hot — performance reduced"
+        case .critical: return "Critical"
+        @unknown default: return "Unknown"
+        }
+    }
+
     private func run() async {
         let ram = GuestMemory.prepare(mac)
         HengeLog.log("session", "available memory \(henge_available_memory() >> 20) MB")
@@ -475,6 +535,12 @@ struct SessionView: View {
         Sharing.prepare()
         EngineTuning.apply()
         henge_vm_set_display(UInt32(mac.screen.width), UInt32(mac.screen.height))
+        if mac.isRetina {
+            henge_vm_set_display_mm(UInt32(Device.retinaMM.width), UInt32(Device.retinaMM.height))
+        } else {
+            henge_vm_set_display_mm(0, 0)
+        }
+        HengeLog.log("session", "screen \(mac.screen.width)x\(mac.screen.height) retina \(mac.isRetina)")
         let rc = henge_vm_boot(mac.rom.path, mac.disk.path, mac.aux.path, mac.ecid, mac.seed, ram, Int32(cpus), &buffer, buffer.count)
         if rc != 0 {
             error = String(cString: buffer)
@@ -487,6 +553,7 @@ struct SessionView: View {
         Machines.shared.update(used)
         var lastBlocks = henge_vm_blocks()
         var lastTime = Date()
+        var lastGPUFrames = henge_vm_gpu_frames()
         var tick = 0
         while !Task.isCancelled {
             state = henge_vm_state()
@@ -500,11 +567,22 @@ struct SessionView: View {
             framesIn = henge_vm_net_frames(0)
             helperRunning = Sharing.helperRunning
             log = Array(HengeLog.recentLines(200))
+            let heat = ProcessInfo.processInfo.thermalState
+            if heat.rawValue != thermalState.rawValue {
+                thermalState = heat
+                HengeLog.log("session", "thermal state: \(Self.thermalLabel(heat))")
+            }
             if state == 2 {
                 if shuttingDown { close() }
                 break
             }
             tick += 1
+            if tick % 10 == 0 {
+                let gpuFrames = henge_vm_gpu_frames()
+                HengeLog.log("perf", "blocks/s \(String(format: "%.0f", blocksPerSecond)), GPU frames/10s \(gpuFrames &- lastGPUFrames), "
+                             + "network tx \(framesOut), rx \(framesIn), thermal \(Self.thermalLabel(heat))")
+                lastGPUFrames = gpuFrames
+            }
             if tick % 30 == 0 { HengeLog.logFootprint("session") } // how close to the limit, for a memory kill leaves no crash report
             if tick % 60 == 0 { MacPreview.save(for: mac) }
             try? await Task.sleep(nanoseconds: 1_000_000_000)

@@ -1,8 +1,5 @@
 import Foundation
 
-/// Engine settings, without a rebuild. Defaults below, then the Performance settings, then
-/// Documents/henge-env.txt (KEY=VALUE per line, # comments), which overrides them all.
-/// Applied before each Mac starts. Based on lemarlab/Henge's EngineTuning (PR #7).
 /// Keeps the device from overheating: as iOS reports it warmer, each of the Mac's CPUs may run less of the
 /// time (100, 85, 60, 40 percent). A little slower and steady, instead of iOS throttling everything to a crawl.
 @MainActor
@@ -50,23 +47,36 @@ enum ThermalGovernor {
     }
 }
 
+/// Engine settings, without a rebuild. Defaults below, then the Performance settings,
+/// then Documents/henge-env.txt (KEY=VALUE per line, # comments) overrides them all.
+/// Applied at launch and again before each Mac starts, so changes need no relaunch.
 enum EngineTuning {
+    static let refreshKey = "henge.perf.hz"
     static let superblocksKey = "henge.perf.superblocks"
     static let wfiSpinKey = "henge.perf.wfiSpin"
     static let fastFlushKey = "henge.perf.fastFlush"
-    static let refreshKey = "henge.perf.hz"
+
+    static let defaults: [String: String] = [
+        // 60, not 120: every frame macOS draws is emulated and replayed, so 120 Hz
+        // halves the CPU left for apps for animation few will notice.
+        "HV_HZ": "60",         // the refresh rate macOS is told its display has
+        "HV_WFI_SPIN": "0",    // microseconds an idle CPU watches for work before sleeping
+        "HV_FLUSH": "2",       // disk flush: F_BARRIERFSYNC, ordered but without a full fsync
+        "HV_STATS": "10",      // seconds between engine stats lines in the log; 0 = off
+    ]
 
     static func apply() {
+        var env = defaults
         let d = UserDefaults.standard
-        var env = [
-            "HV_FLUSH": d.object(forKey: fastFlushKey) as? Bool == false ? "0" : "2", // 2: F_BARRIERFSYNC, 0: fsync
-            "HV_WFI_SPIN": d.bool(forKey: wfiSpinKey) ? "50" : "0", // microseconds an idle CPU watches for work
-            "HV_HZ": d.integer(forKey: refreshKey) == 30 ? "30" : "60", // the refresh rate macOS draws at
-        ]
+        switch d.integer(forKey: refreshKey) { case 120: env["HV_HZ"] = "120"; case 30: env["HV_HZ"] = "30"; default: break }
         if d.bool(forKey: superblocksKey) { env["HV_SUPERBLOCKS"] = "1" } else { unsetenv("HV_SUPERBLOCKS") }
-        unsetenv("HV_STATS")
+        if d.bool(forKey: wfiSpinKey) { env["HV_WFI_SPIN"] = "50" }
+        if d.object(forKey: fastFlushKey) as? Bool == false { env["HV_FLUSH"] = "0" }
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        if let text = try? String(contentsOf: docs.appendingPathComponent("henge-env.txt"), encoding: .utf8) {
+        // GPU command trace: on while Documents/trace-on exists (it is checked every frame, so it can be toggled live).
+        env["HV_PVG_TRACE_FILE"] = docs.appendingPathComponent("trace-on").path
+        let url = docs.appendingPathComponent("henge-env.txt")
+        if let text = try? String(contentsOf: url, encoding: .utf8) {
             for raw in text.split(whereSeparator: \.isNewline) {
                 let line = raw.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init)?
                     .trimmingCharacters(in: .whitespaces) ?? ""

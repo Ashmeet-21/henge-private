@@ -92,6 +92,7 @@ static void *sampler(void *unused) {
 void hv_prof_ios_start(void) {
     static int started;
     if (started++) return;
+    if (!getenv("HV_PROF_IOS")) return;
     Dl_info info;
     if (dladdr((void *)hv_prof_ios_start, &info)) image_base = (uintptr_t)info.dli_fbase;
     hv_prof_register = reg;

@@ -31,10 +31,11 @@ struct MacSettingsView: View {
                         Text(Entitlements.increasedMemory ? "Outside the app's limit once JIT is on" : "Used from free storage if needed")
                             .font(.system(size: 13)).foregroundStyle(Desk.dim).multilineTextAlignment(.trailing)
                     }
-                    Picker("Memory", selection: Binding(get: { mac.ramMB / 1024 }, set: { mac.ramMB = $0 * 1024; save() })) {
-                        ForEach(Device.memoryChoices, id: \.self) { Text("\($0) GB").tag($0) }
+                    Stepper("Memory", value: Binding(get: { mac.ramMB / 1024 }, set: { mac.ramMB = $0 * 1024; save() }), in: Device.memoryChoices)
+                        .font(.system(size: 16))
+                    if let note = Device.memoryNote(mac.ramMB / 1024) {
+                        Text(note).font(.system(size: 13)).foregroundStyle(Desk.dim)
                     }
-                    .pickerStyle(.segmented)
                 }
                 .padding(17)
                 .deskCard()
@@ -53,12 +54,27 @@ struct MacSettingsView: View {
 
                 DeskHeading("Screen")
                 VStack(alignment: .leading, spacing: 12) {
-                    Picker("Screen", selection: Binding(get: { mac.screen.height }, set: { height in
-                        guard let choice = Device.screenChoices.first(where: { $0.height == height }) else { return }
-                        (mac.screenWidth, mac.screenHeight) = (choice.width, choice.height)
+                    Picker("Screen", selection: Binding(get: {
+                        if mac.isRetina { return "retina" }
+                        if Device.isPad, mac.screen.width == Device.performanceScreen.width,
+                           mac.screen.height == Device.performanceScreen.height { return "performance" }
+                        return Device.screenChoices.first(where: { $0.width == mac.screen.width && $0.height == mac.screen.height })?.name ?? "Fit"
+                    }, set: { choice in
+                        mac.retina = choice == "retina"
+                        switch choice {
+                        case "retina": break
+                        case "performance": (mac.screenWidth, mac.screenHeight) = Device.performanceScreen
+                        default:
+                            let pick = Device.screenChoices.first(where: { $0.name == choice })
+                            (mac.screenWidth, mac.screenHeight) = pick.map { ($0.width, $0.height) } ?? Device.fittingScreen
+                        }
                         save()
                     })) {
-                        ForEach(Device.screenChoices, id: \.height) { Text($0.name).tag($0.height) }
+                        if Device.isPad {
+                            Text("Retina").tag("retina")
+                            Text("Performance").tag("performance")
+                        }
+                        ForEach(Device.screenChoices, id: \.name) { Text($0.name).tag($0.name) }
                     }
                     .pickerStyle(.segmented)
                     Text("\(mac.screen.width) × \(mac.screen.height). Smaller is lighter on memory. Changes apply the next time this Mac starts.")
