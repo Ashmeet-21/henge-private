@@ -13,6 +13,7 @@ struct SettingsView: View {
     @AppStorage(EngineTuning.wfiSpinKey) private var wfiSpin = false
     @AppStorage(EngineTuning.superblocksKey) private var superblocks = false
     @AppStorage(ThermalGovernor.enabledKey) private var keepCool = true
+    @AppStorage(BackgroundKeeper.modeKey) private var backgroundMode = BackgroundKeeper.pause
     @AppStorage(EngineTuning.refreshKey) private var refreshRate = 60
     @AppStorage(JITBootstrap.codeCacheKey) private var codeCacheMB = JITBootstrap.defaultCodeCacheMB
 
@@ -44,6 +45,14 @@ struct SettingsView: View {
                         if UIScreen.main.maximumFramesPerSecond >= 120 || refreshRate == 120 { Text("120 Hz").tag(120) }
                     }
                     .pickerStyle(.segmented)
+                    Picker("In the background", selection: $backgroundMode) {
+                        Text("Pause the Mac").tag(BackgroundKeeper.pause)
+                        Text("Keep it running").tag(BackgroundKeeper.keepRunning)
+                    }
+                    Text(backgroundMode == BackgroundKeeper.keepRunning
+                         ? "When you leave Henge or lock the \(Device.name), the Mac keeps running, each CPU at most \(BackgroundKeeper.runningPercent)% of the time, for a download or a build. iOS draws nothing for apps in the background, so windows may need a moment to redraw when you come back, and iOS can still close Henge if another app needs its memory."
+                         : "When you leave Henge or lock the \(Device.name), the Mac pauses: no CPU used, no heat, and its clock stops like a sleeping Mac's, so it goes on where it was when you come back. Henge plays silence meanwhile so iOS keeps it (and JIT) alive; iOS can still close it if another app needs its memory.")
+                        .font(.footnote).foregroundStyle(.secondary)
                     Toggle("Faster disk writes", isOn: $fastFlush)
                     Toggle("Quicker wake from idle", isOn: $wfiSpin)
                     Toggle("Superblocks (experimental)", isOn: $superblocks)

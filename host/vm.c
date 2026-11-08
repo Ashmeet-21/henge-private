@@ -286,6 +286,7 @@ static void *kicker_thread(void *unused) {
     if (kick_all) {
         for (;;) {
             usleep((useconds_t)poll_us);
+            if (__atomic_load_n(&hv_held, __ATOMIC_RELAXED)) continue; /* held: nobody to kick */
             hv_machine_kick_all(&m);
         }
     }
@@ -294,6 +295,13 @@ static void *kicker_thread(void *unused) {
     const uint64_t us = tb.numer ? 1000ull * tb.denom / tb.numer : 24; /* host ticks per microsecond */
     uint64_t next_poll = mach_absolute_time() + (uint64_t)poll_us * us;
     for (;;) {
+        if (__atomic_load_n(&hv_held, __ATOMIC_RELAXED)) {
+            /* Held (the app is in the background): the CPUs sleep, and so does this, instead of kicking
+               each held CPU whose timer is due every 200 us. */
+            usleep(50000);
+            next_poll = mach_absolute_time();
+            continue;
+        }
         uint64_t now = mach_absolute_time(), wake = next_poll;
         if (now >= next_poll) {
             if (m.stats_interval) m.stats.kick_src[2]++;
@@ -399,7 +407,12 @@ void hv_vm_power_button(void) {
     hv_machine_wake(&m);
 }
 
+void hv_vm_hold(int on) {
+    hv_machine_hold(&m, on);
+}
+
 void hv_vm_stop(void) {
+    hv_machine_hold(&m, 0); /* held CPUs sleep on the hold, where no kick reaches them */
     for (int i = 0; i < ncpus; i++) cpus[i].halted = 3; /* the dispatchers stop at the next block */
     hv_machine_kick_all(&m);
     for (int i = 0; i < ncpus; i++) hv_cpu_wake(&cpus[i]);

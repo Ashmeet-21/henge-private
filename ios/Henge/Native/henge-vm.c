@@ -112,6 +112,7 @@ int henge_vm_state(void) { return state; }
 const char *henge_vm_exit_reason(void) { return hv_vm_reason_name(exit_reason); }
 void henge_vm_stop(void) { if (state == 1) hv_vm_stop(); }
 void henge_vm_power_button(void) { if (state == 1) hv_vm_power_button(); }
+void henge_vm_set_hold(int on) { if (state == 1 || !on) hv_vm_hold(on); }
 void henge_vm_set_duty(int percent) { __atomic_store_n(&hv_knob[HV_K_DUTY], percent >= 100 || percent <= 0 ? 0 : percent, __ATOMIC_RELAXED); }
 
 /* Testing (Autopilot.swift): a translation knob, as "knob NAME VALUE" in the Mac tool's input file. */

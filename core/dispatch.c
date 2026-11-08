@@ -81,6 +81,63 @@ static void duty_rest(HvCpu *cpu) {
     duty_since = mach_absolute_time();
 }
 
+/* Held (hv_machine_hold): every CPU parks at its next pass and sleeps on hold_cv until let go. */
+int hv_held;
+static pthread_mutex_t hold_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t hold_cv = PTHREAD_COND_INITIALIZER;
+static uint64_t hold_since; /* host time by which every CPU had parked; 0: not seen yet */
+
+static void hold_wait(HvCpu *cpu) {
+    park(cpu);
+    pthread_mutex_lock(&hold_mu);
+    while (hv_held) pthread_cond_wait(&hold_cv, &hold_mu);
+    pthread_mutex_unlock(&hold_mu);
+    unpark(cpu);
+    duty_since = 0; /* it rested */
+}
+
+/* For an app in the background: on, every CPU stops running guest code and sleeps, with no
+   wakeups at all, until off. The guest's clock stops too, from the moment no CPU runs guest code
+   until off (hv_time_held), so macOS sees no time pass, as when a Mac sleeps, and nothing in it
+   (watchdogs, timers) finds minutes gone. If a CPU does not park within half a second its time
+   is not stopped, as before, though the CPUs are still held once they park. */
+void hv_machine_hold(HvMachine *m, int on) {
+    pthread_mutex_lock(&hold_mu);
+    if (on) {
+        if (hv_held) { pthread_mutex_unlock(&hold_mu); return; }
+        hold_since = 0;
+        __atomic_store_n(&hv_held, 1, __ATOMIC_SEQ_CST);
+        pthread_mutex_unlock(&hold_mu);
+        hv_machine_kick_all(m); /* out of chained code, to the check at the top of the run loop */
+        for (int tries = 0; tries < 2000; tries++) {
+            int busy = 0;
+            for (int i = 0; i < m->ncpus; i++)
+                if (m->cpus[i] && m->cpus[i]->pc_state && __atomic_load_n(&m->cpus[i]->pc_state->active, __ATOMIC_SEQ_CST)) busy = 1;
+            if (!busy) {
+                pthread_mutex_lock(&hold_mu);
+                if (hv_held) hold_since = mach_absolute_time();
+                pthread_mutex_unlock(&hold_mu);
+                fprintf(stderr, "hengevm: held: every CPU parked after %.1f ms\n", tries * 0.25);
+                return;
+            }
+            usleep(250);
+        }
+        fprintf(stderr, "hengevm: held, but a CPU did not park within 0.5 s: the guest's clock keeps running\n");
+        return;
+    }
+    if (hv_held) {
+        uint64_t now = mach_absolute_time();
+        if (hold_since && now > hold_since) {
+            __atomic_add_fetch(&hv_time_held, now - hold_since, __ATOMIC_SEQ_CST);
+            fprintf(stderr, "hengevm: let go after %.1f s held\n", (now - hold_since) / 24e6);
+        }
+        hold_since = 0;
+        __atomic_store_n(&hv_held, 0, __ATOMIC_SEQ_CST);
+        pthread_cond_broadcast(&hold_cv);
+    }
+    pthread_mutex_unlock(&hold_mu);
+}
+
 /* Parked: not running guest code, nor using its TLB, so other CPUs need not
    wait for it (TLBIs, a flush). It catches up with requests on the way back. */
 static void park(HvCpu *cpu) {
@@ -949,6 +1006,8 @@ static int run_loop(HvCpu *cpu, int one) {
     __atomic_store_n(&cpu->pc_state->thread_port, (unsigned int)pthread_mach_thread_np(pthread_self()), __ATOMIC_RELEASE);
     unpark(cpu);
     for (;;) {
+        /* First, before anything can run guest code or read its clock (hv_machine_hold). */
+        if (__builtin_expect(__atomic_load_n(&hv_held, __ATOMIC_ACQUIRE), 0)) hold_wait(cpu);
         if (__atomic_load_n(&m->flush_pending, __ATOMIC_SEQ_CST) || __atomic_load_n(&m->stw_active, __ATOMIC_SEQ_CST)) {
             stop_the_world(cpu);
             pending_chain = NULL;

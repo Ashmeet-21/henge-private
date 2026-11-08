@@ -7,6 +7,7 @@
 #include "memop.h"
 #include "mmu.h"
 #include "operands.h"
+#include "sysreg.h"
 
 /* A block has two parts. The hot part is the code that runs every time: the translated
    instructions. The cold part is what hardly ever does: exits not chained yet, memory slow
@@ -1380,8 +1381,8 @@ static int translate_msr_inline(Emit *e, uint32_t insn, uint64_t pc) {
 
 /* The guest's counter is the host's mach_absolute_time (CNTVOFF is 0): the
    counter register the commpage names plus the commpage's offset, read the way
-   libsystem does. EL0 reads check CNTKCTL_EL1's enables and trap through the
-   helper when they are off. */
+   libsystem does, less hv_time_held (the time the guest was held, sysreg.h). EL0
+   reads check CNTKCTL_EL1's enables and trap through the helper when they are off. */
 #define COMMPAGE_TIMEBASE_OFFSET 0xfffffc088ull
 #define COMMPAGE_TIMEBASE_TYPE   0xfffffc090ull
 static int translate_counter(Emit *e, uint32_t insn, uint64_t pc, int physical) {
@@ -1403,6 +1404,9 @@ static int translate_counter(Emit *e, uint32_t insn, uint64_t pc, int physical) 
     put_lit(e, 6, COMMPAGE_TIMEBASE_OFFSET);
     put(e, LDR_X(6, 6, 0));
     put(e, ADD_LSL(r, r, 6, 0));
+    put_lit(e, 6, (uint64_t)(uintptr_t)&hv_time_held);
+    put(e, LDR_X(6, 6, 0));
+    put(e, SUB_X(r, r, 6));
     if (r != rt) put(e, STR_X(r, 28, slot_of(rt)));
     if (el0) e->ool[slow].join = e->n;
     return 1;

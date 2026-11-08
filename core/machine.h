@@ -337,6 +337,10 @@ void hv_big_unlock(HvMachine *m);
 void hv_big_yield(HvMachine *m);
 /* Make every CPU leave its block at the next exit. */
 void hv_machine_kick_all(HvMachine *m);
+/* Holds every CPU (on) or lets them go (off), stopping the guest's clock meanwhile (core/dispatch.c).
+   On returns once they have parked, at most about half a second later. hv_held is nonzero while held. */
+void hv_machine_hold(HvMachine *m, int on);
+extern int hv_held;
 /* Wake one CPU out of WFI (and make it leave its block). */
 void hv_cpu_wake(HvCpu *cpu);
 /* Make it leave its block at the next checked exit, without waking it from WFI. */

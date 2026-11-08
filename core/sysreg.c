@@ -26,8 +26,12 @@
 #define CLIDR        0x0a200023ull         /* L1 split, L2 unified */
 #define CNTFRQ       24000000ull
 
+/* Host time the guest did not see: added up while it was held with every CPU parked
+   (hv_machine_hold), so its clock stops then, as a Mac's does asleep. */
+uint64_t hv_time_held;
+
 static uint64_t counter(void) {
-    return mach_absolute_time(); /* 24 MHz on Apple silicon */
+    return mach_absolute_time() - __atomic_load_n(&hv_time_held, __ATOMIC_RELAXED); /* 24 MHz on Apple silicon */
 }
 
 uint64_t hv_counter(void) {

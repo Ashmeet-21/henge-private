@@ -1866,8 +1866,10 @@ typedef struct {
     atomic_fetch_add(&inflight, 1);
     [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
         if (done.error) {
-            self->failed++;
-            fprintf(stderr, "hengevm: pvg-metal: command buffer: %s\n", done.error.localizedDescription.UTF8String);
+            /* The first ones, then every 1000th: in the background iOS refuses every command buffer. */
+            uint64_t nfailed = ++self->failed;
+            if (nfailed <= 20 || nfailed % 1000 == 0)
+                fprintf(stderr, "hengevm: pvg-metal: command buffer (%llu failed so far): %s\n", (unsigned long long)nfailed, done.error.localizedDescription.UTF8String);
         }
         if (complete) hv_pvg_lite_complete(l, ch, stamp);
         atomic_fetch_sub(&self->inflight, 1);

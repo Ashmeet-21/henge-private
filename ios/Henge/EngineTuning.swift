@@ -31,7 +31,10 @@ enum ThermalGovernor {
 
     static func apply() {
         let state = ProcessInfo.processInfo.thermalState
-        percent = enabled ? limit(for: state) : 100
+        var allowed = enabled ? limit(for: state) : 100
+        // Running in the background (BackgroundKeeper's Keep running): a quarter at most, whatever the heat.
+        if BackgroundKeeper.inBackground && BackgroundKeeper.keepsRunning { allowed = min(allowed, BackgroundKeeper.runningPercent) }
+        percent = allowed
         henge_vm_set_duty(Int32(percent))
         HengeLog.log("thermal", "\(name(state)): each CPU may run \(percent)% of the time")
     }

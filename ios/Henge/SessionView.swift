@@ -161,12 +161,14 @@ struct SessionView: View {
         }
         .onChange(of: scenePhase) { phase in
             guard phase != .active else {
+                BackgroundKeeper.becameActive()
                 display.refresh()
                 return
             }
             nativeTouch.stop()
             HardwareKeys.releaseAll()
             HardwareMouse.shared.releaseButtons()
+            BackgroundKeeper.leaving(toBackground: phase == .background) // the Mac lives on, paused or slowed
         }
         .onChange(of: showDetails) { showing in
             if showing { HardwareKeys.releaseAll(); StickyKeys.shared.releaseAll() }
@@ -180,6 +182,7 @@ struct SessionView: View {
         }
         .onDisappear {
             nativeTouch.stop()
+            BackgroundKeeper.sessionEnded()
             UIApplication.shared.isIdleTimerDisabled = false
             zoomFollowing?.cancel()
             StickyKeys.shared.releaseAll()
