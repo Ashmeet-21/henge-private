@@ -741,6 +741,23 @@ static const char lighter_script[] =
     "sudo sh -c 'mdutil -a -i off >/dev/null 2>&1 && echo \"  Spotlight indexing: off\"; softwareupdate --schedule off >/dev/null 2>&1; tmutil disable >/dev/null 2>&1; echo \"  Automatic update checks and Time Machine: off\"'\n"
     "echo 'Done. Log out and back in (or restart) for every change to apply.'\n";
 
+/* What "curl -s http://10.0.2.4/.henge/clean | sh" runs in macOS: frees space that macOS holds on to, which
+   the disk image then hands back to the iPhone (virtio-blk discard): app caches, the Spotlight index, local
+   Time Machine snapshots (they keep deleted files' blocks), downloaded updates. Safe to run again any time. */
+static const char clean_script[] =
+    "#!/bin/sh\n"
+    "# Henge: free space in macOS. Henge hands what macOS frees back to the iPhone.\n"
+    "echo 'Freeing space on this Mac for Henge...'\n"
+    "used() { df -k /System/Volumes/Data 2>/dev/null | awk 'NR==2 {print $3}'; }\n"
+    "before=$(used)\n"
+    "[ -n \"$HOME\" ] && [ -d \"$HOME/Library/Caches\" ] && rm -rf \"$HOME/Library/Caches/\"* 2>/dev/null\n"
+    "echo '  Your app caches: emptied (apps rebuild what they need)'\n"
+    "echo 'Now the parts that need your Mac password (it is not shown as you type):'\n"
+    "sudo sh -c 'mdutil -a -i off >/dev/null 2>&1; mdutil -a -E >/dev/null 2>&1; echo \"  Spotlight index: off and erased\"; tmutil thinlocalsnapshots / 999999999999 4 >/dev/null 2>&1; echo \"  Local Time Machine snapshots: removed\"; rm -rf /Library/Updates/* 2>/dev/null; echo \"  Downloaded updates: removed\"'\n"
+    "after=$(used)\n"
+    "if [ -n \"$before\" ] && [ -n \"$after\" ]; then echo \"Done: about $(( (before - after) / 1024 )) MB freed in macOS.\"; else echo 'Done.'; fi\n"
+    "echo 'The iPhone gets the space back as macOS trims it, at once or by the next restart.'\n";
+
 /* Puts back what lighter_script changed. */
 static const char lighter_undo_script[] =
     "#!/bin/sh\n"
@@ -766,6 +783,10 @@ static int serve_henge(Conn *c, Request *r) {
     if (!strcmp(what, "lighter") && !strcmp(r->method, "GET")) {
         if (body_discard(c, r) != 0) return -1;
         return respond(c, r, 200, "OK", "Content-Type: text/plain\r\n", lighter_script, sizeof lighter_script - 1);
+    }
+    if (!strcmp(what, "clean") && !strcmp(r->method, "GET")) {
+        if (body_discard(c, r) != 0) return -1;
+        return respond(c, r, 200, "OK", "Content-Type: text/plain\r\n", clean_script, sizeof clean_script - 1);
     }
     if (!strcmp(what, "lighter-undo") && !strcmp(r->method, "GET")) {
         if (body_discard(c, r) != 0) return -1;

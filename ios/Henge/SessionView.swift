@@ -547,6 +547,17 @@ struct SessionView: View {
                     Text("Once for each Mac, for smoother use on a phone: open Terminal on the Mac, tap this, then press Return and type the Mac's password when asked. It turns off Spotlight indexing, reopening windows and apps at login, update checks and Time Machine, and most animations (Genie becomes Scale). So that a tap opens fewer apps by accident, the Dock hides until the pointer reaches the bottom, screen corners do nothing, and a click on the wallpaper no longer moves the windows away. It types \(Sharing.lighterCommand); to undo, run the same with lighter-undo.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
+                Section("Free Up Space") {
+                    Button("Type the Clean-Up Command") {
+                        showDetails = false
+                        Task {
+                            try? await Task.sleep(nanoseconds: 600_000_000)
+                            await Sharing.typeCleanCommand()
+                        }
+                    }
+                    Text("Any time the Mac takes too much of this \(Device.name)'s storage: open Terminal on the Mac, tap this, then press Return and type the Mac's password when asked. It empties your apps' caches, erases the Spotlight index, removes local Time Machine snapshots (they keep deleted files) and downloaded updates. The space macOS frees comes back to the \(Device.name). It types \(Sharing.cleanCommand).")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
                 Section("Log") {
                     VStack(alignment: .leading, spacing: 1) {
                         ForEach(Array(log.suffix(30).enumerated()), id: \.offset) { _, line in

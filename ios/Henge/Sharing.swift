@@ -11,6 +11,8 @@ enum Sharing {
     static let setUpCommand = "curl -s http://10.0.2.4/.henge/install | sh"
     /// Fewer animations and less background work in macOS (host/share.c lighter_script). Asks for the Mac password once.
     static let lighterCommand = "curl -s http://10.0.2.4/.henge/lighter | sh"
+    /// Frees space macOS holds on to (host/share.c clean_script); Henge hands it back to the iPhone.
+    static let cleanCommand = "curl -s http://10.0.2.4/.henge/clean | sh"
 
     /// Before a Mac starts.
     static func prepare() {
@@ -61,5 +63,9 @@ enum Sharing {
 
     static func typeLighterCommand() async {
         await Keys.typeSlowly(lighterCommand)
+    }
+
+    static func typeCleanCommand() async {
+        await Keys.typeSlowly(cleanCommand)
     }
 }
