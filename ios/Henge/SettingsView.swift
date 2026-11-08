@@ -91,10 +91,12 @@ struct SettingsView: View {
                             .pickerStyle(.menu)
                             Toggle("Swap buttons", isOn: $swapButtons)
                         }
-                        Text("Henge is able to emulate a Magic Trackpad, allowing you to perform native macOS gestures using your device's touchscreen.")
-                            .font(.footnote).foregroundStyle(.secondary)
-                        Text(inputDescription)
-                            .font(.footnote).foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Henge is able to emulate a Magic Trackpad, allowing you to perform native macOS gestures using your device's touchscreen.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                            Text(inputDescription)
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
                     }
                     .listRowBackground(Desk.card)
                 }
