@@ -102,6 +102,8 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     BOOL host_valid, guest_stale;
     /* What this one is made from, kept for as long as it lives. */
     HvObject *parent;
+    /* A multi-plane surface's key in the replay's planar table, while it counts as one of its users. */
+    NSString *planar_key;
 }
 @end
 
@@ -129,6 +131,7 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
        under its own mapping id, and what one draws (macOS 27's WebKit draws pages into b3a8 tiles in its GPU
        process) has to be what another reads (WindowServer). */
     NSMutableDictionary<NSString *, id> *planar;
+    NSMutableDictionary<NSString *, NSNumber *> *planar_uses; /* mappings using each: the entry goes with the last one */
     NSMutableSet<NSString *> *complaints;
     uint64_t execs, draws, failed, heap_bytes, synced, remaps;
     /* Work the GPU has not finished. Stamps are given back in the order they came: the
@@ -877,13 +880,17 @@ static void sync_iosurface(HvObject *s) {
                 surface->iosurface = (IOSurfaceRef)CFRetain((__bridge CFTypeRef)shared);
                 surface->content_hash = guest_hash(surface);
                 note_plane_hashes(surface);
+                surface->planar_key = pk;
+                planar_uses[pk] = @(planar_uses[pk].unsignedIntValue + 1);
                 static int told;
                 if (told++ < 8) fprintf(stderr, "hengevm: pvg-metal: surface %llu shares the host surface of the same guest memory (%s)\n", h.mapping, pk.UTF8String);
             } else {
                 surface->iosurface = made;
                 if (made) {
-                    if (planar.count >= 512) [planar removeAllObjects]; /* old ones only lose their sharing */
+                    if (planar.count >= 512) [planar removeAllObjects], [planar_uses removeAllObjects]; /* old ones only lose their sharing */
                     planar[pk] = (__bridge id)made;
+                    planar_uses[pk] = @1;
+                    surface->planar_key = pk;
                 }
                 if (!surface->iosurface) {
                     NSMutableString *m = [NSMutableString stringWithFormat:@"surface %llu: no IOSurface for its planes (alloc %llu):", h.mapping, alloc];
@@ -2424,6 +2431,7 @@ HvPvgMetal *hv_pvg_metal_create(HvPvgLite *lite) {
         r->mapped_textures = [NSMutableDictionary new];
         r->surfaces = [NSMutableDictionary new];
         r->planar = [NSMutableDictionary new];
+        r->planar_uses = [NSMutableDictionary new];
         r->complaints = [NSMutableSet new];
         r->shot = getenv("HV_PVG_SHOT");
         cp_start(r);
@@ -2534,6 +2542,21 @@ void hv_pvg_metal_cursor_moved(HvPvgMetal *m) {
 void hv_pvg_metal_unmap(HvPvgMetal *m, uint32_t mapping) {
     HvReplay *r = (__bridge HvReplay *)m;
     dispatch_async(r->worker, ^{
+        /* The last mapping of a shared multi-plane surface takes its table entry along: the entry holds the host
+           IOSurface (4K video frames are 27-65 MB of Henge's own memory), and the guest reuses its memory for others. */
+        HvObject *s = r->surfaces[@(mapping)];
+        NSString *pk = s ? s->planar_key : nil;
+        if (pk) {
+            s->planar_key = nil;
+            if ((__bridge IOSurfaceRef)r->planar[pk] == s->iosurface) { /* still this one's entry (the table may have been emptied since) */
+                unsigned uses = r->planar_uses[pk].unsignedIntValue;
+                if (uses > 1) r->planar_uses[pk] = @(uses - 1);
+                else {
+                    [r->planar removeObjectForKey:pk];
+                    [r->planar_uses removeObjectForKey:pk];
+                }
+            }
+        }
         [r->surfaces removeObjectForKey:@(mapping)];
         [r->mapped_textures removeObjectForKey:@(mapping)];
     });
