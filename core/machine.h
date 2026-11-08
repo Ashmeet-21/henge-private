@@ -97,6 +97,7 @@ typedef struct HvStats {
     uint64_t fill_kind[4];    /* ijc fills into an empty slot, over another live salt, over the same salt, over a dead salt */
     uint64_t flush_why[8];
     uint64_t flush_after_switch[4];
+    uint64_t flush_checked, flush_check_entries, flush_check_bad, flush_check_af; /* HV_SWITCH_FLUSH=2: flushes checked, entries walked, out of date (the flush was done), only the access flag */
     uint64_t flush_skipped;   /* TLBI all here right after a process switch, left out (HV_SWITCH_FLUSH=1) */ /* TLBI all here, by time since this CPU's last TTBR0 change: <2 us, <20 us, <200 us, later */
     struct { uint64_t pc, n; } flush_pc[8]; /* where TLBI all here comes from (first 8 PCs seen) */    /* whole-TLB flushes: TLBI all (local), TLBI all (shared), SCTLR, TTBR1, TCR, MAIR, range of everything, requests overflowed */
     uint64_t reset_why[8];    /* cache drops: full flush, TLBI by ASID, TLBI user VA, TLBI kernel VA, code change, user VA in every ASID (whole user half), keyed filter full, big user range */

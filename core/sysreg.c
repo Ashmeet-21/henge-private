@@ -390,7 +390,11 @@ void hv_tlbi_apply(HvCpu *cpu, uint32_t op1, uint32_t crn, uint32_t crm, uint32_
            local TLBI VMALLE1, to drop the old region's global entries. Here every process's user entries are put
            aside under its own TTBR0 and its cached branch targets under its own ASID, so nothing of the old one
            can be seen; such a flush, within 20 us of a TTBR0 change, is left out. */
-        if (crm == 7 && hv_knob[HV_K_SWITCHFLUSH] && since_switch < 480) {
+        /* HV_SWITCH_FLUSH=2: one in 32 is checked first (hv_tlb_check_all, too slow for all of macOS 27's ~800/s) and done
+           if any entry kept no longer matches the page tables. */
+        static _Thread_local uint32_t nth;
+        if (crm == 7 && hv_knob[HV_K_SWITCHFLUSH] && since_switch < 480 &&
+            (hv_knob[HV_K_SWITCHFLUSH] < 2 || (nth++ & 31) || !hv_tlb_check_all(cpu))) {
             if (cpu->m->stats_interval) cpu->m->stats.flush_skipped++;
             return;
         }

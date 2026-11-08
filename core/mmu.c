@@ -257,8 +257,10 @@ void hv_ijc_switch(HvCpu *cpu) {
         cpu->ijc_salt[0] = (uint64_t)fresh_cid(cpu) << 48;
         return;
     }
-    if (!cpu->asid_cid[asid]) {
+    uint64_t base = cpu->ttbr0_el1 & OA_MASK & ~1ull;
+    if (!cpu->asid_cid[asid] || cpu->asid_base[asid] != base) {
         cpu->asid_cid[asid] = fresh_cid(cpu);
+        cpu->asid_base[asid] = base;
         cpu->cid_asid[cpu->asid_cid[asid]] = (uint16_t)asid;
         if (cpu->nasid_log < HV_ASID_LOG) cpu->asid_log[cpu->nasid_log] = (uint16_t)asid;
         if (cpu->nasid_log <= HV_ASID_LOG) cpu->nasid_log++;
@@ -975,6 +977,68 @@ static HvRam *ram_of_host(HvMachine *m, const uint8_t *host) {
     for (int i = 0; i < m->nram; i++)
         if ((uint64_t)(host - m->ram[i].host) < m->ram[i].size) return &m->ram[i];
     return NULL;
+}
+
+/* HV_SWITCH_FLUSH=2 (checking): every entry this CPU holds, in its TLB and in the stashes it would bring back, walked again
+   in its own address space. Returns how many no longer match the page tables (a walk fault, or another page), so that
+   a whole-TLB flush that is left out would have dropped something the guest expects gone. A cleared access flag alone
+   is counted apart (stats) and not as out of date: xnu ages pages with its own TLBIs. */
+int hv_tlb_check_all(HvCpu *cpu) {
+    HvMachine *m = cpu->m;
+    HvPerCpu *p = cpu->pc_state;
+    uint64_t ttbr0 = cpu->ttbr0_el1;
+    int bad = 0;
+    static int told;
+    for (int pass = -1; pass < (p ? HV_STASHES : 0); pass++) {
+        uint32_t n = 3 * HV_TLB_SIZE;
+        const HvTlbStash *s = NULL;
+        if (pass >= 0) {
+            s = &p->stash[pass];
+            uint64_t t = __atomic_load_n(&s->ttbr0, __ATOMIC_ACQUIRE);
+            if (!t || __atomic_load_n(&s->gen, __ATOMIC_ACQUIRE) != s->saved_gen) continue; /* would not be brought back */
+            n = s->n > HV_STASH_CAP ? HV_STASH_CAP : s->n;
+            cpu->ttbr0_el1 = t;
+        }
+        for (uint32_t k = 0; k < n; k++) {
+            const HvTlbEntry *e;
+            int table;
+            if (!s) table = (int)(k / HV_TLB_SIZE), e = hv_tlb_ent(cpu, k % HV_TLB_SIZE, table);
+            else table = hv_tlb_tmajor ? s->slot[k] >> HV_TLB_BITS : s->slot[k] & 3, e = &s->ent[k];
+            uint64_t rt = e->read_tag, wt = e->write_tag, xt = e->exec_tag;
+            if (rt == HV_TLB_INVALID && wt == HV_TLB_INVALID && xt == HV_TLB_INVALID) continue;
+            uint64_t va = rt != HV_TLB_INVALID ? rt + HV_TLB_ADJ : wt != HV_TLB_INVALID ? wt + HV_TLB_ADJ : hv_exec_key(xt, e->addend);
+            if (s && (va >> 55) & 1) continue; /* stashes hold the user half only */
+            HvWalk w;
+            hv_mmu_walk(cpu, va, rt != HV_TLB_INVALID || wt != HV_TLB_INVALID ? HV_ACC_READ : HV_ACC_EXEC, table ? 1 : 0, &w);
+            if (m->stats_interval) m->stats.flush_check_entries++;
+            const char *why = NULL;
+            if (w.fsc >= HV_FSC_ACCESS(0) && w.fsc <= HV_FSC_ACCESS(3)) {
+                if (m->stats_interval) m->stats.flush_check_af++;
+                continue;
+            }
+            if (w.fsc >= HV_FSC_PERMISSION(0) && w.fsc <= HV_FSC_PERMISSION(3)) continue; /* PAN or EL: not about where the page is */
+            if (w.fsc) why = "no mapping";
+            else {
+                uint64_t page_pa = w.pa & ~(uint64_t)PAGE_MASK;
+                const uint8_t *host = (const uint8_t *)(uintptr_t)(va + (uint64_t)e->addend);
+                HvRam *ram = ram_of_host(m, host);
+                if (!ram || ram->pa + (uint64_t)(host - ram->host) != page_pa) why = "another page";
+            }
+            if (why) {
+                bad++;
+                if (told++ < 16)
+                    fprintf(stderr, "hengevm: switch-flush check: %s entry (table %d, va %llx, ttbr0 %llx) is out of date: %s (fsc %x)\n",
+                            s ? "stashed" : "live", table, (unsigned long long)va, (unsigned long long)cpu->ttbr0_el1, why, w.fsc);
+            }
+        }
+        cpu->ttbr0_el1 = ttbr0;
+    }
+    cpu->ttbr0_el1 = ttbr0;
+    if (m->stats_interval) {
+        m->stats.flush_checked++;
+        if (bad) m->stats.flush_check_bad++;
+    }
+    return bad;
 }
 
 /* TTBR0 went from old to now (a process switch): keep old's user entries
