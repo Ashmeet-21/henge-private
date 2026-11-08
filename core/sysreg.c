@@ -375,7 +375,7 @@ void hv_tlbi_apply(HvCpu *cpu, uint32_t op1, uint32_t crn, uint32_t crm, uint32_
     if (by_va) {
         uint64_t va = (uint64_t)((int64_t)((xt & 0xfffffffffffull) << 20) >> 8);
         int all_asids = op2 == 3 || op2 == 7; /* VAAE1, VAALE1 */
-        hv_tlb_flush_va_asid(cpu, va, all_asids ? -1 : (int)(xt >> 48));
+        hv_tlb_flush_va_page(cpu, va, all_asids ? -1 : (int)(xt >> 48));
     } else if (by_asid) {
         hv_tlb_flush_user(cpu);
         hv_tlb_stash_drop(cpu, (int)(xt >> 48));

@@ -9,7 +9,7 @@ import Foundation
 /// picking up lines added later while it runs:
 ///   mac [NAME]         start that Mac (the one used last without a name) once JIT is on
 ///   wait SECONDS
-///   type TEXT          typed into the Mac
+///   type TEXT          typed into the Mac (the log shows only how long it is)
 ///   key CODE           a Linux key code (28 is Return)
 ///   knob NAME VALUE    a translation knob (core/machine.h)
 ///   log TEXT           a marker in henge.log
@@ -42,7 +42,8 @@ enum Autopilot {
                 let line = lines[done].trimmingCharacters(in: .whitespaces)
                 done += 1
                 if line.isEmpty || line.hasPrefix("#") { continue }
-                HengeLog.log("autopilot", line)
+                /* What is typed may be a password: the log gets its length only. */
+                HengeLog.log("autopilot", line.hasPrefix("type ") ? "type (\(line.count - 5) characters)" : line)
                 await perform(line, start: start)
             }
             try? await Task.sleep(nanoseconds: 500_000_000)
