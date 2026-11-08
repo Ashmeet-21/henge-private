@@ -48,6 +48,9 @@ final class Installer: NSObject, ObservableObject {
     @Published private(set) var machineName = ""
 
     private var session: URLSession?
+    /* Background time, so a moment out of the foreground (a notification, iPhone Mirroring reconnecting)
+       does not suspend the restore at once; iOS gives about 30 s. */
+    private var grace = UIBackgroundTaskIdentifier.invalid
     private var downloadContinuation: CheckedContinuation<URL, Error>?
     nonisolated(unsafe) private var downloadTarget: URL? // set before the task starts, read by the delegate
     private var lastResumeData: Data?
@@ -79,12 +82,21 @@ final class Installer: NSObject, ObservableObject {
 
     func reset() { if !busy { phase = .idle } }
 
+    private func endGrace() {
+        guard grace != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(grace)
+        grace = .invalid
+    }
+
     func start(_ release: MacOSRelease, name: String, ramMB: Int, cpus: Int, keepImage: Bool) {
         guard !busy else { return }
         machineName = name
         UIApplication.shared.isIdleTimerDisabled = true // the screen locking would suspend the download and the restore
+        grace = UIApplication.shared.beginBackgroundTask(withName: "Henge install") {
+            MainActor.assumeIsolated { Installer.shared.endGrace() }
+        }
         Task {
-            defer { UIApplication.shared.isIdleTimerDisabled = false }
+            defer { UIApplication.shared.isIdleTimerDisabled = false; endGrace() }
             var made: VirtualMac?
             do {
                 try checkSpace(release)
