@@ -109,7 +109,6 @@ final class Installer: NSObject, ObservableObject {
                 made = mac
                 phase = .installing
                 try await install(mac, ipsw: ipsw, cpus: cpus)
-                Machines.shared.add(mac)
                 if !keepImage { try? FileManager.default.removeItem(at: ipsw) }
                 HengeLog.log("install", "\(name): installed \(release.name)")
                 phase = .done("\(release.name) is installed on \(name). Quit Henge (swipe it away) and open it again, then tap Start.")
@@ -228,6 +227,10 @@ final class Installer: NSObject, ObservableObject {
                 throw message("The machine stopped during the restore (\(String(cString: henge_vm_exit_reason()))).")
             }
         }
+        // In the list before anything else: stopping the restore system can take a while, and if Henge is
+        // stopped meanwhile (the phone locked) a finished Mac must not be left on the disk unlisted.
+        Machines.shared.add(mac)
+        HengeLog.log("install", "\(mac.name): restore finished, added to the Macs")
         if henge_vm_state() == 1 { henge_vm_stop() }
         try? FileManager.default.removeItem(at: work)
     }
