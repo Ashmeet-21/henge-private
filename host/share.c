@@ -711,7 +711,8 @@ static int clipboard_put(Conn *c, Request *r) {
 }
 
 /* What "curl -s http://10.0.2.4/.henge/lighter | sh" runs in macOS: fewer animations and less
-   background work (Spotlight indexing, update checks, Time Machine), for a phone's few fast cores. */
+   background work (Spotlight indexing, update checks, Time Machine), for a phone's few fast cores,
+   and fewer apps opened by a stray tap (Dock hidden, no screen corners, no reopening at login). */
 static const char lighter_script[] =
     "#!/bin/sh\n"
     "# Henge: make macOS lighter for a phone's few fast cores. Undo: curl -s http://10.0.2.4/.henge/lighter-undo | sh\n"
@@ -726,6 +727,15 @@ static const char lighter_script[] =
     "w com.apple.loginwindow TALLogoutSavesState -bool false\n"
     "w com.apple.universalaccess reduceTransparency -bool true\n"
     "w com.apple.universalaccess reduceMotion -bool true\n"
+    "# Fewer stray clicks from a touch trackpad, where a tap clicks whatever the pointer rests on: the Dock hides\n"
+    "# until the pointer reaches the bottom, no screen corner starts anything, a click on the wallpaper leaves the\n"
+    "# windows where they are, and apps open at logout are not opened again at login.\n"
+    "w com.apple.dock autohide -bool true\n"
+    "w com.apple.dock show-recents -bool false\n"
+    "for c in tl tr bl br; do w com.apple.dock wvous-$c-corner -int 1; w com.apple.dock wvous-$c-modifier -int 0; done\n"
+    "w com.apple.WindowManager EnableStandardClickToShowDesktop -bool false\n"
+    "w com.apple.loginwindow LoginwindowLaunchesRelaunchApps -bool false\n"
+    "echo '  The Dock hides until you reach it, screen corners do nothing, apps are not reopened at login'\n"
     "killall Dock 2>/dev/null\n"
     "echo 'Now the parts that need your Mac password (it is not shown as you type):'\n"
     "sudo sh -c 'mdutil -a -i off >/dev/null 2>&1 && echo \"  Spotlight indexing: off\"; softwareupdate --schedule off >/dev/null 2>&1; tmutil disable >/dev/null 2>&1; echo \"  Automatic update checks and Time Machine: off\"'\n"
@@ -740,6 +750,9 @@ static const char lighter_undo_script[] =
     "defaults delete com.apple.loginwindow TALLogoutSavesState 2>/dev/null\n"
     "defaults write com.apple.universalaccess reduceTransparency -bool false 2>/dev/null\n"
     "defaults write com.apple.universalaccess reduceMotion -bool false 2>/dev/null\n"
+    "for k in autohide show-recents wvous-tl-corner wvous-tr-corner wvous-bl-corner wvous-br-corner wvous-tl-modifier wvous-tr-modifier wvous-bl-modifier wvous-br-modifier; do defaults delete com.apple.dock $k 2>/dev/null; done\n"
+    "defaults delete com.apple.WindowManager EnableStandardClickToShowDesktop 2>/dev/null\n"
+    "defaults delete com.apple.loginwindow LoginwindowLaunchesRelaunchApps 2>/dev/null\n"
     "killall Dock 2>/dev/null\n"
     "sudo sh -c 'mdutil -a -i on >/dev/null 2>&1; softwareupdate --schedule on >/dev/null 2>&1; tmutil enable >/dev/null 2>&1'\n"
     "echo 'Put back. Log out and back in for every change to apply.'\n";
