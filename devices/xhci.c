@@ -262,6 +262,14 @@ static int control(HvXhci *x, int slot, const uint8_t setup[8], uint8_t *out, in
     uint8_t type = setup[0], req = setup[1];
     uint16_t value = (uint16_t)(setup[2] | setup[3] << 8);
     if (xlog()) fprintf(stderr, "xhci: request %02x %02x value %04x len %u\n", type, req, value, setup[6] | setup[7] << 8);
+    /* Every request the trackpad gets goes to the log, unconditionally: the guest's
+       driver handshake is exactly what we are trying to watch. Capped so a polling
+       driver cannot flood it. */
+    if (x->slots[slot].dev == 1 && x->tp_reqs < 80) {
+        x->tp_reqs++;
+        fprintf(stderr, "hengevm: xhci: tp request %02x %02x value %04x index %04x len %u\n",
+                type, req, value, setup[4] | setup[5] << 8, setup[6] | setup[7] << 8);
+    }
     const uint8_t *src = NULL;
     int len = 0;
     uint8_t tmp[HV_TP_REPORT_LEN + 8];
@@ -314,17 +322,25 @@ static int control(HvXhci *x, int slot, const uint8_t setup[8], uint8_t *out, in
             } else if (rid == 0x3f) { /* the vendor data channel: nothing on it */
                 memset(tmp, 0, 16);
                 len = 16;
-            } else
-                return -1; /* 0x44 is a constant report: nothing to hand over */
+            } else { /* 0x44 is a constant report: all zeros, as far as we are concerned */
+                memset(tmp, 0, sizeof tmp);
+                len = max < (int)sizeof tmp ? max : (int)sizeof tmp;
+                src = tmp;
+            }
         }
     } else if (type == 0xa1 && (req == 2 || req == 3)) { /* GET_IDLE, GET_PROTOCOL */
         tmp[0] = req == 3 ? 1 : 0;
         src = tmp, len = 1;
     } else if ((type & 0x60) == 0x20 || (type == 0x00 && (req == 1 || req == 3)) || (type == 0x01 && req == 11) ||
-               (type == 0x02 && (req == 1 || req == 3))) {
-        return 0; /* SET_IDLE, SET_PROTOCOL, SET_REPORT (the trackpad's multitouch switch and friends): accepted */
+               (type == 0x02 && (req == 1 || req == 3)) ||
+               ((type & 0x60) == 0x40 && x->slots[slot].dev == 1)) {
+        /* SET_IDLE, SET_PROTOCOL, SET_REPORT (the trackpad's multitouch switch and friends): accepted.
+           Vendor requests to the trackpad too: stalling one may be what stops the guest's
+           driver handshake cold, and we cannot tell what it wants yet. */
+        return 0;
     } else {
-        if (x->m->log) fprintf(stderr, "hengevm: xhci: unhandled request %02x %02x value %04x\n", type, req, value);
+        if (x->m->log) fprintf(stderr, "hengevm: xhci: unhandled request %02x %02x value %04x (slot %d, device %d)\n",
+                               type, req, value, slot, x->slots[slot].dev);
         return -1;
     }
     if (len > max) len = max;
@@ -370,7 +386,9 @@ static void run_ep0(HvXhci *x, int slot) {
                     rd(x, buf, data, 2); /* the data lives in guest memory, at the TRB's pointer */
                     if (data[0] == 0x02 && (data[1] & 1)) {
                         x->tp_mt = 1; /* the guest switched the pad to multitouch */
-                        if (xlog()) fprintf(stderr, "xhci: trackpad: multitouch on\n");
+                        fprintf(stderr, "hengevm: xhci: trackpad: multitouch on\n");
+                    } else {
+                        fprintf(stderr, "hengevm: xhci: trackpad: set report %02x %02x (not the multitouch switch)\n", data[0], data[1]);
                     }
                 }
             }
@@ -422,7 +440,7 @@ static void run_ep_in(HvXhci *x, int slot) {
             wr(x, buf, x->tp_reports[x->tp_rhead % HV_TP_REPORTS], n);
             x->tp_rhead++;
             x->tp_delivered++;
-            if (xlog() && x->tp_delivered <= 16) fprintf(stderr, "xhci: trackpad: %u bytes to the guest (delivered %llu)\n", n, (unsigned long long)x->tp_delivered);
+            if (x->tp_delivered <= 16) fprintf(stderr, "hengevm: xhci: trackpad: %u bytes to the guest (delivered %llu)\n", n, (unsigned long long)x->tp_delivered);
             transfer_event(x, at, n < want ? CC_SHORT_PACKET : CC_SUCCESS, want - n, slot, dci);
         }
     }
@@ -641,6 +659,8 @@ static void reset(HvXhci *x) {
     x->tp_rhead = x->tp_rtail = 0;
     x->tp_mt = 0;
     x->tp_delivered = 0;
+    x->tp_reqs = 0;
+    x->tp_db = 0;
     for (int p = 0; p < HV_XHCI_PORTS; p++)
         x->portsc[p] = PORT_PP | PORT_CCS | PORT_CSC | (uint32_t)(p ? SPEED_HIGH : SPEED_FULL) << PORT_SPEED_SHIFT | 7u << PORT_PLS_SHIFT;
     update_irq(x);
@@ -797,6 +817,10 @@ static void bar_write(HvPciDev *d, int bar, uint64_t off, uint64_t v, unsigned s
         } else if (slot <= HV_XHCI_SLOTS && x->slots[slot].dev >= 0) {
             int dci = (int)(v & 0xff);
             if (dci < 1 || dci >= HV_XHCI_EPS) return;
+            if (x->slots[slot].dev == 1 && x->tp_db < 8) {
+                x->tp_db++;
+                fprintf(stderr, "hengevm: xhci: trackpad: doorbell dci %d\n", dci);
+            }
             /* A doorbell starts a stopped endpoint again (a halted one waits for Reset Endpoint). */
             uint32_t state = rd32(x, out_ctx(x, slot) + 32ull * dci) & 7;
             if (state == 2) return;
