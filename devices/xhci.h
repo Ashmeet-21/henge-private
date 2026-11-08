@@ -86,7 +86,7 @@ void hv_xhci_key(HvXhci *x, uint8_t usage, int down);
 void hv_xhci_key_linux(HvXhci *x, uint16_t code, int down);
 /* Any thread: a Magic Trackpad 2 touch. phase: 0 down, 1 move, 2 up. id: a
    stable 1..15 for this touch; x, y in sensor units (HV_TP_SENSOR_*). */
-void hv_xhci_touch(HvXhci *x, int id, int phase, int x, int y);
+void hv_xhci_touch(HvXhci *x, int id, int phase, int px, int py);
 /* Any thread: the pad's full press (a click), down or up. */
 void hv_xhci_touch_button(HvXhci *x, int down);
 /* CPU thread: hand waiting reports to the guest. */
