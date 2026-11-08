@@ -1,10 +1,12 @@
 import Foundation
 
-/// Testing a build on a phone nobody is holding. Only when Henge is launched with
-/// HENGE_AUTOPILOT set, as in
+/// Testing a build on a phone nobody is holding. Henge follows Documents/henge-autopilot.txt when it is
+/// launched with HENGE_AUTOPILOT set, as in
 ///   xcrun devicectl device process launch -e '{"HENGE_AUTOPILOT":"1"}' --device ID BUNDLE
-/// Henge then follows Documents/henge-autopilot.txt (put there with devicectl device copy to),
-/// one command per line, picking up lines added later while it runs:
+/// or, for a launch by hand (a locked phone driven through iPhone Mirroring), once: at launch
+/// Documents/henge-autopilot-once.txt is renamed to henge-autopilot.txt and followed, so the next
+/// launch runs nothing. Put the files there with devicectl device copy to. One command per line,
+/// picking up lines added later while it runs:
 ///   mac [NAME]         start that Mac (the one used last without a name) once JIT is on
 ///   wait SECONDS
 ///   type TEXT          typed into the Mac
@@ -15,12 +17,20 @@ import Foundation
 ///   exit               quit Henge
 /// Each command is written to henge.log as it runs, so the log has the timeline.
 enum Autopilot {
-    static var enabled: Bool { ProcessInfo.processInfo.environment["HENGE_AUTOPILOT"] != nil }
+    private static let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+
+    /// Launched for testing: by environment, or by a one-time file (used up here).
+    static let enabled: Bool = {
+        if ProcessInfo.processInfo.environment["HENGE_AUTOPILOT"] != nil { return true }
+        let once = docs.appendingPathComponent("henge-autopilot-once.txt"), plan = docs.appendingPathComponent("henge-autopilot.txt")
+        guard FileManager.default.fileExists(atPath: once.path) else { return false }
+        try? FileManager.default.removeItem(at: plan)
+        return (try? FileManager.default.moveItem(at: once, to: plan)) != nil
+    }()
 
     @MainActor static func run(start: @escaping (VirtualMac) -> Void) async {
         guard enabled else { return }
-        let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("henge-autopilot.txt")
+        let url = docs.appendingPathComponent("henge-autopilot.txt")
         HengeLog.log("autopilot", "following \(url.lastPathComponent)")
         var done = 0 // lines already run
         while !Task.isCancelled {
