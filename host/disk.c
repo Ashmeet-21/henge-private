@@ -19,12 +19,12 @@ int hv_disk_open(HvDisk *d, const char *path, uint64_t offset, int readonly) {
     d->offset = offset;
     d->size = (uint64_t)st.st_size - offset;
     d->readonly = readonly;
-    /* Writes skip the host's cache: the guest caches its own disk, and on a phone gigabytes of dirty
-       pages (a macOS install writes ~20 GB as fast as it can) starve iOS of memory until it stalls
-       for seconds and kills apps. Reads stay cached; the kernel keeps the two coherent.
-       HV_WRITE_CACHE=1: writes through the cache as before. */
+    /* HV_WRITE_CACHE=0: writes skip the host's cache (F_NOCACHE), so a long run of them cannot pile up
+       gigabytes of dirty pages; reads stay cached, and the kernel keeps the two coherent. Off by default:
+       on the Mac bench big writes took 2-3x as long that way (2 GB + sync 4-6 s -> 9-17 s) and everyday
+       work was no faster. The phone's installer turns it on for the restore, which writes ~15 GB at once. */
     const char *wc = getenv("HV_WRITE_CACHE");
-    if (!readonly && !(wc && atoi(wc))) {
+    if (!readonly && wc && !atoi(wc)) {
         d->wfd = open(path, O_RDWR);
         if (d->wfd >= 0 && fcntl(d->wfd, F_NOCACHE, 1) == -1) {
             close(d->wfd);

@@ -207,6 +207,7 @@ final class Installer: NSObject, ObservableObject {
         restoring.ramMB = min(max(mac.ramMB, 2048), 4096)
         let ram = GuestMemory.prepare(restoring)
         guard ram >= 2048 else { throw message("Installing needs a few more GB of free storage for the Mac's memory.") }
+        setenv("HV_WRITE_CACHE", "0", 1) // the ~15 GB the restore writes goes straight to storage (host/disk.c); this process runs no other Mac
         let work = mac.directory.appendingPathComponent("restore", isDirectory: true)
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
         var buffer = [CChar](repeating: 0, count: 256)
