@@ -10,7 +10,8 @@ import Foundation
 ///   mac [NAME]         start that Mac (the one used last without a name) once JIT is on
 ///   wait SECONDS
 ///   type TEXT          typed into the Mac (the log shows only how long it is)
-///   key CODE           a Linux key code (28 is Return)
+///   key CODE           a Linux key code (28 is Return, 1 is Escape)
+///   cmd KEY            KEY (a character, or space) with Command held
 ///   knob NAME VALUE    a translation knob (core/machine.h)
 ///   log TEXT           a marker in henge.log
 ///   stop               stop the Mac
@@ -75,6 +76,8 @@ enum Autopilot {
             await Keys.typeSlowly(arg)
         case "key":
             if let code = UInt16(arg) { Keys.press(code) }
+        case "cmd": // "cmd space", "cmd q": the key with Command held
+            if let c = arg == "space" ? " " : arg.first { Keys.chord(125, c) }
         case "knob":
             let kv = arg.split(separator: " ")
             if kv.count == 2, let value = Int32(kv[1]) {
