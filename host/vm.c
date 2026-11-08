@@ -374,6 +374,19 @@ void hv_vm_mouse_move(int dx, int dy) {
 void hv_vm_mouse_button(int button, int down) {
     static const uint16_t codes[3] = {HV_BTN_LEFT, HV_BTN_RIGHT, HV_BTN_MIDDLE};
     if (button < 0 || button > 2) return;
+    /* macOS's virtio mouse driver drops BTN_RIGHT, so the right button is a Control-click. It uses the
+       right Control, which leaves the user's own Control alone. The USB keyboard is read every 10 ms,
+       so Control goes down well before the click, or the click could get there first. */
+    if (button == 1) {
+        if (down) {
+            hv_xhci_key(board.usb, 0xe4, 1);
+            usleep(50000);
+        }
+        hv_virtio_input_send(board.mouse, HV_EV_KEY, HV_BTN_LEFT, down);
+        hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
+        if (!down) hv_xhci_key(board.usb, 0xe4, 0);
+        return;
+    }
     hv_virtio_input_send(board.mouse, HV_EV_KEY, codes[button], down);
     hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
 }
