@@ -122,6 +122,10 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     NSMutableDictionary<NSNumber *, NSMutableDictionary<NSNumber *, HvObject *> *> *tasks;
     NSMutableDictionary<NSNumber *, id<MTLTexture>> *mapped_textures;
     NSMutableDictionary<NSNumber *, HvObject *> *surfaces;
+    /* Multi-plane surfaces' host IOSurfaces by the guest memory they stand for: each process maps a surface
+       under its own mapping id, and what one draws (macOS 27's WebKit draws pages into b3a8 tiles in its GPU
+       process) has to be what another reads (WindowServer). */
+    NSMutableDictionary<NSString *, id> *planar;
     NSMutableSet<NSString *> *complaints;
     uint64_t execs, draws, failed, heap_bytes, synced, remaps;
     /* Work the GPU has not finished. Stamps are given back in the order they came: the
@@ -706,9 +710,8 @@ static IOSurfaceRef make_iosurface(HvObject *to, const uint8_t *desc, uint64_t a
     return made;
 }
 
-/* Guest pixels into its IOSurface, when they changed. A sample of every 64th byte says so cheaply. */
-static void sync_iosurface(HvObject *s) {
-    if (!s->iosurface) return;
+/* A sample of every 64th byte of the guest's pixels, to tell cheaply whether they changed. */
+static uint64_t guest_hash(HvObject *s) {
     const uint8_t *from = s->mapped + s->first;
     uint64_t hash = 0xcbf29ce484222325ull;
     for (uint64_t i = 0; i + 8 <= s->alloc; i += 64) {
@@ -716,6 +719,14 @@ static void sync_iosurface(HvObject *s) {
         memcpy(&v, from + i, 8);
         hash = (hash ^ v) * 0x100000001b3ull;
     }
+    return hash;
+}
+
+/* Guest pixels into its IOSurface, when they changed. */
+static void sync_iosurface(HvObject *s) {
+    if (!s->iosurface) return;
+    const uint8_t *from = s->mapped + s->first;
+    uint64_t hash = guest_hash(s);
     if (hash == s->content_hash) return;
     s->content_hash = hash;
     IOSurfaceLock(s->iosurface, 0, NULL);
@@ -824,13 +835,32 @@ static void sync_iosurface(HvObject *s) {
         surfaces[key] = surface;
         if (desc[0x3e] >= 2) {
             surface->alloc = alloc;
-            surface->iosurface = make_iosurface(surface, desc, alloc);
-            if (!surface->iosurface) {
-                NSMutableString *m = [NSMutableString stringWithFormat:@"surface %llu: no IOSurface for its planes (alloc %llu):", h.mapping, alloc];
-                for (int i = 0; i < 96; i++) [m appendFormat:@" %08x", ((const uint32_t *)desc)[i]];
-                [self complain:m];
+            IOSurfaceRef made = make_iosurface(surface, desc, alloc);
+            /* The same guest memory, format and size under another mapping id (another process): the same host
+               IOSurface, or what that process drew is not what this one sees. Its pixels are already there (or
+               drawn over since), so they are not copied again now. */
+            NSString *pk = [NSString stringWithFormat:@"%x/%08x/%llux%llu/%llu", pages[0] & ~1u, surface->fourcc,
+                            (unsigned long long)sw, (unsigned long long)sh, (unsigned long long)alloc];
+            id shared = planar[pk];
+            if (shared && made) {
+                CFRelease(made);
+                surface->iosurface = (IOSurfaceRef)CFRetain((__bridge CFTypeRef)shared);
+                surface->content_hash = guest_hash(surface);
+                static int told;
+                if (told++ < 8) fprintf(stderr, "hengevm: pvg-metal: surface %llu shares the host surface of the same guest memory (%s)\n", h.mapping, pk.UTF8String);
+            } else {
+                surface->iosurface = made;
+                if (made) {
+                    if (planar.count >= 512) [planar removeAllObjects]; /* old ones only lose their sharing */
+                    planar[pk] = (__bridge id)made;
+                }
+                if (!surface->iosurface) {
+                    NSMutableString *m = [NSMutableString stringWithFormat:@"surface %llu: no IOSurface for its planes (alloc %llu):", h.mapping, alloc];
+                    for (int i = 0; i < 96; i++) [m appendFormat:@" %08x", ((const uint32_t *)desc)[i]];
+                    [self complain:m];
+                }
+                sync_iosurface(surface);
             }
-            sync_iosurface(surface);
         }
         fprintf(stderr, "hengevm: pvg-metal: surface %llu: %lux%lu format %lu, row %llu, %llu KB, fourcc %c%c%c%c planes %u\n", h.mapping, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat, row, alloc >> 10, desc[7], desc[6], desc[5], desc[4], desc[0x3e]);
     }
@@ -2346,6 +2376,7 @@ HvPvgMetal *hv_pvg_metal_create(HvPvgLite *lite) {
         r->tasks = [NSMutableDictionary new];
         r->mapped_textures = [NSMutableDictionary new];
         r->surfaces = [NSMutableDictionary new];
+        r->planar = [NSMutableDictionary new];
         r->complaints = [NSMutableSet new];
         r->shot = getenv("HV_PVG_SHOT");
         cp_start(r);
