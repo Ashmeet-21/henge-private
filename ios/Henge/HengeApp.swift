@@ -73,6 +73,7 @@ struct RootView: View {
             jit.enableAtLaunchIfAsked()
         }
         .onChange(of: jit.attachGeneration) { _ in JITBootstrap.prewarm() } // the built-in helper attached
+        .task { await Autopilot.run { mac in running = mac } } // testing only: HENGE_AUTOPILOT
     }
 }
 

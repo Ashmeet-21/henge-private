@@ -111,6 +111,9 @@ int henge_vm_state(void) { return state; }
 const char *henge_vm_exit_reason(void) { return hv_vm_reason_name(exit_reason); }
 void henge_vm_stop(void) { if (state == 1) hv_vm_stop(); }
 
+/* Testing (Autopilot.swift): a translation knob, as "knob NAME VALUE" in the Mac tool's input file. */
+int henge_vm_knob(const char *name, int value) { return state == 1 ? hv_knob_set(hv_vm_machine(), name, value) : 0; }
+
 uint64_t henge_vm_blocks(void) { return state ? hv_vm_machine()->stats.blocks : 0; }
 uint64_t henge_vm_net_frames(int sent) { return sent ? hv_net_tx_frames : hv_net_rx_frames; }
 
