@@ -920,6 +920,9 @@ static void sync_iosurface(HvObject *s) {
        made over plane 0 left plane 1 empty, so chroma read back as zero (all green) and alpha as zero (blank pages). */
     uint16_t plane;
     memcpy(&plane, h.d + (h.tag == 0x39 ? 0x28 : 0x20), 2);
+    static int plane0 = -1; /* HV_PVG_PLANE0 (testing): every view on plane 0, as before this was read */
+    if (plane0 < 0) plane0 = getenv("HV_PVG_PLANE0") != NULL;
+    if (plane0) plane = 0;
     if (surface->iosurface && plane >= IOSurfaceGetPlaneCount(surface->iosurface)) {
         [self complain:[NSString stringWithFormat:@"surface %llu: texture on plane %u of %zu; using plane 0", h.mapping, plane,
                         IOSurfaceGetPlaneCount(surface->iosurface)]];
