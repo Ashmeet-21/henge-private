@@ -982,7 +982,7 @@ static int tp_build_report(HvXhci *x, uint8_t *out) {
         uint8_t off = f->state == 0 || f->state == 7; /* none and stop carry no touch data */
         uint8_t b[9];
         b[0] = (uint8_t)(X & 0xff);
-        b[1] = (uint8_t)(((X >> 8) & 0x7) | ((Y & 0x7) << 5));
+        b[1] = (uint8_t)(((X >> 8) & 0x1f) | ((Y & 0x7) << 5)); /* x's high five bits, then y's low three */
         b[2] = (uint8_t)((Y >> 3) & 0xff);
         b[3] = (uint8_t)(((Y >> 11) & 0x3) | (off ? 0 : (2u << 2)) | (f->state << 5));
         b[4] = off ? 0 : 20;   /* touch major */
