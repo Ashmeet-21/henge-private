@@ -4,6 +4,20 @@ This fork collects the fixes from the community forks of [Leviidev/Henge](https:
 into one build, with a few additions, aimed above all at iPad (tested hardware: iPad Pro M4).
 Every change keeps its original author in the git history.
 
+## Unreleased
+
+### The screen is a Magic Trackpad 2
+- The session's trackpad is no longer a relative mouse: the engine presents it to the Mac as
+  a Magic Trackpad 2 (Apple's vendor multitouch format) on the xHCI USB bus, so the guest's
+  own multitouch engine does the pointing and gestures: two-finger scroll, three-finger
+  swipes for Spaces, Mission Control and App Exposé, two-finger taps for right-click, and so
+  on. A tap is a quick press; hold to press, then drag to grab.
+- The session controls are now shown with a four-finger tap, leaving three fingers free for
+  the Mac's own gestures.
+- `devices/xhci.c` generalises the xHCI host to two USB devices (the keyboard and the
+  trackpad). The report format follows the Linux kernel's `hid-magicmouse` MT2 support and
+  VoodooInput's Magic Trackpad II emulation.
+
 ## 0.2.0 (100)
 
 Based on upstream `main` at b744a78.
@@ -51,7 +65,7 @@ Based on upstream `main` at b744a78.
   - *Superblocks (experimental)* (off): translated code runs on past conditional branches.
   - `Documents/henge-env.txt` still overrides everything.
 - **Hide the session controls**: a button left of Keyboard hides the bar over the Mac; a
-  three-finger tap brings it back (a hint says so the first three times). iPadOS's own
+  four-finger tap brings it back (a hint says so the first three times). iPadOS's own
   three-finger undo/copy/paste bar is turned off inside the session so it doesn't interfere.
 - Merges kept the Xcode 27 build: the built-in StikJIT helper and the Liquid Glass icon stay
   (the m4 fork's Xcode 16 changes, which remove them, are left out).

@@ -95,7 +95,7 @@ struct SessionView: View {
                         .allowsHitTesting(false)
                 }
                 if showRevealHint {
-                    Label("Tap with three fingers to show the controls", systemImage: "hand.tap")
+                    Label("Tap with four fingers to show the controls", systemImage: "hand.tap")
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 18).padding(.vertical, 12)
@@ -119,7 +119,7 @@ struct SessionView: View {
             .onReceive(NotificationCenter.default.publisher(for: .GCMouseDidConnect)) { _ in
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { pointerRefused = PointerLock.refused }
             }
-            .onReceive(NotificationCenter.default.publisher(for: Trackpad.threeFingerTap)) { _ in
+            .onReceive(NotificationCenter.default.publisher(for: Trackpad.revealTap)) { _ in
                 controlsHidden = false
                 showRevealHint = false
             }
@@ -316,7 +316,7 @@ struct SessionView: View {
         .tint(Desk.raised)
     }
 
-    /// Hides the session's controls; three fingers on the screen bring them back. The first few times say so.
+    /// Hides the session's controls; four fingers on the screen bring them back. The first few times say so.
     private func hideControls() {
         controlsHidden = true
         typing = false

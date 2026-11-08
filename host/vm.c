@@ -391,6 +391,16 @@ static void wheel(uint16_t axis, int amount) {
 void hv_vm_mouse_wheel(int dy) { wheel(HV_REL_WHEEL, dy); }
 void hv_vm_mouse_hwheel(int dx) { wheel(HV_REL_HWHEEL, dx); }
 
+void hv_vm_touch(int id, int phase, int x, int y) {
+    if (x < 0) x = 0;
+    if (x > HV_TP_SENSOR_X) x = HV_TP_SENSOR_X;
+    if (y < 0) y = 0;
+    if (y > HV_TP_SENSOR_Y) y = HV_TP_SENSOR_Y;
+    hv_xhci_touch(board.usb, id, phase, x, y);
+}
+
+void hv_vm_touch_button(int down) { hv_xhci_touch_button(board.usb, down); }
+
 int hv_vm_pointer(int *x, int *y) {
     HvPvgLite *pvg = atomic_load_explicit(&display_pvg, memory_order_acquire);
     const uint8_t *page = pvg ? hv_pvg_lite_display_page(pvg) : NULL;
