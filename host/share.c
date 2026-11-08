@@ -423,9 +423,11 @@ static int do_get(Conn *c, Request *r) {
     }
     long long from = 0, to = st.st_size - 1;
     int partial = 0;
-    if (r->range_from >= 0 || r->range_to >= 0) {
+    /* An empty file is sent whole whatever range is asked (a server may ignore Range): a 416 for it
+       could stop a WebDAV client opening an empty file, which the code before 101ab11 served. */
+    if ((r->range_from >= 0 || r->range_to >= 0) && st.st_size > 0) {
         if (r->range_from < 0) { /* the last N bytes */
-            if (r->range_to == 0 || st.st_size == 0) goto range_unsatisfiable;
+            if (r->range_to == 0) goto range_unsatisfiable;
             from = st.st_size > r->range_to ? st.st_size - r->range_to : 0;
         } else {
             from = r->range_from;

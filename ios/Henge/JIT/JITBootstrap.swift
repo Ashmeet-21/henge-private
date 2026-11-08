@@ -64,7 +64,8 @@ enum JITBootstrap {
     /// has room for it: about 6 GB on 12 GB iPhones). A bigger cache fills and empties less often (macOS 27 filled
     /// 1 GB about once a minute) and costs more memory (its blocks' records come to about 0.75 of its size). Fixed for
     /// the launch: the region is claimed once.
-    static let defaultCodeCacheMB: Int = Entitlements.memoryLimitAtLaunch >= 5_500 << 20 ? 1536 : 1024
+    /// Never 1.5 GB with about 6 GB of memory, whatever the limit says: there the region is real memory the phone lacks.
+    static let defaultCodeCacheMB: Int = !Device.hasLittleMemory && Entitlements.memoryLimitAtLaunch >= 5_500 << 20 ? 1536 : 1024
     /// Devices with little memory can ask for half (Device.smallCodeRegion): any size up to the block held in the app's image takes its hole.
     static let jitBytes: Int = Device.smallCodeRegion ? 512 << 20
         : ((UserDefaults.standard.object(forKey: codeCacheKey) as? Int) ?? defaultCodeCacheMB) == 1536 ? 1536 << 20 : 1024 << 20

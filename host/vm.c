@@ -499,8 +499,20 @@ static void wheel(uint16_t axis, int amount) {
     }
 }
 
-void hv_vm_mouse_wheel(int dy) { wheel(HV_REL_WHEEL, dy); }
-void hv_vm_mouse_hwheel(int dx) { wheel(HV_REL_HWHEEL, dx); }
+/* On the pointer queue too, so a scroll stays in order with the moves and clicks around it. */
+static void wheel_now(void *ctx) {
+    int64_t packed = (int64_t)(intptr_t)ctx;
+    wheel((uint16_t)(packed >> 32), (int32_t)packed);
+}
+
+static void wheel_later(uint16_t axis, int amount) {
+    if (!amount) return;
+    int64_t packed = (int64_t)((uint64_t)axis << 32 | (uint32_t)amount);
+    dispatch_async_f(pointer_queue(), (void *)(intptr_t)packed, wheel_now);
+}
+
+void hv_vm_mouse_wheel(int dy) { wheel_later(HV_REL_WHEEL, dy); }
+void hv_vm_mouse_hwheel(int dx) { wheel_later(HV_REL_HWHEEL, dx); }
 
 int hv_vm_pointer(int *x, int *y) {
     HvPvgLite *pvg = atomic_load_explicit(&display_pvg, memory_order_acquire);

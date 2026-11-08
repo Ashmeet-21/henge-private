@@ -4,7 +4,7 @@ name: Build IPA
 on:
   workflow_dispatch:
   push:
-    branches: [ipad-a16-lowmem]
+    branches: [ipad-a16-lowmem, a16-polish]
 
 jobs:
   ipa:
@@ -55,7 +55,7 @@ jobs:
         continue-on-error: true
         run: |
           set -o pipefail
-          for t in test_classify test_operands test_mmu test_code_links test_pvg_decode; do
+          for t in test_classify test_operands test_mmu test_code_links test_pvg_decode test_devices; do
             echo "::group::$t"
             make "build/$t" >/dev/null && "./build/$t" 2>&1 | tail -15 && echo "PASS $t" || echo "::error::FAIL $t"
             echo "::endgroup::"

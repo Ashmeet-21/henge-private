@@ -63,6 +63,7 @@ static int write_zeros(HvDisk *d, uint64_t at, uint64_t len) {
     while (len) {
         size_t n = len < sizeof zeros ? (size_t)len : sizeof zeros;
         ssize_t w = pwrite(d->fd, zeros, n, (off_t)at);
+        if (w < 0 && errno == EINTR) continue;
         if (w <= 0) return -1;
         at += (uint64_t)w, len -= (uint64_t)w;
     }

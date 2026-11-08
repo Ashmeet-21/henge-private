@@ -38,8 +38,10 @@ struct SettingsView: View {
                 Section("Performance") {
                     Toggle("Keep the \(Device.name) cool", isOn: $keepCool)
                     Picker("Mac refresh rate", selection: $refreshRate) {
-                        Text("60 Hz").tag(60)
                         Text("30 Hz (cooler)").tag(30)
+                        Text("60 Hz").tag(60)
+                        // 120 only where the screen shows it: elsewhere macOS would draw twice the frames for nothing.
+                        if UIScreen.main.maximumFramesPerSecond >= 120 || refreshRate == 120 { Text("120 Hz").tag(120) }
                     }
                     .pickerStyle(.segmented)
                     Toggle("Faster disk writes", isOn: $fastFlush)
@@ -53,9 +55,19 @@ struct SettingsView: View {
                     LabeledContent("Extra memory", value: Entitlements.increasedMemory ? "On" : "Off")
                     LabeledContent("Extended addressing", value: Entitlements.extendedAddressing ? "On" : "Off")
                     LabeledContent("This \(Device.name)'s memory", value: ByteText.string(ProcessInfo.processInfo.physicalMemory))
-                    Toggle("Smaller code region (512 MB)", isOn: $smallCodeRegion)
+                    // One choice for the code region: 512 MB is Device.smallCodeRegion, the others JITBootstrap.codeCacheKey.
+                    Picker("Code cache", selection: Binding(get: { smallCodeRegion ? 512 : codeCacheMB },
+                                                            set: { mb in
+                                                                smallCodeRegion = mb == 512
+                                                                if mb != 512 { codeCacheMB = mb }
+                                                            })) {
+                        Text("512 MB").tag(512)
+                        Text("1 GB").tag(1024)
+                        Text("1.5 GB").tag(1536)
+                    }
+                    .pickerStyle(.segmented)
                     Toggle("Keep the Mac's memory on storage while installing", isOn: $ramOnStorage)
-                    Text("The smaller code region holds 512 MB less: it is on by default with about 6 GB, where the full one runs the device out of memory. It changes the next time Henge opens. Memory on storage is on by default with about 6 GB, for installs only; a running Mac always keeps its memory in RAM.")
+                    Text("The code cache is claimed whole, as real memory, when JIT turns on. A bigger one empties less often. With about 6 GB, 512 MB is the default: 1 GB took Henge to 2.85 GB with a 3 GB Mac and iOS closed it. Applies the next time Henge opens; if JIT stops turning on, choose a smaller one. Memory on storage is on by default with about 6 GB, for installs only; a running Mac always keeps its memory in RAM.")
                         .font(.footnote).foregroundStyle(.secondary)
                     LabeledContent("Henge's limit", value: ByteText.string(UInt64(Entitlements.memoryLimitAtLaunch)))
                     LabeledContent("Free for Henge", value: ByteText.string(UInt64(henge_available_memory())))
@@ -90,25 +102,6 @@ struct SettingsView: View {
                     }
                     .listRowBackground(Desk.card)
                 }
-                Section("Performance") {
-                    Picker("Mac refresh rate", selection: $refreshRate) {
-                        Text("60 Hz").tag(60)
-                        Text("120 Hz").tag(120)
-                    }
-                    .pickerStyle(.segmented)
-                    Toggle("Faster disk writes", isOn: $fastFlush)
-                    Toggle("Quicker wake from idle", isOn: $wfiSpin)
-                    Toggle("Superblocks (experimental)", isOn: $superblocks)
-                    Picker("Code cache", selection: $codeCacheMB) {
-                        Text("1 GB").tag(1024)
-                        Text("1.5 GB").tag(1536)
-                    }
-                    Text("A bigger code cache empties less often and takes more memory; Henge picks 1.5 GB where there is room for it. Applies the next time Henge opens. If JIT stops turning on, choose 1 GB.")
-                        .font(.footnote).foregroundStyle(.secondary)
-                    Text("60 Hz leaves more of the emulated CPU to apps. Faster disk writes order them without waiting for a full sync; a sudden power loss could lose the last ones. Quicker wake keeps an idle CPU watching for work for 50 µs, at some battery cost. Superblocks let translated code run past conditional branches. Changes apply the next time a Mac starts.")
-                        .font(.footnote).foregroundStyle(.secondary)
-                }
-                .listRowBackground(Desk.card)
                 Section("Log") {
                     ShareLink(item: HengeLog.logFileURL) { Label("Share henge.log", systemImage: "square.and.arrow.up") }
                 }
