@@ -372,7 +372,11 @@ void hv_vm_mouse_move(int dx, int dy) {
 }
 
 void hv_vm_mouse_button(int button, int down) {
-    static const uint16_t codes[3] = {HV_BTN_LEFT, HV_BTN_RIGHT, HV_BTN_MIDDLE};
+    /* The guest turns the evdev code into a 1-based button number (code - 0x110 + 1)
+       and reads it with X11 semantics: 1=left, 2=middle, 3=right. So the right button
+       is the *third* code (0x112); BTN_RIGHT (0x111) lands on button 2 = middle.
+       Observed on-device: sending 0x111 came through as a middle click. */
+    static const uint16_t codes[3] = {HV_BTN_LEFT, HV_BTN_MIDDLE, HV_BTN_RIGHT};
     if (button < 0 || button > 2) return;
     hv_virtio_input_send(board.mouse, HV_EV_KEY, codes[button], down);
     hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
