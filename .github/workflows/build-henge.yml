@@ -1,6 +1,6 @@
 # .github/workflows/build-henge.yml
 #
-# Builds a Henge.ipa from your fork's main branch on a GitHub-hosted macOS
+# Builds a Henge.ipa from any branch of your fork on a GitHub-hosted macOS
 # runner, no Mac needed. Free on a PUBLIC repo: public repos get unlimited
 # minutes on hosted runners, including macOS. On a private repo, macOS minutes
 # bill at 10x, so the free tier's ~2000 min/month is only ~200 macOS minutes.
@@ -15,8 +15,7 @@ name: Build Henge IPA
 
 on:
   workflow_dispatch: {}
-  push:
-    branches: [main]
+  push: {}
 
 env:
   HUSK: ${{ github.workspace }}/Husk
