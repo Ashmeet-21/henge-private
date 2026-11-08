@@ -70,6 +70,12 @@ struct Trackpad: UIViewRepresentable {
                     Int32(min(max(y, 0), Double(Self.sensorH))))
         }
 
+        /* A touch sample's own clock, in ms. The guest derives finger speed from the
+           timestamp deltas, so reports must carry the sample time, not the moment we
+           process the event -- otherwise a burst of samples reads as one enormous flick
+           and scroll inertia goes wild on release. */
+        private static func ms(_ t: TimeInterval) -> UInt32 { UInt32(truncatingIfNeeded: Int(t * 1000)) }
+
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
             let touches = touches.filter { $0.type != .indirectPointer }
             guard !touches.isEmpty else { return }
@@ -84,7 +90,7 @@ struct Trackpad: UIViewRepresentable {
                 freeIds.remove(id)
                 fingers.append(Finger(touch: t, id: id))
                 let (x, y) = sensor(t)
-                henge_vm_touch(id, 0, x, y)
+                henge_vm_touch(id, 0, x, y, Self.ms(t.timestamp))
                 if touchesLogged < 12 {
                     touchesLogged += 1
                     HengeLog.log("input", "trackpad: finger \(id) down at \(x),\(y)")
@@ -105,19 +111,20 @@ struct Trackpad: UIViewRepresentable {
 
         override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
             var moved = false
+            let ts = Self.ms(event?.timestamp ?? touches.first?.timestamp ?? 0)
             for t in touches where t.type != .indirectPointer {
                 guard let i = fingers.firstIndex(where: { $0.touch == t }) else { continue }
                 let now = t.location(in: self), before = t.previousLocation(in: self)
                 travelled += abs(now.x - before.x) + abs(now.y - before.y)
                 let (x, y) = sensor(t)
-                henge_vm_touch(fingers[i].id, 1, x, y)
+                henge_vm_touch(fingers[i].id, 1, x, y, ts)
                 moved = true
             }
             /* Moving means pointing or a gesture, not a tap or a press-to-drag. */
             if tapsClick && travelled >= Self.tapDistance && !holding { cancelHold() }
             /* One frame with every finger that moved, so the guest sees a gesture's
                fingers move together rather than one at a time. */
-            if moved { henge_vm_touch_frame() }
+            if moved { henge_vm_touch_frame(ts) }
         }
 
         override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) { lift(touches) }
@@ -132,7 +139,8 @@ struct Trackpad: UIViewRepresentable {
                 return true
             }
             guard !lifted.isEmpty else { return }
-            for id in lifted { henge_vm_touch(id, 2, 0, 0) }
+            let ts = Self.ms(touches.map(\.timestamp).max() ?? 0)
+            for id in lifted { henge_vm_touch(id, 2, 0, 0, ts) }
             guard fingers.isEmpty else { return } /* fingers still down: the gesture goes on */
             /* The whole gesture is over. */
             if tapsClick {

@@ -1015,21 +1015,25 @@ static int tp_build_report(HvXhci *x, uint8_t *out) {
     return 12 + 9 * n;
 }
 
-/* The report timestamp is milliseconds on a monotonic clock, as the real pad sends
-   it: the guest divides position deltas by timestamp deltas to get finger speed, so
-   a per-report counter would read every drag as ten times faster than it is. */
+/* The report timestamp is milliseconds, as the real pad sends it: the guest divides
+   position deltas by timestamp deltas to get finger speed. It must be the touch sample's
+   own clock, not the moment we process it -- if several samples are handled in one burst,
+   wall-clock stamps them all ~1 ms apart and the guest reads a flick as enormous speed,
+   which is what sends scroll inertia flying on release. tp_now_ms is only the fallback
+   for the physical button, which has no sample clock. */
 static uint32_t tp_now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint32_t)((uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000);
 }
 
-/* Queue the current state as a report. */
-static void tp_queue(HvXhci *x) {
+/* Queue the current state as a report, stamped with the touch sample's clock (ms);
+   ts_ms 0 falls back to the current time (the physical button). */
+static void tp_queue(HvXhci *x, uint32_t ts_ms) {
     uint8_t r[HV_TP_REPORT_LEN];
-    /* Strictly increasing: two frames in the same millisecond would give the guest a
+    /* Strictly increasing: two frames with the same timestamp would give the guest a
        zero time delta (speed = distance / 0) and it can throw the frame away. */
-    uint32_t now = tp_now_ms();
+    uint32_t now = ts_ms ? ts_ms : tp_now_ms();
     x->tp_ts = now > x->tp_ts ? now : x->tp_ts + 1;
     int len = tp_build_report(x, r);
     if (x->tp_rtail - x->tp_rhead < HV_TP_REPORTS) {
@@ -1045,7 +1049,7 @@ static struct HvTpFinger *tp_new_finger(HvXhci *x) {
     return NULL;
 }
 
-void hv_xhci_touch(HvXhci *x, int id, int phase, int px, int py) {
+void hv_xhci_touch(HvXhci *x, int id, int phase, int px, int py, uint32_t ts_ms) {
     if (!x || id < 1 || id > 15) return;
     pthread_mutex_lock(&x->mu);
     if (phase == 0) {
@@ -1056,7 +1060,7 @@ void hv_xhci_touch(HvXhci *x, int id, int phase, int px, int py) {
             f->x = px;
             f->y = py;
             f->state = 4; /* contact: a touch, not a hover, so the guest tracks it at once */
-            tp_queue(x);
+            tp_queue(x, ts_ms);
         }
     } else {
         for (int i = 0; i < HV_TP_FINGERS; i++) {
@@ -1070,10 +1074,10 @@ void hv_xhci_touch(HvXhci *x, int id, int phase, int px, int py) {
                    moved, so the guest sees them move together instead of one at a time */
             } else {
                 f->state = 7; /* stop */
-                tp_queue(x);
+                tp_queue(x, ts_ms);
                 f->in = 0;
                 f->state = 0; /* none */
-                tp_queue(x);
+                tp_queue(x, ts_ms);
             }
             break;
         }
@@ -1084,10 +1088,10 @@ void hv_xhci_touch(HvXhci *x, int id, int phase, int px, int py) {
 
 /* Commit one frame with the current state of all the fingers: a move batch ends
    here, so a gesture's fingers all land in the same report. */
-void hv_xhci_touch_frame(HvXhci *x) {
+void hv_xhci_touch_frame(HvXhci *x, uint32_t ts_ms) {
     if (!x) return;
     pthread_mutex_lock(&x->mu);
-    tp_queue(x);
+    tp_queue(x, ts_ms);
     pthread_mutex_unlock(&x->mu);
     hv_machine_wake(x->m);
 }
@@ -1097,7 +1101,7 @@ void hv_xhci_touch_button(HvXhci *x, int down) {
     pthread_mutex_lock(&x->mu);
     if (x->tp_button != (down & 1)) {
         x->tp_button = down & 1;
-        tp_queue(x);
+        tp_queue(x, 0);
     }
     pthread_mutex_unlock(&x->mu);
     hv_machine_wake(x->m);
