@@ -10,11 +10,15 @@
 #define F_RO (1ull << 5)
 #define F_BLK_SIZE (1ull << 6)
 #define F_FLUSH (1ull << 9)
+#define F_DISCARD (1ull << 13)
+#define F_WRITE_ZEROES (1ull << 14)
 
 #define T_IN 0
 #define T_OUT 1
 #define T_FLUSH 4
 #define T_GET_ID 8
+#define T_DISCARD 11
+#define T_WRITE_ZEROES 13
 #define T_APPLE_BARRIER 0x10000
 
 #define S_OK 0
@@ -53,6 +57,32 @@ static uint32_t readable(const HvVirtqElem *e) {
     return n;
 }
 
+/* Discard / write-zeroes limits advertised in config space. One range of up to 1 GB per
+   segment, 16 segments per request, aligned to the 4 KB host block (8 sectors). */
+#define DISCARD_MAX_SECTORS (1u << 21)
+#define DISCARD_MAX_SEG 16
+
+/* Ranges after the header: {u64 sector, u32 sectors, u32 flags}. Frees the space in the
+   host file, so a disk image stops only ever growing when macOS deletes files. */
+static uint8_t discard(HvVirtioBlk *b, const HvVirtqElem *e, int zero) {
+    struct { uint64_t sector; uint32_t n, flags; } seg;
+    uint32_t len = readable(e) - 16;
+    if (readable(e) < 16 || len % sizeof seg || len / sizeof seg > DISCARD_MAX_SEG) return S_UNSUPP;
+    for (uint32_t at = 16; at < 16 + len; at += sizeof seg) {
+        if (hv_virtq_read(&b->vio, e, at, &seg, sizeof seg) != sizeof seg) return S_IOERR;
+        if (seg.n > DISCARD_MAX_SECTORS || (seg.flags & ~1u) || (!zero && seg.flags)) return S_UNSUPP;
+        if (seg.sector > UINT64_MAX / 512) return S_IOERR;
+        if (hv_disk_discard(b->disk, seg.sector * 512, (uint64_t)seg.n * 512, zero) != 0) return S_IOERR;
+        uint64_t total = __atomic_add_fetch(&b->discarded, (uint64_t)seg.n * 512, __ATOMIC_RELAXED);
+        uint64_t n = __atomic_add_fetch(&b->discards, 1, __ATOMIC_RELAXED);
+        if (n == 1 || n % 1024 == 0)
+            fprintf(stderr, "virtio-blk %s: %llu %s ranges so far, %.1f MB handed back
+", b->disk->offset ? "aux" : "root",
+                    (unsigned long long)n, zero ? "zero/discard" : "discard", total / 1048576.0);
+    }
+    return S_OK;
+}
+
 /* Worker thread. */
 static int handle(HvVirtioBlk *b, HvVirtqElem *e, uint32_t *written) {
     HvVirtio *v = &b->vio;
@@ -75,6 +105,11 @@ static int handle(HvVirtioBlk *b, HvVirtqElem *e, uint32_t *written) {
     }
     case T_FLUSH:
         if (hv_disk_flush(b->disk) != 0) status = S_IOERR;
+        break;
+    case T_DISCARD:
+    case T_WRITE_ZEROES:
+        if (!b->discard_on) status = S_UNSUPP;
+        else status = discard(b, e, hdr.type == T_WRITE_ZEROES);
         break;
     case T_GET_ID: {
         char id[20] = "hengevm-disk";
@@ -218,7 +253,11 @@ void hv_virtio_blk_poll(HvVirtioBlk *b) {
 HvVirtioBlk *hv_virtio_blk_create(HvMachine *m, HvPcie *bus, HvDisk *disk, int apple_variant) {
     HvVirtioBlk *b = calloc(1, sizeof *b);
     HvVirtio *v = &b->vio;
-    hv_virtio_init(v, m, 2, 0x010000, 1, F_SEG_MAX | F_BLK_SIZE | F_FLUSH | (disk->readonly ? F_RO : 0));
+    /* HV_BLK_DISCARD=0 turns discard off (the guest then never frees space in the image). */
+    const char *dk = getenv("HV_BLK_DISCARD");
+    b->discard_on = !disk->readonly && !(dk && atoi(dk) == 0);
+    hv_virtio_init(v, m, 2, 0x010000, 1,
+                   F_SEG_MAX | F_BLK_SIZE | F_FLUSH | (disk->readonly ? F_RO : 0) | (b->discard_on ? F_DISCARD | F_WRITE_ZEROES : 0));
     v->dev = b;
     v->notify = notify;
     b->disk = disk;
@@ -243,6 +282,16 @@ HvVirtioBlk *hv_virtio_blk_create(HvMachine *m, HvPcie *bus, HvDisk *disk, int a
     memcpy(v->config + 12, &seg_max, 4);
     memcpy(v->config + 20, &blk_size, 4);
     memcpy(v->config + 34, &num_queues, 2);
+    if (b->discard_on) {
+        uint32_t max_sectors = DISCARD_MAX_SECTORS, max_seg = DISCARD_MAX_SEG, align = 8;
+        uint8_t may_unmap = 1;
+        memcpy(v->config + 36, &max_sectors, 4); /* max_discard_sectors */
+        memcpy(v->config + 40, &max_seg, 4);     /* max_discard_seg */
+        memcpy(v->config + 44, &align, 4);       /* discard_sector_alignment */
+        memcpy(v->config + 48, &max_sectors, 4); /* max_write_zeroes_sectors */
+        memcpy(v->config + 52, &max_seg, 4);     /* max_write_zeroes_seg */
+        memcpy(v->config + 56, &may_unmap, 1);   /* write_zeroes_may_unmap */
+    }
     memcpy(v->config + 60, &apple_type, 4);
     v->config_len = 96;
     if (apple_variant) {
