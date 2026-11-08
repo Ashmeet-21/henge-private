@@ -678,8 +678,7 @@ void hv_pvg_lite_poll(HvPvgLite *p) {
             if (queued) {
                 uint64_t n = ++p->poll_recoveries;
                 if (n <= 4 || !(n & (n - 1)))
-                    fprintf(stderr, "hengevm: pvg-lite: tick found queued work on ch %u (%llu times so far)
-", ch, (unsigned long long)n);
+                    fprintf(stderr, "hengevm: pvg-lite: tick found queued work on ch %u (%llu times so far)\n", ch, (unsigned long long)n);
             }
         }
         if (!asked && !queued) continue;
