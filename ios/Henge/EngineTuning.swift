@@ -72,6 +72,15 @@ enum EngineTuning {
         var env = defaults
         let d = UserDefaults.standard
         switch d.integer(forKey: refreshKey) { case 120: env["HV_HZ"] = "120"; case 30: env["HV_HZ"] = "30"; default: break }
+        // HV_HZ is only read when a Mac starts (there is no live refresh-rate setter), so the duty governor can't
+        // lower it later. If the device is already hot at start and "Keep cool" is on, boot the display at 30 Hz so
+        // macOS draws (and the engine replays) half as many frames from the outset.
+        if d.object(forKey: ThermalGovernor.enabledKey) as? Bool ?? true {
+            switch ProcessInfo.processInfo.thermalState {
+            case .serious, .critical: env["HV_HZ"] = "30"
+            default: break
+            }
+        }
         if d.bool(forKey: superblocksKey) { env["HV_SUPERBLOCKS"] = "1" } else { unsetenv("HV_SUPERBLOCKS") }
         if d.bool(forKey: wfiSpinKey) { env["HV_WFI_SPIN"] = "50" }
         if d.object(forKey: fastFlushKey) as? Bool == false { env["HV_FLUSH"] = "0" }

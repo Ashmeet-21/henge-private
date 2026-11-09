@@ -6,6 +6,7 @@ struct SettingsView: View {
     @AppStorage(HardwareMouse.speedKey) private var mouseSpeed = 1.0
     @AppStorage(HardwareMouse.reverseKey) private var reverseScrolling = false
     @AppStorage(Trackpad.scrollSpeedKey) private var trackpadScroll = Trackpad.defaultScrollSpeed
+    @AppStorage(Trackpad.pointerSpeedKey) private var trackpadPointer = Trackpad.defaultPointerSpeed
     @AppStorage(HardwareMouse.scrollSpeedKey) private var scrollSpeed = 0.3
     @AppStorage(Device.smallCodeRegionKey) private var smallCodeRegion = Device.smallCodeRegionByDefault
     @AppStorage(Device.ramOnStorageKey) private var ramOnStorage = Device.hasLittleMemory
@@ -92,10 +93,14 @@ struct SettingsView: View {
                 .listRowBackground(Desk.card)
                 Section("On-screen trackpad") {
                     VStack(alignment: .leading, spacing: 4) {
+                        Text("Pointer speed")
+                        Slider(value: $trackpadPointer, in: 0.4...2)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
                         Text("Scroll speed")
                         Slider(value: $trackpadScroll, in: 0.05...1)
                     }
-                    Text("How far two fingers scroll the Mac. Applies straight away.")
+                    Text("How fast one finger moves the pointer and how far two fingers scroll. Both apply straight away.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 .listRowBackground(Desk.card)

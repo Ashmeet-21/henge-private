@@ -18,6 +18,14 @@ struct Trackpad: UIViewRepresentable {
         CGFloat(UserDefaults.standard.object(forKey: scrollSpeedKey) as? Double ?? defaultScrollSpeed)
     }
 
+    /// Settings' "Pointer speed" for one finger: it multiplies the base move distance (which already depends on
+    /// screen size), so the pointer can be calmed on a small, high-resolution screen. 1 is the built-in feel.
+    static let pointerSpeedKey = "henge.trackpad.pointerSpeed"
+    static let defaultPointerSpeed = 1.0
+    static var pointerSpeed: CGFloat {
+        CGFloat(UserDefaults.standard.object(forKey: pointerSpeedKey) as? Double ?? defaultPointerSpeed)
+    }
+
     func makeUIView(context: Context) -> Surface { Surface() }
     func updateUIView(_ view: Surface, context: Context) {}
 
@@ -49,8 +57,8 @@ struct Trackpad: UIViewRepresentable {
         /// Over the Mac there is only the Mac's pointer, if iPadOS hasn't locked its own away.
         func pointerInteraction(_ interaction: UIPointerInteraction, styleFor region: UIPointerRegion) -> UIPointerStyle? { .hidden() }
 
-        /// A full-size iPad has more room to move a finger across than a phone does.
-        private var speed: CGFloat { traitCollection.horizontalSizeClass == .regular ? 2 : 3 }
+        /// A full-size iPad has more room to move a finger across than a phone does; the user's "Pointer speed" scales it.
+        private var speed: CGFloat { (traitCollection.horizontalSizeClass == .regular ? 2 : 3) * Trackpad.pointerSpeed }
 
         required init?(coder: NSCoder) { fatalError("made in code") }
 
@@ -144,11 +152,17 @@ struct Trackpad: UIViewRepresentable {
         /// moves about 0.08 d² pixels for an event of d units (measured: 8 units 4 px, 100 units 970 px).
         /// So d comes from the square root of how far the fingers went, to move the page about three
         /// pixels for each point, the same as the pointer.
+        /// One wheel event carries at most this many units. macOS re-accelerates wheel events, so without a cap one
+        /// fast flick emits a large event that jumps the page much further than the finger travelled (the overshoot).
+        private static let maxUnitsPerTick: CGFloat = 6
+
         private func scroll(_ dx: CGFloat, _ dy: CGFloat) {
             scrollX += dx
             scrollY += dy
-            // Mostly one way is that way only: a page shouldn't drift sideways, or a browser go back.
-            if abs(scrollY) > 2 * abs(scrollX) { scrollX = 0 } else if abs(scrollX) > 2 * abs(scrollY) { scrollY = 0 }
+            // Keep a page from drifting sideways (or a browser going back) without flattening a real diagonal scroll:
+            // drop the minor axis only when it is both much smaller than the major and small in itself.
+            if abs(scrollY) > 2 * abs(scrollX), abs(scrollX) < 3 { scrollX = 0 }
+            else if abs(scrollX) > 2 * abs(scrollY), abs(scrollY) < 3 { scrollY = 0 }
             // At most 60 wheel events a second, the rest gathered into the next: macOS speeds a wheel up more the
             // faster its events come, and touches arrive at 120 Hz. The distance per point stays the same.
             let now = CACurrentMediaTime()
@@ -162,8 +176,10 @@ struct Trackpad: UIViewRepresentable {
         }
 
         private func wheelUnits(_ points: CGFloat) -> Int32 {
-            guard abs(points) >= 0.25 else { return 0 } // less than this is a finger resting
-            let units = (6 * Trackpad.scrollSpeed * abs(points).squareRoot()).rounded()
+            guard abs(points) >= 0.5 else { return 0 } // a resting or tiny finger move: no scroll, no accidental nudge
+            let raw = 6 * Trackpad.scrollSpeed * abs(points).squareRoot()
+            let units = min(raw, Self.maxUnitsPerTick).rounded()
+            guard units != 0 else { return 0 }
             return Int32(points < 0 ? -units : units)
         }
     }
