@@ -596,7 +596,8 @@ struct SessionView: View {
             if tick % 10 == 0 {
                 let gpuFrames = henge_vm_gpu_frames()
                 HengeLog.log("perf", "blocks/s \(String(format: "%.0f", blocksPerSecond)), GPU frames/10s \(gpuFrames &- lastGPUFrames), "
-                             + "network tx \(framesOut), rx \(framesIn), thermal \(Self.thermalLabel(heat))")
+                             + "network tx \(framesOut), rx \(framesIn), dns \(henge_vm_dns(0)) answered \(henge_vm_dns(2)) unanswered, "
+                             + "thermal \(Self.thermalLabel(heat))")
                 lastGPUFrames = gpuFrames
             }
             if tick == 60 && !stillWallpaperTipShown { // about when the desktop is up after a login
