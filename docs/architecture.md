@@ -5,6 +5,9 @@ JIT instead of hardware virtualization, so the same engine can run on iOS, where
 apps have no hypervisor access. The engine is built and tested on the Mac
 (`build/hengevm`) and linked into the iPhone app (`make ios-lib`).
 
+The guest's terminal power requests and iOS session cleanup are described in
+[Guest shutdown](guest-shutdown.md).
+
 ## Layout
 
 - `core/`: guest CPU state, the block translator, the software MMU, and exceptions.
