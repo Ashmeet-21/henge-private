@@ -535,6 +535,8 @@ enum LocalDevVPN {
 enum RemotePairingPortDiscovery {
     private static let serviceType = "_remotepairing._tcp"
     private static let queue = DispatchQueue(label: "com.henge.app.remotepairing-discovery", qos: .utility)
+    /// Handlers of the browser and the connection: not `queue`, which discover() blocks while it waits for them.
+    private static let networkQueue = DispatchQueue(label: "com.henge.app.remotepairing-discovery.network", qos: .utility)
     private static let lock = NSLock()
     private static var cachedPort: UInt16?
     private static var lastFailure: Date?
@@ -631,7 +633,7 @@ enum RemotePairingPortDiscovery {
                     break
                 }
             }
-            connection.start(queue: queue)
+            connection.start(queue: networkQueue)
         }
 
         browser.stateUpdateHandler = { state in
@@ -643,7 +645,7 @@ enum RemotePairingPortDiscovery {
             }
         }
 
-        browser.start(queue: queue)
+        browser.start(queue: networkQueue)
         _ = semaphore.wait(timeout: .now() + timeout)
         browser.cancel()
 

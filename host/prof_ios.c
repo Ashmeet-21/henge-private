@@ -125,6 +125,7 @@ static void dump(void) {
 static void *sampler(void *unused) {
     (void)unused;
     int secs = getenv("HV_PROF_IOS_SECS") ? atoi(getenv("HV_PROF_IOS_SECS")) : 30;
+    if (secs <= 0) secs = 30;
     uint64_t ticks = 0;
     for (;;) {
         usleep(1000);

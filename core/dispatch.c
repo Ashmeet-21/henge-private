@@ -1039,8 +1039,8 @@ static int run_loop(HvCpu *cpu, int one) {
            so the stub the last block left through may now belong to a new block: never chain it. (The dispatcher's
            own parking, WFI and CPU_OFF, never has an exit waiting to be chained.) */
         int rested = 0;
+        if (duty_rest(cpu)) rested = 1; /* first: a CPU back from its rest must still meet the hold below */
         if (__builtin_expect(__atomic_load_n(&hv_held, __ATOMIC_ACQUIRE), 0)) hold_wait(cpu), rested = 1;
-        if (duty_rest(cpu)) rested = 1;
         if (rested) {
             pending_chain = NULL;
             prev_b = NULL;

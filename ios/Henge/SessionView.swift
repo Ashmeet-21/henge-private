@@ -213,7 +213,7 @@ struct SessionView: View {
             defer { nativeTouch.stop() }
             while !Task.isCancelled {
                 nativeTouch.poll(
-                    active: state == 1 && scenePhase == .active && !pointerNeeded && !display.isExternal,
+                    active: state == 1 && UIApplication.shared.applicationState == .active && !pointerNeeded && !display.isExternal,
                     helperRunning: Sharing.helperRunning)
                 try? await Task.sleep(for: .milliseconds(100))
             }
@@ -512,7 +512,7 @@ struct SessionView: View {
                     }
                     .pickerStyle(.segmented)
                     Toggle("Sharp edges", isOn: $sharpCursor)
-                    LabeledContent("Scroll speed", value: String(format: "%.1f×", scrollSpeed))
+                    LabeledContent("Mouse scroll speed", value: String(format: "%.1f×", scrollSpeed))
                     Slider(value: $scrollSpeed, in: 0.1...1.5)
                     Text("The Mac supplies a small pointer image. Enlarging it can look blurry; 1× is the sharpest on an iPad. Scroll speed changes apply immediately.")
                         .font(.footnote).foregroundStyle(.secondary)

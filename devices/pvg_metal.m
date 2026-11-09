@@ -62,6 +62,22 @@ static int cursor_scale(void) {
 enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OBJ_LINEAR_TEXTURE = 8, OBJ_MAPPED_TEXTURE = 0xb };
 
 /* What is known about a made object, so a reused ref is noticed. */
+/* The hashes of a multi-plane surface's planes as the guest's pages last matched the host IOSurface. One for
+   every mapping that shares that IOSurface: they are the same guest pages and the same host pixels. */
+@interface HvPlaneState : NSObject {
+@public
+    uint64_t hash[4];
+}
+@end
+@implementation HvPlaneState
+@end
+
+/* Guards the copies between a multi-plane surface's guest pages and its host IOSurface, their hashes, and
+   wb_unmapping: the worker copies guest to host (sync_iosurface), a command buffer's completion copies host to
+   guest (write_back_iosurface), and the device's thread says which mappings the guest is giving up. */
+static os_unfair_lock wb_lock = OS_UNFAIR_LOCK_INIT;
+static NSCountedSet<NSNumber *> *wb_unmapping; /* mapping ids unmapped by the guest, not yet seen by the worker */
+
 @interface HvObject : NSObject {
 @public
     id object;
@@ -96,7 +112,9 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     uint64_t plane_from[4], plane_row[4], plane_h[4];
     /* Each plane's sampled guest bytes when last copied: only the planes the guest changed are copied, so a CPU
        write to one plane (a decoder refilling luma) does not wipe what the GPU drew into another (chroma, alpha). */
-    uint64_t plane_hash[4];
+    uint64_t *plane_hash; /* planes->hash */
+    HvPlaneState *planes;
+    uint64_t map_id; /* a surface: the guest's mapping id */
     /* Unmapped by the guest: its pages may already hold something else, so nothing is written back into them. */
     _Atomic BOOL gone;
     /* A heap: private memory, a buffer over all of it. */
@@ -136,6 +154,7 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
        process) has to be what another reads (WindowServer). */
     NSMutableDictionary<NSString *, id> *planar;
     NSMutableDictionary<NSString *, NSNumber *> *planar_uses; /* mappings using each: the entry goes with the last one */
+    NSMutableDictionary<NSString *, HvPlaneState *> *planar_state; /* each one's plane hashes, shared like it */
     NSMutableSet<NSString *> *complaints;
     uint64_t execs, draws, failed, heap_bytes, synced, remaps;
     /* Work the GPU has not finished. Stamps are given back in the order they came: the
@@ -833,15 +852,24 @@ static uint64_t plane_bytes(HvObject *s, uint32_t i) {
 
 /* Every plane's hash as the guest has it now, for a host surface already holding those pixels. */
 static void note_plane_hashes(HvObject *s) {
+    if (!s->plane_hash) return;
     for (uint32_t i = 0; i < s->plane_count && i < 4; i++)
         s->plane_hash[i] = hash_bytes(s->mapped + s->first + s->plane_from[i], plane_bytes(s, i));
 }
 
+static void sync_iosurface_locked(HvObject *s);
+
 /* Guest pixels into its IOSurface, when they changed. */
 static void sync_iosurface(HvObject *s) {
     if (!s->iosurface) return;
+    os_unfair_lock_lock(&wb_lock);
+    sync_iosurface_locked(s);
+    os_unfair_lock_unlock(&wb_lock);
+}
+
+static void sync_iosurface_locked(HvObject *s) {
     const uint8_t *from = s->mapped + s->first;
-    BOOL by_plane = s->plane_count && IOSurfaceGetPlaneCount(s->iosurface) >= s->plane_count;
+    BOOL by_plane = s->plane_hash && s->plane_count && IOSurfaceGetPlaneCount(s->iosurface) >= s->plane_count;
     uint64_t hashes[4] = {0};
     uint32_t changed = 0;
     if (by_plane) {
@@ -914,9 +942,20 @@ static void sync_iosurface(HvObject *s) {
    WebKit draws page tiles (b3a8) in its GPU process, and WindowServer, when it maps the tile under its own
    mapping id after the drawer's host IOSurface left the planar table (or never shared it), got a fresh surface
    from those empty pages: Safari's page area blank, scroll bars and toolbar fine. The hashes are set to what is
-   copied, so sync_iosurface does not take it for a guest write. HV_PVG_WRITEBACK=0 turns it off. */
+   copied (in the state every mapping of the same host surface shares), so sync_iosurface does not take it for
+   a guest write. Runs on Metal's completion thread, under wb_lock: the worker's sync_iosurface waits for it, and
+   so does the guest's unmap (hv_pvg_metal_unmap), after which nothing is written into those pages any more.
+   HV_PVG_WRITEBACK=0 turns it off. */
+static void write_back_iosurface_locked(HvObject *s);
+
 static void write_back_iosurface(HvObject *s) {
-    if (!s->iosurface || !s->plane_count || !s->mapped || atomic_load(&s->gone)) return;
+    os_unfair_lock_lock(&wb_lock);
+    if (!atomic_load(&s->gone) && ![wb_unmapping countForObject:@(s->map_id)]) write_back_iosurface_locked(s);
+    os_unfair_lock_unlock(&wb_lock);
+}
+
+static void write_back_iosurface_locked(HvObject *s) {
+    if (!s->iosurface || !s->plane_count || !s->plane_hash || !s->mapped) return;
     if (IOSurfaceGetPlaneCount(s->iosurface) < s->plane_count) return;
     if (IOSurfaceLock(s->iosurface, kIOSurfaceLockReadOnly, NULL) != 0) return; /* kIOReturnSuccess: not declared for iOS */
     uint8_t *to = s->mapped + s->first;
@@ -960,7 +999,10 @@ static void write_back_iosurface(HvObject *s) {
         uint32_t list, first;
         uint64_t alloc, row;
         memcpy(&list, desc, 4), memcpy(&alloc, desc + 0x18, 8), memcpy(&row, desc + 0x30, 8), memcpy(&first, desc + 0x60, 4);
+        /* A size that would wrap the rounding below gives a small mapping with a huge alloc beside it. */
+        if (alloc > (1ull << 36) || first >= 0x4000) { [self complain:[NSString stringWithFormat:@"surface %llu: size %llu at %u refused", h.mapping, (unsigned long long)alloc, first]]; return; }
         surface = [HvObject new];
+        surface->map_id = h.mapping;
         surface->length = (alloc + first + 0x3fff) & ~0x3fffull;
         surface->row = row;
         surface->first = first;
@@ -1000,15 +1042,26 @@ static void write_back_iosurface(HvObject *s) {
                 CFRelease(made);
                 surface->iosurface = (IOSurfaceRef)CFRetain((__bridge CFTypeRef)shared);
                 surface->content_hash = guest_hash(surface);
-                note_plane_hashes(surface);
+                HvPlaneState *state = planar_state[pk];
+                os_unfair_lock_lock(&wb_lock);
+                surface->planes = state ?: [HvPlaneState new];
+                surface->plane_hash = surface->planes->hash;
+                if (!state) note_plane_hashes(surface); /* never: an entry and its state are made together */
+                os_unfair_lock_unlock(&wb_lock);
                 surface->planar_key = pk;
                 planar_uses[pk] = @(planar_uses[pk].unsignedIntValue + 1);
                 static int told;
                 if (told++ < 8) fprintf(stderr, "hengevm: pvg-metal: surface %llu shares the host surface of the same guest memory (%s)\n", h.mapping, pk.UTF8String);
             } else {
                 surface->iosurface = made;
+                surface->planes = [HvPlaneState new];
+                surface->plane_hash = surface->planes->hash;
                 if (made) {
-                    if (planar.count >= 512) [planar removeAllObjects], [planar_uses removeAllObjects]; /* old ones only lose their sharing */
+                    if (planar.count >= 512) { /* old ones only lose their sharing */
+                        [planar removeAllObjects], [planar_uses removeAllObjects], [planar_state removeAllObjects];
+                        fprintf(stderr, "hengevm: pvg-metal: 512 multi-plane surfaces: the sharing table starts again\n");
+                    }
+                    planar_state[pk] = surface->planes;
                     planar[pk] = (__bridge id)made;
                     planar_uses[pk] = @1;
                     surface->planar_key = pk;
@@ -2670,6 +2723,7 @@ HvPvgMetal *hv_pvg_metal_create(HvPvgLite *lite) {
         r->mapped_textures = [NSMutableDictionary new];
         r->surfaces = [NSMutableDictionary new];
         r->planar = [NSMutableDictionary new];
+        r->planar_state = [NSMutableDictionary new];
         r->planar_uses = [NSMutableDictionary new];
         r->complaints = [NSMutableSet new];
         r->shot = getenv("HV_PVG_SHOT");
@@ -2783,6 +2837,11 @@ void hv_pvg_metal_cursor_moved(HvPvgMetal *m) {
 
 void hv_pvg_metal_unmap(HvPvgMetal *m, uint32_t mapping) {
     HvReplay *r = (__bridge HvReplay *)m;
+    /* At once, not when the worker gets to it: a write-back under way finishes first, and none starts after. */
+    os_unfair_lock_lock(&wb_lock);
+    if (!wb_unmapping) wb_unmapping = [NSCountedSet new];
+    [wb_unmapping addObject:@((uint64_t)mapping)];
+    os_unfair_lock_unlock(&wb_lock);
     dispatch_async(r->worker, ^{
         /* The last mapping of a shared multi-plane surface takes its table entry along: the entry holds the host
            IOSurface (4K video frames are 27-65 MB of Henge's own memory), and the guest reuses its memory for others. */
@@ -2797,11 +2856,15 @@ void hv_pvg_metal_unmap(HvPvgMetal *m, uint32_t mapping) {
                 else {
                     [r->planar removeObjectForKey:pk];
                     [r->planar_uses removeObjectForKey:pk];
+                    [r->planar_state removeObjectForKey:pk];
                 }
             }
         }
         [r->surfaces removeObjectForKey:@(mapping)];
         [r->mapped_textures removeObjectForKey:@(mapping)];
+        os_unfair_lock_lock(&wb_lock); /* s is marked gone; a later surface under this id is another one */
+        [wb_unmapping removeObject:@((uint64_t)mapping)];
+        os_unfair_lock_unlock(&wb_lock);
     });
 }
 
