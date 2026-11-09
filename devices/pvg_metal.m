@@ -918,7 +918,7 @@ static void sync_iosurface(HvObject *s) {
 static void write_back_iosurface(HvObject *s) {
     if (!s->iosurface || !s->plane_count || !s->mapped || atomic_load(&s->gone)) return;
     if (IOSurfaceGetPlaneCount(s->iosurface) < s->plane_count) return;
-    if (IOSurfaceLock(s->iosurface, kIOSurfaceLockReadOnly, NULL) != kIOReturnSuccess) return;
+    if (IOSurfaceLock(s->iosurface, kIOSurfaceLockReadOnly, NULL) != 0) return; /* kIOReturnSuccess: not declared for iOS */
     uint8_t *to = s->mapped + s->first;
     for (uint32_t i = 0; i < s->plane_count && i < 4; i++) {
         const uint8_t *src = IOSurfaceGetBaseAddressOfPlane(s->iosurface, i);
