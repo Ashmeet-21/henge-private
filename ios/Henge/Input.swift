@@ -1,9 +1,10 @@
 import SwiftUI
 import UIKit
 
-/// Types into the Mac. Two invisible views take turns holding the keyboard: one that asks for the
-/// on-screen keyboard, with a row of the Mac's own keys above it, and one that doesn't, so that a
-/// hardware keyboard works whether or not that is open.
+/// Types into the Mac. One invisible view always holds the keyboard, so a hardware keyboard works
+/// whether or not the on-screen keyboard is open; typing only decides whether it asks for that,
+/// with a row of the Mac's own keys above it. A plain view holding the keyboard instead, while the
+/// on-screen one was closed, never heard a hardware keyboard's keys.
 struct KeyboardCatcher: UIViewRepresentable {
     @Binding var active: Bool
 
@@ -11,19 +12,17 @@ struct KeyboardCatcher: UIViewRepresentable {
 
     func updateUIView(_ view: Holder, context: Context) {
         view.typer.onHide = { active = false }
-        view.typing = active
+        view.typer.showsKeyboard = active
         DispatchQueue.main.async { view.takeKeyboard() }
     }
 
     final class Holder: UIView {
-        let listener = KeyListener()
         let typer = CatcherView()
-        var typing = false
+        private var typing: Bool { typer.showsKeyboard }
         private var hiding: NSObjectProtocol?
 
         override init(frame: CGRect) {
             super.init(frame: frame)
-            addSubview(listener)
             addSubview(typer)
             hiding = NotificationCenter.default.addObserver(forName: UIResponder.keyboardWillHideNotification,
                                                             object: nil, queue: .main) { [weak self] _ in
@@ -53,12 +52,13 @@ struct KeyboardCatcher: UIViewRepresentable {
         /// Called often, which also takes the keyboard back after a sheet has had it.
         func takeKeyboard() {
             guard let window, window.rootViewController?.presentedViewController == nil else { return }
-            let holder: UIView = typing ? typer : listener
-            if !holder.isFirstResponder { holder.becomeFirstResponder() }
+            if !typer.isFirstResponder && !typer.becomeFirstResponder() {
+                HengeLog.log("input", "the keyboard view could not take the keyboard")
+            }
         }
     }
 
-    /// Whichever view holds the keyboard hears a hardware keyboard's keys here.
+    /// The view holding the keyboard hears a hardware keyboard's keys here.
     class KeyListener: UIView {
         override var canBecomeFirstResponder: Bool { true }
         /// Three fingers belong to the session (they show its controls), not to iPadOS's undo/copy/paste bar.
@@ -82,6 +82,35 @@ struct KeyboardCatcher: UIViewRepresentable {
 
     final class CatcherView: KeyListener, UIKeyInput {
         var onHide: () -> Void = {}
+        /// Off, an empty input view stands in for the on-screen keyboard and the row goes, but this view
+        /// keeps the keyboard.
+        var showsKeyboard = false {
+            didSet {
+                guard showsKeyboard != oldValue else { return }
+                quietShortcutsBar()
+                if isFirstResponder { reloadInputViews() }
+            }
+        }
+        private let noKeyboard = UIView(frame: .zero)
+        private var shortcuts: (leading: [UIBarButtonItemGroup], trailing: [UIBarButtonItemGroup]) = ([], [])
+
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            shortcuts = (inputAssistantItem.leadingBarButtonGroups, inputAssistantItem.trailingBarButtonGroups)
+            quietShortcutsBar()
+        }
+
+        required init?(coder: NSCoder) { fatalError("made in code") }
+
+        /// iPadOS shows its shortcuts bar for a hardware keyboard when a text view has its groups, so they
+        /// go while the on-screen keyboard is closed.
+        private func quietShortcutsBar() {
+            let item = inputAssistantItem
+            item.leadingBarButtonGroups = showsKeyboard ? shortcuts.leading : []
+            item.trailingBarButtonGroups = showsKeyboard ? shortcuts.trailing : []
+        }
+
+        override var inputView: UIView? { showsKeyboard ? nil : noKeyboard }
         private lazy var row: UIHostingController<ModifierRow> = {
             let host = UIHostingController(rootView: ModifierRow(hide: { [weak self] in self?.onHide() }))
             host.sizingOptions = []
@@ -91,7 +120,7 @@ struct KeyboardCatcher: UIViewRepresentable {
             return host
         }()
 
-        override var inputAccessoryView: UIView? { row.view }
+        override var inputAccessoryView: UIView? { showsKeyboard ? row.view : nil }
         var hasText: Bool { true }
         var autocorrectionType: UITextAutocorrectionType = .no
         var autocapitalizationType: UITextAutocapitalizationType = .none
