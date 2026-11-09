@@ -142,8 +142,8 @@ static uint64_t now_us(void) {
     return (uint64_t)ts.tv_sec * 1000000 + (uint64_t)ts.tv_nsec / 1000;
 }
 
-/* Workers take requests in order and run them in parallel; a flush or an
-   Apple barrier first waits for every request before it to finish, and nothing
+/* Workers take requests in order and run them in parallel; a flush, an
+   Apple barrier, a discard or a write-zeroes first waits for every request before it to finish, and nothing
    after it starts until it is done, so their ordering meaning holds. */
 static void *worker(void *opaque) {
     HvVirtioBlk *b = opaque;
@@ -163,7 +163,10 @@ static void *worker(void *opaque) {
         HvVblkReq *r = &b->ring[b->claimed % HV_VBLK_RING];
         uint32_t type = 0;
         hv_virtq_read(&b->vio, &r->e, 0, &type, 4);
-        int fence = type == T_FLUSH || type == T_APPLE_BARRIER;
+        /* Discard and write-zeroes are fences too. APFS frees a block, discards it and soon writes
+           the block again; run side by side, the punch hole could land after that write and wipe it
+           (macOS then panicked in APFS during account creation on the iPad, twice). */
+        int fence = type == T_FLUSH || type == T_APPLE_BARRIER || type == T_DISCARD || type == T_WRITE_ZEROES;
         b->claimed++;
         if (fence) {
             b->fence = 1;
