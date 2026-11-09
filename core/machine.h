@@ -24,6 +24,10 @@ typedef struct HvRam {
     /* Per page: the VA page (| 2) its blocks have been cached as branch targets under since its code last changed;
        0 none, ~0 more than one. So a code change drops just those cached targets (hv_invalidate_code). */
     uint64_t *ijc_va;
+    /* Per page: the exits from other pages chained into it (a slot + 1, 0 none), listed through HvMachine.slot_xnext,
+       so its code changing unchains just those (it scanned every such exit, under the translation lock: 2.3% of the
+       phone's busy time at a login, and the other CPUs waited for the lock). */
+    uint32_t *xhead;
     size_t npages;
 } HvRam;
 
@@ -252,9 +256,10 @@ typedef struct HvMachine {
     /* Exits to another page (see put_branch_exit): the host addend the target
        page's TLB entry must hold for the exit to go straight to the chained
        block (0: a same-page exit), and once chained, the target's physical page
-       (| 1) so that invalidating its code can unchain it. xchained lists them. */
+       (| 1) so that invalidating its code can unchain it. Each such page's chained exits are a list from its
+       HvRam.xhead through slot_xnext (slot + 1, 0 at the end); a slot is on one at a time, until the page's code changes. */
     uint64_t *slot_xa, *slot_xpa;
-    uint32_t *xchained, nxchained;
+    uint32_t *slot_xnext, nxchained;
     uint32_t nslots;
     HvCpu *cpu;              /* CPU 0: the one that polls devices */
     HvCpu *cpus[HV_MAX_CPUS]; /* every CPU, so device and invalidation code can ask them to leave */
