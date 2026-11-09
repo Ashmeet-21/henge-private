@@ -212,6 +212,7 @@ typedef struct HvPerCpu {
 #define HV_REQ_IJC_RESET 2u /* drop the branch cache (code changed) */
 
 typedef struct HvMachine {
+    int locks_initialized;
     HvRam ram[HV_MAX_RAM];
     int nram;
     HvRam *main_ram;     /* the largest region: guest RAM */
@@ -355,6 +356,9 @@ void hv_big_unlock(HvMachine *m);
 void hv_big_yield(HvMachine *m);
 /* Make every CPU leave its block at the next exit. */
 void hv_machine_kick_all(HvMachine *m);
+/* Publish a terminal reason, then wake all CPUs, including CPU_OFF waits.
+   A later host stop must not overwrite the guest's shutdown/panic reason. */
+void hv_machine_halt(HvMachine *m, enum HvHaltReason reason);
 /* Wake one CPU out of WFI (and make it leave its block). */
 void hv_cpu_wake(HvCpu *cpu);
 /* Make it leave its block at the next checked exit, without waking it from WFI. */
