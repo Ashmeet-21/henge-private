@@ -934,12 +934,55 @@ static int tlb_maps_block(HvCpu *cpu, const HvBlock *b) {
 /* The dispatcher caching a block it found for va: only while the TLB still
    says va is there, inside ijc_seq, so another CPU's TLBI can drop this CPU's
    cached targets itself (hv_tlbi_drop_remote_va). */
+/* Note on b's physical page the VA page it is cached under (the page's code changing then drops just those targets,
+   hv_invalidate_code), then check b is still current. Both read-modify-writes and the load are sequentially
+   consistent, against the generation bump and the note's exchange there: either the change sees this note, or this
+   sees the new generation and caches nothing. */
+static int ijc_note_page(const HvBlock *b) {
+    HvRam *r = b->ram;
+    if (!r || !r->ijc_va) return 1;
+    uint64_t pg = (b->pa - r->pa) >> HV_TLB_PAGE_BITS, v = (b->va & ~(uint64_t)PAGE_MASK) | 2;
+    uint64_t *slot = &r->ijc_va[pg];
+    uint64_t old = __atomic_load_n(slot, __ATOMIC_RELAXED);
+    /* Noted already (v, or ~0): what this read saw is what the next change's exchange sees first, so that change
+       drops this target too (its request reaches this CPU after the fill). Else noted here, in the order. */
+    while (old != v && old != ~0ull)
+        if (__atomic_compare_exchange_n(slot, &old, old ? ~0ull : v, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) break;
+    return __atomic_load_n(&r->page_gen[pg], __ATOMIC_SEQ_CST) == b->gen;
+}
+
+void hv_ijc_drop_code_page(HvCpu *cpu, uint64_t v) {
+    ret_new(cpu, 0);
+    ret_new(cpu, 1);
+    if (v == 1 || !cpu->pc_state) return;
+    uint64_t page = v & ~(uint64_t)PAGE_MASK;
+    int kernel = (page >> 55) & 1;
+    if (kernel) {
+        ijc_clear_page(cpu, page, 1, cpu->ijc_salt[1], 1);
+        return;
+    }
+    if (current_asid(cpu) < 0) {
+        ijc_clear_page(cpu, page, 0, cpu->ijc_salt[0], 1);
+        return;
+    }
+    if (cpu->nasid_log > HV_ASID_LOG) { /* the ids given out are not all known: start the user half over */
+        hv_ijc_reset(cpu, 0);
+        return;
+    }
+    /* Every live process id that cached a target in the page (the (id, page) set says which). */
+    for (uint32_t k = 0; k < cpu->nasid_log; k++) {
+        uint32_t cid = cpu->asid_cid[cpu->asid_log[k]];
+        if (cid && ucode_has(cpu->pc_state, cid, page)) ijc_clear_page(cpu, page, 0, (uint64_t)cid << 48, 1);
+    }
+}
+
 int hv_ijc_fill_checked(HvCpu *cpu, HvBlock *b) {
     HvPerCpu *p = cpu->pc_state;
     if (!p) {
         hv_ijc_fill(cpu, b);
         return 1;
     }
+    if (!ijc_note_page(b)) return 0;
     __atomic_add_fetch(&p->ijc_seq, 1, __ATOMIC_SEQ_CST);
     int ok = tlb_maps_block(cpu, b);
     if (ok) hv_ijc_fill(cpu, b);

@@ -307,6 +307,48 @@ int main(void) {
         if (cpu.asid_cid[7] != cid) printf("  FAIL big range dropped the whole address space\n"), failures++;
     }
 
+    /* A code change drops the cached branch targets into its page (HV_IJC_PAGES): noted under one VA page when they
+       were cached, just that page's; noted under none, none (only the return predictions); under several, all. */
+    {
+        hv_cpu_reset(&cpu, &m);
+        cpu.tcr_el1 = 0;
+        cpu.ttbr0_el1 = 7ull << 48;
+        hv_ijc_switch(&cpu);
+        HvCpu *self = hv_self;
+        hv_self = &cpu;
+        int knob = hv_knob[HV_K_IJCPAGES];
+        hv_knob[HV_K_IJCPAGES] = 1;
+        HvRam *r = &m.ram[0];
+        const uint64_t P = 0x100004000ull, Q = 0x100008000ull;
+        static HvBlock fb[2];
+        struct { uint64_t note; int p_kept, q_kept; const char *what; } cases[] = {
+            {P | 2, 0, 1, "noted at P"}, {0, 1, 1, "noted nowhere"}, {~0ull, 0, 0, "noted at several"}};
+        for (int c = 0; c < 3; c++) {
+            uint64_t salt = cpu.ijc_salt[0];
+            uint64_t *ents[2];
+            for (int i = 0; i < 2; i++) {
+                fb[i] = (HvBlock){.va = (i ? Q + 0x20 : P + 0x10), .flags = 0, .code = (uint32_t *)(uintptr_t)0x1234};
+                hv_ijc_fill(&cpu, &fb[i]);
+                ents[i] = m.percpu[0].ijc + (size_t)hv_ijc_index(fb[i].va ^ salt) * 2;
+            }
+            r->code_pages[10] = 1;
+            r->ijc_va[10] = cases[c].note;
+            hv_invalidate_code(&m, r->pa + (10ull << 14));
+            for (int i = 0; i < 2; i++) {
+                int kept = ents[i][0] == (fb[i].va ^ salt) && cpu.ijc_salt[0] == salt;
+                checks++;
+                if (kept != (i ? cases[c].q_kept : cases[c].p_kept)) {
+                    printf("  FAIL code change %s: the target in %s %s\n", cases[c].what, i ? "Q" : "P", kept ? "kept" : "dropped");
+                    failures++;
+                }
+            }
+            checks++;
+            if (r->ijc_va[10] != 0) printf("  FAIL code change left the page's note\n"), failures++;
+        }
+        hv_knob[HV_K_IJCPAGES] = knob;
+        hv_self = self;
+    }
+
     /* Another CPU's big range TLBI (64 user pages of ASID 5: over the 32 done from here by default). With HV_RANGE_DROP it is done from here in one pass:
        the second CPU's TLB slots and stashed entries in the range go, the rest stay, nothing is queued for it.
        Without, it is queued for that CPU to do (as before) and only happens when it does. */

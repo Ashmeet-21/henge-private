@@ -9,6 +9,7 @@
    not understand, or one whose lookup cannot even start, goes to libslirp as before; so do .local names (asking for
    those on iOS brings up the local network privacy prompt). */
 #include "dns_proxy.h"
+#include "machine.h"
 
 #include <dns_sd.h>
 #include <poll.h>
@@ -218,9 +219,7 @@ static void *lookup(void *arg) {
 }
 
 int hv_dns_proxy_on(void) {
-    static int on = -1;
-    if (on < 0) on = getenv("HV_DNS_PROXY") ? atoi(getenv("HV_DNS_PROXY")) != 0 : 1;
-    return on;
+    return hv_knob[HV_K_DNSPROXY] != 0; /* HV_DNS_PROXY, on unless 0 (machine.c) */
 }
 
 int hv_dns_proxy_take(const uint8_t *p, uint32_t len, HvDnsSend send) {
