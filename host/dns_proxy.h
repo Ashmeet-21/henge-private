@@ -4,8 +4,9 @@
 #include <stdint.h>
 
 /* The guest's DNS queries to 10.0.2.3, answered through the host's resolver (dns_proxy.c). On unless
-   HV_DNS_PROXY=0. send(frame, len, to_guest): the answer for the guest (to_guest 1), or the query handed back for
-   libslirp to send on as before (0); called from the lookup's own thread. */
+   HV_DNS_PROXY=0 (a knob, so it can be switched while the guest runs). send(frame, len, to_guest): the answer
+   for the guest (to_guest 1), or the query handed back for libslirp to send on as before (0); called from the
+   lookup's own thread. */
 typedef void (*HvDnsSend)(const uint8_t *frame, uint32_t len, int to_guest);
 
 int hv_dns_proxy_on(void);
