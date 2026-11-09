@@ -1143,6 +1143,9 @@ int hv_tlb_check_all(HvCpu *cpu) {
     int bad = 0;
     static int told;
     for (int pass = -1; pass < (p ? HV_STASHES : 0); pass++) {
+        /* The stash passes walk with cpu->ttbr0_el1 set to the stash's: inside a walk of any page, so another CPU's
+           TLBI meanwhile (which reads it for the running ASID, ijc_drop_va) counts as raced and is left to this CPU. */
+        if (pass == 0) walk_begin(cpu, HV_WALK_ANY);
         uint32_t n = 3 * HV_TLB_SIZE;
         const HvTlbStash *s = NULL;
         if (pass >= 0) {
@@ -1187,6 +1190,7 @@ int hv_tlb_check_all(HvCpu *cpu) {
         cpu->ttbr0_el1 = ttbr0;
     }
     cpu->ttbr0_el1 = ttbr0;
+    if (p) walk_end(cpu);
     if (m->stats_interval) {
         m->stats.flush_checked++;
         if (bad) m->stats.flush_check_bad++;
