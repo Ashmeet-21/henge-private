@@ -99,6 +99,12 @@ enum HardwareKeys {
                 continue
             }
             let usage = UInt8(raw)
+            if usage >= 0xe0 {
+                fromFlags.remove(usage) // its own presses come after all
+                note(String(format: "modifier 0x%02x %@", usage, down ? "down" : "up"))
+            } else if down, let flags = press.key?.modifierFlags {
+                matchModifiers(flags)
+            }
             henge_vm_key_hid(usage, down ? 1 : 0)
             if usage < 0xe0 { lastKey = CACurrentMediaTime() }
             if down {
@@ -106,9 +112,43 @@ enum HardwareKeys {
             } else {
                 held.remove(usage)
                 if usage < 0xe0 { StickyKeys.shared.releaseAll() } // one key after a tap on ⌃, ⌥ or ⌘
+                if !held.contains(where: { $0 < 0xe0 }) { releaseFromFlags() }
             }
         }
         return rest
+    }
+
+    /// Modifiers put down from a key's flags, let go with the last key.
+    private static var fromFlags: Set<UInt8> = []
+    private static let modifiers: [(flag: UIKeyModifierFlags, left: UInt8, right: UInt8)] = [
+        (.control, 0xe0, 0xe4), (.shift, 0xe1, 0xe5), (.alternate, 0xe2, 0xe6), (.command, 0xe3, 0xe7),
+    ]
+
+    /// With a text view holding the keyboard, iOS can keep a modifier's own presses to itself, but every
+    /// key comes with the modifiers held as it went down.
+    private static func matchModifiers(_ flags: UIKeyModifierFlags) {
+        for m in modifiers where flags.contains(m.flag) && !held.contains(m.left) && !held.contains(m.right) {
+            henge_vm_key_hid(m.left, 1)
+            held.insert(m.left)
+            fromFlags.insert(m.left)
+            note(String(format: "modifier 0x%02x down from a key's flags", m.left))
+        }
+    }
+
+    private static func releaseFromFlags() {
+        for usage in fromFlags {
+            henge_vm_key_hid(usage, 0)
+            held.remove(usage)
+        }
+        fromFlags.removeAll()
+    }
+
+    /// Which way modifiers arrive, for the first few: never which keys were typed.
+    private static var notes = 0
+    private static func note(_ line: String) {
+        guard notes < 40 else { return }
+        notes += 1
+        HengeLog.log("input", line)
     }
 
     /// iPadOS can keep a key's release when it takes over, as it does for ⌘-Tab: the Mac must not
@@ -116,6 +156,7 @@ enum HardwareKeys {
     static func releaseAll() {
         for usage in held { henge_vm_key_hid(usage, 0) }
         held.removeAll()
+        fromFlags.removeAll()
     }
 }
 
