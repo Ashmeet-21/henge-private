@@ -24,6 +24,10 @@ typedef struct HvRam {
     /* Per page: the VA page (| 2) its blocks have been cached as branch targets under since its code last changed;
        0 none, ~0 more than one. So a code change drops just those cached targets (hv_invalidate_code). */
     uint64_t *ijc_va;
+    /* Per page: the exits from other pages chained into it (a slot + 1, 0 none), listed through HvMachine.slot_xnext,
+       so its code changing unchains just those (it scanned every such exit, under the translation lock: 2.3% of the
+       phone's busy time at a login, and the other CPUs waited for the lock). */
+    uint32_t *xhead;
     size_t npages;
 } HvRam;
 
@@ -70,6 +74,10 @@ typedef struct HvStats {
     uint64_t xchained;
     uint64_t kick_src[5];     /* exit_req set by: a request (TLBI), hv_cpu_wake, kick_all, hv_machine_wake, the CPU itself */        /* of them, exits to another page (TLB-checked) */
     uint64_t syncs, sync_ticks;        /* TLBI acks waited for, and host ticks spent waiting */
+    uint64_t sync_len[4], sync_len_ticks[4]; /* those waits by length: under 10 us, 100 us, 1 ms, longer */
+    uint64_t sync_probe[4];            /* a wait 100 us long looks at the other CPU: thread off a core, on one, mid walk, mid cache fill */
+    uint64_t sync_phase[6];            /* a wait 1 ms long: the other CPU running (guest code or dispatcher), translating, in a helper,
+                                          waiting for acks itself, at the flush barrier; or its thread off a core */
     uint64_t dev_waits, dev_wait_ticks; /* device lock taken while another CPU held it */
     uint64_t tr_waits, tr_wait_ticks;   /* translation lock likewise */
     uint64_t words_inline, words_ool, words_pool; /* translated code size by part */
@@ -197,10 +205,13 @@ typedef struct HvPerCpu {
     uint32_t walk_seq;           /* odd while it walks page tables and fills its TLB (see hv_tlbi_drop_remote_va) */
     uint64_t walk_page[8];       /* the page walk k (walk_seq 2k -> 2k+1) fills, at [k % 8]; HV_WALK_ANY: a process switch */
     uint32_t ijc_seq;            /* odd while it checks a block's mapping in its TLB and caches it (hv_ijc_fill_checked) */
+    uint32_t thread;             /* its host thread (mach_port_t), for --stats: is a CPU waited for running at all */
+    uint8_t phase;               /* for --stats, what a CPU others wait on is doing: HV_PHASE_* */
     HvTlbStash stash[HV_STASHES];
     uint64_t stash_clock;
 } HvPerCpu;
 
+enum { HV_PHASE_RUN, HV_PHASE_TRANSLATE, HV_PHASE_HELPER, HV_PHASE_SYNC, HV_PHASE_FLUSH };
 #define HV_REQ_TLB_ALL 1u   /* drop the whole TLB and branch cache */
 #define HV_REQ_IJC_RESET 2u /* drop the branch cache (code changed) */
 
@@ -249,9 +260,10 @@ typedef struct HvMachine {
     /* Exits to another page (see put_branch_exit): the host addend the target
        page's TLB entry must hold for the exit to go straight to the chained
        block (0: a same-page exit), and once chained, the target's physical page
-       (| 1) so that invalidating its code can unchain it. xchained lists them. */
+       (| 1) so that invalidating its code can unchain it. Each such page's chained exits are a list from its
+       HvRam.xhead through slot_xnext (slot + 1, 0 at the end); a slot is on one at a time, until the page's code changes. */
     uint64_t *slot_xa, *slot_xpa;
-    uint32_t *xchained, nxchained;
+    uint32_t *slot_xnext, nxchained;
     uint32_t nslots;
     HvCpu *cpu;              /* CPU 0: the one that polls devices */
     HvCpu *cpus[HV_MAX_CPUS]; /* every CPU, so device and invalidation code can ask them to leave */

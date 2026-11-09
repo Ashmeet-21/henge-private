@@ -35,6 +35,21 @@
 #include <os/lock.h>
 #include <stdatomic.h>
 #include "pvg_lite.h"
+#include <mach/mach_time.h>
+
+int hv_pvg_trace_on(void) {
+    static const char *tf;
+    static int read, on;
+    static _Atomic uint64_t next;
+    if (!read) read = 1, tf = getenv("HV_PVG_TRACE_FILE");
+    if (!tf) return 0;
+    uint64_t now = mach_absolute_time();
+    if (now >= atomic_load_explicit(&next, memory_order_relaxed)) {
+        on = access(tf, F_OK) == 0;
+        atomic_store_explicit(&next, now + 2400000, memory_order_relaxed); /* 100 ms of 24 MHz ticks */
+    }
+    return on;
+}
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -565,9 +580,7 @@ static void do_channel(HvPvgLite *p, uint32_t ch) {
         }
         if (p->log) fprintf(stderr, "hengevm: pvg-lite: ch %u op %x len %x stamp %x\n", ch, hdr[0], hdr[1], hdr[2]);
         {   /* HV_PVG_TRACE_FILE exists: the order commands reach the device in, with what a swap says */
-            static const char *tf; static int tf_read;
-            if (!tf_read) tf_read = 1, tf = getenv("HV_PVG_TRACE_FILE");
-            if (tf && access(tf, F_OK) == 0) {
+            if (hv_pvg_trace_on()) {
                 uint32_t w[12] = {0};
                 ring_read(p, table, size, rd + 12, w, hdr[1] - 12 < sizeof w ? hdr[1] - 12 : sizeof w);
                 fprintf(stderr, "trace: dev ch %u op %x len %u stamp %x sub %x args %x %x %x %x %x %x %x %x\n", ch, hdr[0], hdr[1], hdr[2], p->submitted[ch], w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
