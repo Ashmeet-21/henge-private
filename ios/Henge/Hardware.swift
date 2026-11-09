@@ -87,7 +87,7 @@ enum HardwareKeys {
     /// With the on-screen keyboard's view holding the keyboard, iOS may also offer a hardware key as
     /// text, and again as it repeats. The Mac has the key already, and repeats it itself.
     static var keyJustPressed: Bool {
-        fromGameController || held.contains { $0 < 0xe0 } || CACurrentMediaTime() - lastKey < 0.1
+        held.contains { $0 < 0xe0 } || CACurrentMediaTime() - lastKey < 0.1
     }
 
     static func start() {
@@ -171,7 +171,7 @@ enum HardwareKeys {
     }
 
     /// Which way keys arrive, once each: never which keys were typed.
-    private static func note(_ line: String) {
+    static func note(_ line: String) {
         if noted.insert(line).inserted { HengeLog.log("input", line) }
     }
 

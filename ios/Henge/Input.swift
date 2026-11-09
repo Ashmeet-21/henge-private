@@ -1,10 +1,11 @@
 import SwiftUI
 import UIKit
 
-/// Types into the Mac. One invisible view always holds the keyboard, so a hardware keyboard works
-/// whether or not the on-screen keyboard is open; typing only decides whether it asks for that,
-/// with a row of the Mac's own keys above it. A plain view holding the keyboard instead, while the
-/// on-screen one was closed, never heard a hardware keyboard's keys.
+/// Types into the Mac. Two invisible views take turns holding the keyboard: one that asks for the
+/// on-screen keyboard, with a row of the Mac's own keys above it, and a plain one while that is closed.
+/// A hardware keyboard reaches the plain one through GameController (HardwareKeys). While the text view
+/// holds the keyboard, iPadOS gives a hardware keyboard to the text system instead: GameController and
+/// UIKit's presses get nothing, and the Mac gets only text, so no modifiers or shortcuts.
 struct KeyboardCatcher: UIViewRepresentable {
     @Binding var active: Bool
 
@@ -12,17 +13,19 @@ struct KeyboardCatcher: UIViewRepresentable {
 
     func updateUIView(_ view: Holder, context: Context) {
         view.typer.onHide = { active = false }
-        view.typer.showsKeyboard = active
+        view.typing = active
         DispatchQueue.main.async { view.takeKeyboard() }
     }
 
     final class Holder: UIView {
+        let listener = KeyListener()
         let typer = CatcherView()
-        private var typing: Bool { typer.showsKeyboard }
+        var typing = false
         private var hiding: NSObjectProtocol?
 
         override init(frame: CGRect) {
             super.init(frame: frame)
+            addSubview(listener)
             addSubview(typer)
             hiding = NotificationCenter.default.addObserver(forName: UIResponder.keyboardWillHideNotification,
                                                             object: nil, queue: .main) { [weak self] _ in
@@ -52,9 +55,10 @@ struct KeyboardCatcher: UIViewRepresentable {
         /// Called often, which also takes the keyboard back after a sheet has had it.
         func takeKeyboard() {
             guard let window, window.rootViewController?.presentedViewController == nil else { return }
-            if !typer.isFirstResponder && !typer.becomeFirstResponder() {
-                HengeLog.log("input", "the keyboard view could not take the keyboard")
-            }
+            let holder: UIView = typing ? typer : listener
+            guard !holder.isFirstResponder else { return }
+            let took = holder.becomeFirstResponder()
+            HengeLog.log("input", "\(typing ? "text" : "plain") view \(took ? "holds" : "could not take") the keyboard")
         }
     }
 
@@ -82,35 +86,6 @@ struct KeyboardCatcher: UIViewRepresentable {
 
     final class CatcherView: KeyListener, UIKeyInput {
         var onHide: () -> Void = {}
-        /// Off, an empty input view stands in for the on-screen keyboard and the row goes, but this view
-        /// keeps the keyboard.
-        var showsKeyboard = false {
-            didSet {
-                guard showsKeyboard != oldValue else { return }
-                quietShortcutsBar()
-                if isFirstResponder { reloadInputViews() }
-            }
-        }
-        private let noKeyboard = UIView(frame: .zero)
-        private var shortcuts: (leading: [UIBarButtonItemGroup], trailing: [UIBarButtonItemGroup]) = ([], [])
-
-        override init(frame: CGRect) {
-            super.init(frame: frame)
-            shortcuts = (inputAssistantItem.leadingBarButtonGroups, inputAssistantItem.trailingBarButtonGroups)
-            quietShortcutsBar()
-        }
-
-        required init?(coder: NSCoder) { fatalError("made in code") }
-
-        /// iPadOS shows its shortcuts bar for a hardware keyboard when a text view has its groups, so they
-        /// go while the on-screen keyboard is closed.
-        private func quietShortcutsBar() {
-            let item = inputAssistantItem
-            item.leadingBarButtonGroups = showsKeyboard ? shortcuts.leading : []
-            item.trailingBarButtonGroups = showsKeyboard ? shortcuts.trailing : []
-        }
-
-        override var inputView: UIView? { showsKeyboard ? nil : noKeyboard }
         private lazy var row: UIHostingController<ModifierRow> = {
             let host = UIHostingController(rootView: ModifierRow(hide: { [weak self] in self?.onHide() }))
             host.sizingOptions = []
@@ -120,7 +95,7 @@ struct KeyboardCatcher: UIViewRepresentable {
             return host
         }()
 
-        override var inputAccessoryView: UIView? { showsKeyboard ? row.view : nil }
+        override var inputAccessoryView: UIView? { row.view }
         var hasText: Bool { true }
         var autocorrectionType: UITextAutocorrectionType = .no
         var autocapitalizationType: UITextAutocapitalizationType = .none
@@ -129,6 +104,7 @@ struct KeyboardCatcher: UIViewRepresentable {
         var smartDashesType: UITextSmartDashesType = .no
 
         func insertText(_ text: String) {
+            HardwareKeys.note("first text by the text view")
             guard !HardwareKeys.keyJustPressed else { return }
             for c in text { Keys.type(c) }
             StickyKeys.shared.releaseAll()
