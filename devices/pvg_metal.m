@@ -144,6 +144,8 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     BOOL tess_factors; /* so is a tessellation factor buffer */
     uint32_t pre_raster_samples, pre_imageblock, pre_threadgroup, pre_tile_w, pre_tile_h; /* for the next pass */
     BOOL tracing; /* HV_PVG_TRACE_FILE exists: say what each exec draws */
+    id<MTLBuffer> trace_vb[32]; /* while tracing: the vertex buffers bound, with offset and stride */
+    NSUInteger trace_vo[32], trace_vs[32];
     /* The newest frame, BGRA, for hv_pvg_metal_frame, and the same without the pointer on it. */
     uint8_t *frame, *base;
     uint32_t frame_w, frame_h;
@@ -1212,6 +1214,37 @@ typedef struct {
     else [(id<MTLComputeCommandEncoder>)e useHeaps:list count:have];
 }
 
+/* Tracing: what an indexed draw reads. The index range shows whether it stays inside its mesh; the
+   first values at each vertex stream's offset show the layout. Streams are the high slots (16 up). */
+- (void)traceIndexed:(id<MTLBuffer>)b offset:(NSUInteger)off type:(NSUInteger)type count:(NSUInteger)count instances:(NSUInteger)instances base:(NSInteger)base primitive:(NSUInteger)primitive {
+    NSUInteger size = type == MTLIndexTypeUInt32 ? 4 : 2;
+    fprintf(stderr, "trace:  indexed prim %lu idxtype %lu count %lu inst %lu base %ld idxoff %lu idxlen %lu", (unsigned long)primitive, (unsigned long)type,
+            (unsigned long)count, (unsigned long)instances, (long)base, (unsigned long)off, (unsigned long)b.length);
+    if (b.storageMode != MTLStorageModePrivate && count && off <= b.length && count <= (b.length - off) / size) {
+        const uint8_t *p = (const uint8_t *)b.contents + off;
+        uint32_t lo = UINT32_MAX, hi = 0;
+        for (NSUInteger i = 0; i < count; i++) {
+            uint32_t v = 0;
+            memcpy(&v, p + i * size, size);
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+        }
+        fprintf(stderr, " min %u max %u", lo, hi);
+    }
+    fprintf(stderr, "\n");
+    for (uint32_t s = 16; s < 32; s++) {
+        id<MTLBuffer> v = trace_vb[s];
+        if (!v) continue;
+        fprintf(stderr, "trace:   stream %u off %lu stride %lu len %lu:", s, (unsigned long)trace_vo[s], (unsigned long)trace_vs[s], (unsigned long)v.length);
+        if (v.storageMode != MTLStorageModePrivate && trace_vo[s] < v.length) {
+            const float *f = (const float *)((const uint8_t *)v.contents + trace_vo[s]);
+            NSUInteger n = MIN((v.length - trace_vo[s]) / 4, (NSUInteger)24);
+            for (NSUInteger k = 0; k < n; k++) fprintf(stderr, " %g", f[k]);
+        }
+        fprintf(stderr, "\n");
+    }
+}
+
 - (void)render:(id<MTLRenderCommandEncoder>)e tag:(uint32_t)tag rec:(Rec)r task:(uint32_t)task {
     BOOL draw = tag <= 19 || tag == 28 || tag == 29 || tag == 155 || tag == 162;
     if (!pipeline_set && draw) return;
@@ -1254,6 +1287,7 @@ typedef struct {
         NSRange range = NSMakeRange(index, count);
         if (tracing) for (uint32_t i = 0; i < count; i++) { /* m4 fork: what the shaders are given */
             id<MTLBuffer> bb = strong[i];
+            if (tag == 125 && index + i < 32) trace_vb[index + i] = bb, trace_vo[index + i] = offsets[i], trace_vs[index + i] = 0;
             fprintf(stderr, "trace:  %s buf %u ref %u off %lu len %lu:", tag == 125 ? "vtx" : tag == 110 ? "frag" : "tile", index + i, U32(8 + i * 12),
                     (unsigned long)offsets[i], (unsigned long)bb.length);
             if (bb && bb.storageMode != MTLStorageModePrivate && offsets[i] < bb.length) {
@@ -1268,7 +1302,10 @@ typedef struct {
         else [e setTileBuffers:buffers offsets:offsets withRange:range];
         break;
     }
-    case 126: [e setVertexBufferOffset:(NSUInteger)U64(4) atIndex:U32(0)]; break;
+    case 126:
+        if (tracing && U32(0) < 32) trace_vo[U32(0)] = (NSUInteger)U64(4);
+        [e setVertexBufferOffset:(NSUInteger)U64(4) atIndex:U32(0)];
+        break;
     case 111: [e setFragmentBufferOffset:(NSUInteger)U64(4) atIndex:U32(0)]; break;
     case 114: case 161: { /* fragment, tile textures */
         uint32_t index = U32(0), count = U32(4);
@@ -1420,10 +1457,14 @@ typedef struct {
             offsets[i] = (NSUInteger)U64(12 + i * 20);
             strides[i] = (NSUInteger)U64(20 + i * 20);
         }
+        if (tracing) for (uint32_t i = 0; i < count && index + i < 32; i++) trace_vb[index + i] = strong[i], trace_vo[index + i] = offsets[i], trace_vs[index + i] = strides[i];
         [e setVertexBuffers:buffers offsets:offsets attributeStrides:strides withRange:NSMakeRange(index, count)];
         break;
     }
-    case 166: [e setVertexBufferOffset:(NSUInteger)U64(4) attributeStride:(NSUInteger)U64(12) atIndex:U32(0)]; break;
+    case 166:
+        if (tracing && U32(0) < 32) trace_vo[U32(0)] = (NSUInteger)U64(4), trace_vs[U32(0)] = (NSUInteger)U64(12);
+        [e setVertexBufferOffset:(NSUInteger)U64(4) attributeStride:(NSUInteger)U64(12) atIndex:U32(0)];
+        break;
     case 101: {
         float c[4];
         memcpy(c, r.p, sizeof c);
@@ -1528,6 +1569,7 @@ typedef struct {
         id<MTLBuffer> b = [self get:U32(4) task:task];
         if (b) [e drawIndexedPrimitives:(MTLPrimitiveType)U16(0) indexCount:(NSUInteger)U64(16) indexType:(MTLIndexType)U16(2) indexBuffer:b indexBufferOffset:(NSUInteger)U64(8)
                           instanceCount:(NSUInteger)U64(24) baseVertex:(NSInteger)U64(32) baseInstance:(NSUInteger)U64(40)];
+        if (tracing && b) [self traceIndexed:b offset:(NSUInteger)U64(8) type:U16(2) count:(NSUInteger)U64(16) instances:(NSUInteger)U64(24) base:(NSInteger)U64(32) primitive:U16(0)];
         draws++;
         break;
     }
@@ -1536,6 +1578,7 @@ typedef struct {
         NSInteger base_vertex = tag == 29 ? (NSInteger)(int16_t)U16(14) : (NSInteger)U16(14);
         if (b) [e drawIndexedPrimitives:(MTLPrimitiveType)U16(0) indexCount:U16(10) indexType:(MTLIndexType)U16(2) indexBuffer:b indexBufferOffset:U16(8)
                           instanceCount:U16(12) baseVertex:base_vertex baseInstance:U16(16)];
+        if (tracing && b) [self traceIndexed:b offset:U16(8) type:U16(2) count:U16(10) instances:U16(12) base:base_vertex primitive:U16(0)];
         draws++;
         break;
     }
@@ -1624,6 +1667,7 @@ typedef struct {
         id state = [self get:U32(0) task:task];
         if (state) [e setComputePipelineState:state];
         pipeline_set = state != nil;
+        if (tracing) fprintf(stderr, "trace:  compute pipeline %u %s\n", U32(0), state ? "set" : "missing");
         break;
     }
     case 203: {
@@ -1669,6 +1713,7 @@ typedef struct {
     case 200: case 202: {
         MTLSize a, b;
         memcpy(&a, r.p, sizeof a), memcpy(&b, r.p + sizeof a, sizeof b);
+        if (tracing) fprintf(stderr, "trace:  dispatch tag %u %lu %lu %lu per %lu %lu %lu\n", tag, (unsigned long)a.width, (unsigned long)a.height, (unsigned long)a.depth, (unsigned long)b.width, (unsigned long)b.height, (unsigned long)b.depth);
         if (tag == 200) [e dispatchThreadgroups:a threadsPerThreadgroup:b];
         else [e dispatchThreads:a threadsPerThreadgroup:b];
         break;

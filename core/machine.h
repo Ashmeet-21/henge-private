@@ -272,6 +272,7 @@ typedef struct HvMachine {
     /* With more than one CPU, only the holder of this runs guest code (a fair
        ticket lock, handed over at every kick and while a CPU sleeps). */
     int big_lock_on;
+    int big_lock_want; /* HV_BIG_LOCK_FILE appeared: the next stop-the-world turns it on */
     /* Devices, the GIC and the ICC registers: one CPU at a time (recursive). */
     pthread_mutex_t dev_mu;
     /* Translating and inserting blocks, the JIT region and the slots. */

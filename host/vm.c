@@ -272,9 +272,15 @@ int hv_vm_create(const HvVmConfig *c, char *err, size_t errlen) {
 
 static void *kicker_thread(void *unused) {
     (void)unused;
-    for (;;) {
+    const char *big_file = ncpus > 1 ? getenv("HV_BIG_LOCK_FILE") : NULL; /* debugging: the big lock from when this file appears */
+    for (uint32_t n = 0;; n++) {
         usleep(1000);
         hv_machine_kick_all(&m);
+        if (big_file && n % 100 == 0 && access(big_file, F_OK) == 0) {
+            __atomic_store_n(&m.big_lock_want, 1, __ATOMIC_SEQ_CST);
+            __atomic_store_n(&m.flush_pending, 1, __ATOMIC_SEQ_CST);
+            big_file = NULL;
+        }
     }
     return NULL;
 }
