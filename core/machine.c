@@ -1,5 +1,6 @@
 #include "machine.h"
 
+#include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <sched.h>
 #include <stdio.h>
@@ -238,10 +239,19 @@ void hv_cpu_sync(HvCpu *self, HvCpu *target, uint64_t seq) {
         __atomic_store_n(&s->tlb_live, 0, __ATOMIC_SEQ_CST); /* others need not wait for this one meanwhile */
         ack_wake(s);
     }
-    int sleep = hv_knob[HV_K_SYNCWAIT];
+    int sleep = hv_knob[HV_K_SYNCWAIT], probed = !t0;
     for (uint32_t spins = 0;; spins++) {
         uint64_t ack = __atomic_load_n(&t->ack_seq, __ATOMIC_ACQUIRE);
         if (ack >= seq) break;
+        if (!probed && !(spins & 63) && mach_absolute_time() - t0 >= 2400) { /* 100 us: what is it doing? */
+            probed = 1;
+            thread_basic_info_data_t ti;
+            mach_msg_type_number_t cnt = THREAD_BASIC_INFO_COUNT;
+            int on = !t->thread || (thread_info(t->thread, THREAD_BASIC_INFO, (thread_info_t)&ti, &cnt) == KERN_SUCCESS && ti.run_state == TH_STATE_RUNNING);
+            mm->stats.sync_probe[on ? 1 : 0]++;
+            if (__atomic_load_n(&t->walk_seq, __ATOMIC_RELAXED) & 1) mm->stats.sync_probe[2]++;
+            if (__atomic_load_n(&t->ijc_seq, __ATOMIC_RELAXED) & 1) mm->stats.sync_probe[3]++;
+        }
         if (!__atomic_load_n(&t->tlb_live, __ATOMIC_SEQ_CST)) break; /* parked: it does the work before it runs again */
         if (self) hv_cpu_process_requests(self);
         if (sleep && spins >= 64) {
@@ -259,8 +269,12 @@ void hv_cpu_sync(HvCpu *self, HvCpu *target, uint64_t seq) {
         hv_cpu_process_requests(self); /* anything that came in while we were not live */
     }
     if (mm->stats_interval) {
+        uint64_t dt = mach_absolute_time() - t0;
+        int b = dt < 240 ? 0 : dt < 2400 ? 1 : dt < 24000 ? 2 : 3; /* 24 MHz ticks */
         mm->stats.syncs++;
-        mm->stats.sync_ticks += mach_absolute_time() - t0;
+        mm->stats.sync_ticks += dt;
+        mm->stats.sync_len[b]++;
+        mm->stats.sync_len_ticks[b] += dt;
     }
 }
 

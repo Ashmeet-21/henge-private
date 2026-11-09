@@ -661,6 +661,15 @@ static void print_stats(HvCpu *cpu, int force) {
         fprintf(stderr, "  new code pages %.0f/s; waits: tlbi acks %.0f/s %.1f%%, device lock %.0f/s %.1f%%, translation lock %.0f/s %.1f%% (of one CPU)\n",
                 RATE(code_protects), RATE(syncs), RATE(sync_ticks) / 240000.0, RATE(dev_waits), RATE(dev_wait_ticks) / 240000.0,
                 RATE(tr_waits), RATE(tr_wait_ticks) / 240000.0);
+        {
+            double l = RATE(syncs) + 1e-9;
+            fprintf(stderr, "  tlbi ack waits by length/s: <10us %.0f (%.1f%%), <100us %.0f (%.1f%%), <1ms %.0f (%.1f%%), longer %.0f (%.1f%%); "
+                            "at 100 us the CPU waited for was: off a core %.0f, on one %.0f (mid walk %.0f, mid cache fill %.0f)\n",
+                    RATE(sync_len[0]), RATE(sync_len_ticks[0]) / 240000.0, RATE(sync_len[1]), RATE(sync_len_ticks[1]) / 240000.0,
+                    RATE(sync_len[2]), RATE(sync_len_ticks[2]) / 240000.0, RATE(sync_len[3]), RATE(sync_len_ticks[3]) / 240000.0,
+                    RATE(sync_probe[0]), RATE(sync_probe[1]), RATE(sync_probe[2]), RATE(sync_probe[3]));
+            (void)l;
+        }
         fprintf(stderr, "  light lookups failed/s: odd %.0f, filters full %.0f, no mapping %.0f, no block yet %.0f; walked %.0fK/s\n",
                 RATE(light_fail[0]), RATE(light_fail[1]), RATE(light_fail[2]), RATE(light_fail[3]), RATE(light_walks) / 1e3);
         fprintf(stderr, "  big user-range TLBIs/s: %.0f TLB only in the range, %.0f with no cached targets to drop; big kernel ranges %.0f\n",
@@ -866,6 +875,7 @@ static void stop_the_world(HvCpu *cpu) {
 }
 
 int hv_run(HvCpu *cpu) {
+    if (cpu->pc_state) cpu->pc_state->thread = mach_thread_self();
     hv_big_lock(cpu->m);
     hv_fp_enter(cpu);
     int r = run(cpu, 0);
