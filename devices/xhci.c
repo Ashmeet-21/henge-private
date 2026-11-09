@@ -24,7 +24,7 @@ enum {
     TRB_TRANSFER_EVENT = 32, TRB_CMD_COMPLETION = 33, TRB_PORT_STATUS = 34,
 };
 /* Completion codes. */
-enum { CC_SUCCESS = 1, CC_TRB_ERROR = 5, CC_STALL = 6, CC_SLOTS_FULL = 9, CC_SHORT_PACKET = 13, CC_CONTEXT_STATE = 19 };
+enum { CC_SUCCESS = 1, CC_TRB_ERROR = 5, CC_STALL = 6, CC_SLOTS_FULL = 9, CC_SLOT_NOT_ENABLED = 11, CC_SHORT_PACKET = 13, CC_CONTEXT_STATE = 19 };
 
 /* PORTSC bits. */
 #define PORT_CCS (1u << 0)
@@ -619,6 +619,11 @@ static void run_commands(HvXhci *x) {
         uint64_t ptr = ((uint64_t)trb[1] << 32 | trb[0]) & ~0xfull;
         int cc = CC_SUCCESS;
         if (xlog()) fprintf(stderr, "xhci: command %d slot %d ptr %llx dw3 %08x\n", type, slot, (unsigned long long)ptr, trb[3]);
+        /* The slot ID is the guest's to write (8 bits): every command but these two indexes x->slots with it. */
+        if (type != TRB_ENABLE_SLOT && type != TRB_NOOP_CMD && (slot < 1 || slot > HV_XHCI_SLOTS)) {
+            cmd_completion(x, at, CC_SLOT_NOT_ENABLED, slot);
+            continue;
+        }
         switch (type) {
         case TRB_ENABLE_SLOT: {
             int s = 1;
