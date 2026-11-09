@@ -154,7 +154,11 @@ static HvBlock *lookup(HvCpu *cpu, uint64_t va, uint64_t pa, uint32_t flags, con
     /* Translate without the lock, into this thread's buffer... */
     HvBlock nb = {.va = va, .pa = pa, .flags = flags, .gen = gen, .ram = ram, .pg = pg, .maker = cpu->index + 1, .jit_gen = __atomic_load_n(&m->jit_gen, __ATOMIC_SEQ_CST)};
     uint64_t t0 = m->stats_interval ? mach_absolute_time() : 0;
-    if (hv_translate_emit(m, &nb, code, avail) != 0) goto flush_unlocked;
+    uint8_t phase0 = cpu->pc_state ? cpu->pc_state->phase : 0;
+    if (cpu->pc_state) __atomic_store_n(&cpu->pc_state->phase, HV_PHASE_TRANSLATE, __ATOMIC_RELAXED);
+    int failed = hv_translate_emit(m, &nb, code, avail) != 0;
+    if (cpu->pc_state) __atomic_store_n(&cpu->pc_state->phase, phase0, __ATOMIC_RELAXED);
+    if (failed) goto flush_unlocked;
     if (m->stats_interval) {
         m->stats.translate_ticks += mach_absolute_time() - t0;
         m->stats.translated_insns += nb.ninsns;
@@ -332,7 +336,10 @@ static int tlbi_may_hit(HvCpu *cpu, uint32_t insn, uint64_t pc) {
 static uint32_t helper(HvCpu *cpu, const HvHelperInfo *info_in);
 
 uint32_t hv_helper(HvCpu *cpu, const HvHelperInfo *info_in) {
+    HvPerCpu *pcs = cpu->pc_state;
+    if (pcs) __atomic_store_n(&pcs->phase, HV_PHASE_HELPER, __ATOMIC_RELAXED);
     uint32_t r = helper(cpu, info_in);
+    if (pcs) __atomic_store_n(&pcs->phase, HV_PHASE_RUN, __ATOMIC_RELAXED);
     /* An exception just taken (an abort, an undefined instruction, a trap): its
        vector's block, as after an SVC. */
     if (r && cpu->exit_reason == HV_EXIT_EXCEPTION) {
@@ -669,6 +676,8 @@ static void print_stats(HvCpu *cpu, int force) {
                     RATE(sync_len[0]), RATE(sync_len_ticks[0]) / 240000.0, RATE(sync_len[1]), RATE(sync_len_ticks[1]) / 240000.0,
                     RATE(sync_len[2]), RATE(sync_len_ticks[2]) / 240000.0, RATE(sync_len[3]), RATE(sync_len_ticks[3]) / 240000.0,
                     RATE(sync_probe[0]), RATE(sync_probe[1]), RATE(sync_probe[2]), RATE(sync_probe[3]));
+            fprintf(stderr, "  at 1 ms the CPU waited for was/s: running %.1f, translating %.1f, in a helper %.1f, waiting for acks %.1f, at the flush barrier %.1f, off a core %.1f\n",
+                    RATE(sync_phase[0]), RATE(sync_phase[1]), RATE(sync_phase[2]), RATE(sync_phase[3]), RATE(sync_phase[4]), RATE(sync_phase[5]));
             (void)l;
         }
         fprintf(stderr, "  light lookups failed/s: odd %.0f, filters full %.0f, no mapping %.0f, no block yet %.0f; walked %.0fK/s\n",
@@ -851,6 +860,7 @@ static void stop_the_world(HvCpu *cpu) {
         __atomic_store_n(&m->flush_pending, 0, __ATOMIC_SEQ_CST);
         pthread_mutex_unlock(&m->stw_mu);
         hv_machine_kick_all(m);
+        if (cpu->pc_state) __atomic_store_n(&cpu->pc_state->phase, HV_PHASE_FLUSH, __ATOMIC_RELAXED);
         for (uint32_t spins = 0;; spins++) {
             int busy = 0;
             for (int i = 0; i < m->ncpus; i++)
@@ -863,6 +873,7 @@ static void stop_the_world(HvCpu *cpu) {
         pthread_mutex_lock(&m->tr_mu);
         hv_flush_blocks(m);
         pthread_mutex_unlock(&m->tr_mu);
+        if (cpu->pc_state) __atomic_store_n(&cpu->pc_state->phase, HV_PHASE_RUN, __ATOMIC_RELAXED);
         pthread_mutex_lock(&m->stw_mu);
         __atomic_store_n(&m->stw_active, 0, __ATOMIC_SEQ_CST);
         pthread_cond_broadcast(&m->stw_cv);

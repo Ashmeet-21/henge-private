@@ -27,7 +27,7 @@ static void knobs_init(void) {
         hv_knob[i] = getenv(hv_knob_names[i]) ? atoi(getenv(hv_knob_names[i])) : 0;
     if (getenv("HV_NO_RAS") && !*getenv("HV_NO_RAS")) hv_knob[HV_K_NO_RAS] = 1;
     /* On unless asked: Golden Gate on the phone (2026-11-08) ran 200 process spawns ~3% faster with it, and none
-       of the checked skips (1 in 32 are checked, see sysreg.c) found an out-of-date entry. */
+       of the checked skips (1 in 32 were checked then; 1 in 128 since, see sysreg.c) found an out-of-date entry. */
     if (!getenv("HV_SWITCH_FLUSH")) hv_knob[HV_K_SWITCHFLUSH] = 2;
     if (!getenv("HV_IJC_PAGES")) hv_knob[HV_K_IJCPAGES] = 1;
     if (!getenv("HV_DNS_PROXY")) hv_knob[HV_K_DNSPROXY] = 1;
@@ -239,7 +239,8 @@ void hv_cpu_sync(HvCpu *self, HvCpu *target, uint64_t seq) {
         __atomic_store_n(&s->tlb_live, 0, __ATOMIC_SEQ_CST); /* others need not wait for this one meanwhile */
         ack_wake(s);
     }
-    int sleep = hv_knob[HV_K_SYNCWAIT], probed = !t0;
+    int sleep = hv_knob[HV_K_SYNCWAIT], probed = !t0, probed_long = !t0;
+    if (s) __atomic_store_n(&s->phase, HV_PHASE_SYNC, __ATOMIC_RELAXED);
     for (uint32_t spins = 0;; spins++) {
         uint64_t ack = __atomic_load_n(&t->ack_seq, __ATOMIC_ACQUIRE);
         if (ack >= seq) break;
@@ -251,6 +252,13 @@ void hv_cpu_sync(HvCpu *self, HvCpu *target, uint64_t seq) {
             mm->stats.sync_probe[on ? 1 : 0]++;
             if (__atomic_load_n(&t->walk_seq, __ATOMIC_RELAXED) & 1) mm->stats.sync_probe[2]++;
             if (__atomic_load_n(&t->ijc_seq, __ATOMIC_RELAXED) & 1) mm->stats.sync_probe[3]++;
+        }
+        if (probed && !probed_long && !(spins & 63) && mach_absolute_time() - t0 >= 24000) { /* 1 ms */
+            probed_long = 1;
+            thread_basic_info_data_t ti;
+            mach_msg_type_number_t cnt = THREAD_BASIC_INFO_COUNT;
+            int on = !t->thread || (thread_info(t->thread, THREAD_BASIC_INFO, (thread_info_t)&ti, &cnt) == KERN_SUCCESS && ti.run_state == TH_STATE_RUNNING);
+            mm->stats.sync_phase[on ? __atomic_load_n(&t->phase, __ATOMIC_RELAXED) % 5 : 5]++;
         }
         if (!__atomic_load_n(&t->tlb_live, __ATOMIC_SEQ_CST)) break; /* parked: it does the work before it runs again */
         if (self) hv_cpu_process_requests(self);
@@ -267,6 +275,7 @@ void hv_cpu_sync(HvCpu *self, HvCpu *target, uint64_t seq) {
     if (s) {
         __atomic_store_n(&s->tlb_live, 1, __ATOMIC_SEQ_CST);
         hv_cpu_process_requests(self); /* anything that came in while we were not live */
+        __atomic_store_n(&s->phase, HV_PHASE_HELPER, __ATOMIC_RELAXED); /* TLBIs are waited for from a helper */
     }
     if (mm->stats_interval) {
         uint64_t dt = mach_absolute_time() - t0;
