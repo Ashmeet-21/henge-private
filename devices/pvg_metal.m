@@ -96,6 +96,8 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     /* Each plane's sampled guest bytes when last copied: only the planes the guest changed are copied, so a CPU
        write to one plane (a decoder refilling luma) does not wipe what the GPU drew into another (chroma, alpha). */
     uint64_t plane_hash[4];
+    /* Unmapped by the guest: its pages may already hold something else, so nothing is written back into them. */
+    _Atomic BOOL gone;
     /* A heap: private memory, a buffer over all of it. */
     id<MTLBuffer> heap_whole;
     /* A heap's or a private texture's copy in guest memory, and which side has the newest bytes. */
@@ -840,6 +842,32 @@ static void sync_iosurface(HvObject *s) {
         FILE *f = fopen(path, "wb");
         if (f) fwrite(from, 1, s->alloc, f), fclose(f);
     }
+}
+
+/* What the GPU drew into a multi-plane surface, back into the guest's pages (run once that drawing is done,
+   before its stamp is given back). Without it the guest's copy of a GPU-drawn surface stays empty: macOS 27's
+   WebKit draws page tiles (b3a8) in its GPU process, and WindowServer, when it maps the tile under its own
+   mapping id after the drawer's host IOSurface left the planar table (or never shared it), got a fresh surface
+   from those empty pages: Safari's page area blank, scroll bars and toolbar fine. The hashes are set to what is
+   copied, so sync_iosurface does not take it for a guest write. HV_PVG_WRITEBACK=0 turns it off. */
+static void write_back_iosurface(HvObject *s) {
+    if (!s->iosurface || !s->plane_count || !s->mapped || atomic_load(&s->gone)) return;
+    if (IOSurfaceGetPlaneCount(s->iosurface) < s->plane_count) return;
+    if (IOSurfaceLock(s->iosurface, kIOSurfaceLockReadOnly, NULL) != kIOReturnSuccess) return;
+    uint8_t *to = s->mapped + s->first;
+    for (uint32_t i = 0; i < s->plane_count && i < 4; i++) {
+        const uint8_t *src = IOSurfaceGetBaseAddressOfPlane(s->iosurface, i);
+        size_t src_row = IOSurfaceGetBytesPerRowOfPlane(s->iosurface, i);
+        size_t rows = MIN((size_t)s->plane_h[i], IOSurfaceGetHeightOfPlane(s->iosurface, i));
+        uint64_t dst_row = s->plane_row[i], dst_off = s->plane_from[i];
+        if (!src || !dst_row || dst_off > s->alloc || rows > (s->alloc - dst_off) / dst_row) continue;
+        size_t bytes = MIN((size_t)dst_row, src_row);
+        for (size_t y = 0; y < rows; y++)
+            memcpy(to + dst_off + y * dst_row, src + y * src_row, bytes);
+        s->plane_hash[i] = hash_bytes(to + dst_off, plane_bytes(s, i));
+    }
+    IOSurfaceUnlock(s->iosurface, kIOSurfaceLockReadOnly, NULL);
+    s->content_hash = guest_hash(s);
 }
 
 /* A surface (IOSurface in the guest): a texture over its guest pages, so the
@@ -1836,11 +1864,18 @@ typedef struct {
 /* One exec: {task, resources, buffers}, {ref, flags} per resource, {offset, length} per buffer. */
 /* Commits without waiting: the next batch can be encoded while the GPU does this one. */
 - (void)commit:(id<MTLCommandBuffer>)cb channel:(uint32_t)ch stamp:(uint32_t)stamp complete:(BOOL)complete {
+    [self commit:cb channel:ch stamp:stamp complete:complete writeBack:nil];
+}
+
+- (void)commit:(id<MTLCommandBuffer>)cb channel:(uint32_t)ch stamp:(uint32_t)stamp complete:(BOOL)complete writeBack:(NSArray<HvObject *> *)drawn {
     static int sync = -1; /* HV_PVG_SYNC: wait for the GPU after every batch */
     if (sync < 0) sync = getenv("HV_PVG_SYNC") != NULL;
     HvPvgLite *l = lite;
     atomic_fetch_add(&inflight, 1);
     [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
+        /* Before the stamp: once it is back the guest may read the pixels or hand the surface to another process. */
+        if (!done.error)
+            for (HvObject *s in drawn) write_back_iosurface(s);
         if (done.error) {
             self->failed++;
             fprintf(stderr, "hengevm: pvg-metal: command buffer: %s\n", done.error.localizedDescription.UTF8String);
@@ -1900,9 +1935,19 @@ typedef struct {
     [blit endEncoding];
     /* Bit 1: this exec writes it, so the guest's copy is out of date from here on. Never
        upload that over what the GPU drew: mostly zeros, which show as black boxes. */
+    static int writeback = -1;
+    if (writeback < 0) { const char *w = getenv("HV_PVG_WRITEBACK"); writeback = !(w && w[0] == '0'); }
+    NSMutableArray<HvObject *> *drawn = nil; /* multi-plane surfaces this exec draws into: see write_back_iosurface */
     for (uint32_t i = 0; i < nres; i++)
         if (res[i * 2 + 1] & 2) { /* and what it is made from: a texture in a heap is the heap's bytes */
-            for (HvObject *o = [self object:res[i * 2] task:task]; o; o = o->parent) o->guest_stale = YES;
+            HvObject *w = [self object:res[i * 2] task:task];
+            for (HvObject *o = w; o; o = o->parent) o->guest_stale = YES;
+            HvObject *s = w ? w->surface : nil;
+            /* 64 MB: 4K video frames are not drawn into here; a cap so one never costs a big copy per frame */
+            if (writeback && s && s->iosurface && s->plane_count && s->alloc <= (64u << 20) && ![drawn containsObject:s]) {
+                if (!drawn) drawn = [NSMutableArray new];
+                [drawn addObject:s];
+            }
         }
     id e = nil; /* the open encoder */
     uint32_t etype = 0;
@@ -1983,7 +2028,7 @@ typedef struct {
         [back endEncoding];
     }
     double t1 = now_seconds();
-    [self commit:cb channel:ch stamp:stamp complete:YES];
+    [self commit:cb channel:ch stamp:stamp complete:YES writeBack:drawn];
     double t2 = now_seconds();
     encode_time += t1 - t_begin, gpu_wait_time += t2 - t1;
     if (++execs % 2000 == 0) {
@@ -2573,6 +2618,7 @@ void hv_pvg_metal_unmap(HvPvgMetal *m, uint32_t mapping) {
         /* The last mapping of a shared multi-plane surface takes its table entry along: the entry holds the host
            IOSurface (4K video frames are 27-65 MB of Henge's own memory), and the guest reuses its memory for others. */
         HvObject *s = r->surfaces[@(mapping)];
+        if (s) atomic_store(&s->gone, YES);
         NSString *pk = s ? s->planar_key : nil;
         if (pk) {
             s->planar_key = nil;
