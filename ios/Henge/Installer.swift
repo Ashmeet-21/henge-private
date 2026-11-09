@@ -116,6 +116,9 @@ final class Installer: NSObject, ObservableObject {
                 phase = .done("\(release.name) is installed on \(name). Quit Henge (swipe it away) and open it again, then tap Start.")
             } catch {
                 HengeLog.log("install", "failed: \(error.localizedDescription)")
+                // The restore system may still be running (a failed restore does not end it): stop it, or it keeps its
+                // memory and the CPUs until Henge is closed.
+                if henge_vm_state() == 1 { henge_vm_stop() }
                 // A half-installed Mac is no use, and its disk can be many gigabytes. The download stays.
                 if let made, henge_vm_state() != 1 { try? FileManager.default.removeItem(at: made.directory) }
                 phase = .failed(error.localizedDescription)

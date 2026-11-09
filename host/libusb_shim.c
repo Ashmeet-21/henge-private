@@ -658,7 +658,7 @@ static int parse_config(const uint8_t *raw, int len, struct libusb_config_descri
     struct libusb_interface *ifs = calloc(c->bNumInterfaces ? c->bNumInterfaces : 1, sizeof *ifs);
     c->interface = ifs;
     struct libusb_interface_descriptor *cur = NULL;
-    for (int p = raw[0]; p + 2 <= len && raw[p] >= 2; p += raw[p]) {
+    for (int p = raw[0]; p + 2 <= len && raw[p] >= 2 && p + raw[p] <= len; p += raw[p]) {
         const uint8_t *q = raw + p;
         if (q[1] == LIBUSB_DT_INTERFACE && q[0] >= 9) {
             int n = q[2];

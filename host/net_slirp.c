@@ -286,6 +286,7 @@ int hv_net_attach(HvMachine *m, HvVirtioNet *n) {
     memset(&cfg, 0, sizeof cfg);
     cfg.version = 6; /* below 6 it calls the old register_poll_fd, which we leave unset */
     cfg.in_enabled = true;
+    cfg.disable_host_loopback = true; /* 10.0.2.2 is not this device's 127.0.0.1: nothing in the guest needs its services */
     inet_pton(AF_INET, "10.0.2.0", &cfg.vnetwork);
     inet_pton(AF_INET, "255.255.255.0", &cfg.vnetmask);
     inet_pton(AF_INET, "10.0.2.2", &cfg.vhost);

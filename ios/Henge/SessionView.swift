@@ -479,7 +479,7 @@ struct SessionView: View {
                     }
                     .pickerStyle(.segmented)
                     Toggle("Sharp edges", isOn: $sharpCursor)
-                    LabeledContent("Scroll speed", value: String(format: "%.1f×", scrollSpeed))
+                    LabeledContent("Mouse scroll speed", value: String(format: "%.1f×", scrollSpeed))
                     Slider(value: $scrollSpeed, in: 0.1...1.5)
                     Text("The Mac supplies a small pointer image. Enlarging it can look blurry; 1× is the sharpest on an iPad. Scroll speed changes apply immediately.")
                         .font(.footnote).foregroundStyle(.secondary)

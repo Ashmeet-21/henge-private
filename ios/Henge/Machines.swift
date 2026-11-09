@@ -40,7 +40,10 @@ enum GuestMemory {
             .volumeAvailableCapacityForImportantUsage ?? 0
         let room = free > 0 ? UInt64(max(free - (2 << 30), 0)) >> 20 : UInt64.max
         let reach = henge_largest_mapping_mb()
-        let ram = min(UInt64(mac.ramMB), room, reach > 512 ? reach - 512 : 0) / 512 * 512
+        // A 6 GB device: iOS closes Henge near 4 GB in all (the Mac's memory and the code cache), whatever the Mac asks
+        // for (one brought in from a bigger device, or the setting turned up).
+        let most = Device.hasLittleMemory ? UInt64(Device.suggestedRAMGB) << 10 : UInt64.max
+        let ram = min(UInt64(mac.ramMB), room, reach > 512 ? reach - 512 : 0, most) / 512 * 512
         HengeLog.log("session", "guest RAM \(ram) MB (asked \(mac.ramMB), disk room \(room), largest mapping \(reach))")
         return ram
     }
