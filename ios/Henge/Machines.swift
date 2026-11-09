@@ -137,12 +137,6 @@ final class Machines: ObservableObject {
     }
     nonisolated static func directory(for id: UUID) -> URL { root.appendingPathComponent(id.uuidString, isDirectory: true) }
 
-    /// Whether any Mac has been installed, read straight from the list (usable before `shared` exists).
-    nonisolated static var anyInstalled: Bool {
-        guard let data = try? Data(contentsOf: root.appendingPathComponent("machines.json")),
-              let list = try? JSONSerialization.jsonObject(with: data) as? [Any] else { return false }
-        return !list.isEmpty
-    }
     /// Where Finder file sharing puts what the user drops on Henge.
     nonisolated static var inbox: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0] }
 

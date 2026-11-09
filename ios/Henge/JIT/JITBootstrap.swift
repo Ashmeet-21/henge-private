@@ -64,10 +64,12 @@ enum JITBootstrap {
     /// has room for it: about 6 GB on 12 GB iPhones). A bigger cache fills and empties less often (macOS 27 filled
     /// 1 GB about once a minute) and costs more memory (its blocks' records come to about 0.75 of its size). Fixed for
     /// the launch: the region is claimed once.
-    /// Never 1.5 GB with about 6 GB of memory, whatever the limit says: there the region is real memory the phone lacks.
-    static let defaultCodeCacheMB: Int = !Device.hasLittleMemory && Entitlements.memoryLimitAtLaunch >= 5_500 << 20 ? 1536 : 1024
-    /// Devices with little memory can ask for half (Device.smallCodeRegion): any size up to the block held in the app's image takes its hole.
-    static let jitBytes: Int = Device.smallCodeRegion ? 512 << 20
+    /// Always 512 MB with about 6 GB (Device.hasLittleMemory), whatever was picked before: the region is claimed whole,
+    /// as real memory. With 1 GB, Henge took 2.85 GB with a 3 GB Mac on an iPhone 15 Plus and iOS closed it within four
+    /// minutes; 1.5 GB plus a 3 GB Mac hit the iPad's 4 GB limit 110 s into boot (2026-11-09). 512 MB took 1.6-1.9 GB.
+    /// Any size up to the block held in the app's image takes its hole.
+    static let defaultCodeCacheMB: Int = Device.hasLittleMemory ? 512 : Entitlements.memoryLimitAtLaunch >= 5_500 << 20 ? 1536 : 1024
+    static let jitBytes: Int = Device.hasLittleMemory ? 512 << 20
         : ((UserDefaults.standard.object(forKey: codeCacheKey) as? Int) ?? defaultCodeCacheMB) == 1536 ? 1536 << 20 : 1024 << 20
 
     /// True once the region is held. The memory budget needs this: after a

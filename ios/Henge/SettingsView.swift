@@ -8,7 +8,6 @@ struct SettingsView: View {
     @AppStorage(Trackpad.scrollSpeedKey) private var trackpadScroll = Trackpad.defaultScrollSpeed
     @AppStorage(Trackpad.pointerSpeedKey) private var trackpadPointer = Trackpad.defaultPointerSpeed
     @AppStorage(HardwareMouse.scrollSpeedKey) private var scrollSpeed = 0.3
-    @AppStorage(Device.smallCodeRegionKey) private var smallCodeRegion = Device.smallCodeRegionByDefault
     @AppStorage(Device.ramOnStorageKey) private var ramOnStorage = Device.hasLittleMemory
     @AppStorage(EngineTuning.fastFlushKey) private var fastFlush = true
     @AppStorage(EngineTuning.wfiSpinKey) private var wfiSpin = false
@@ -69,19 +68,19 @@ struct SettingsView: View {
                     LabeledContent("Extra memory", value: Entitlements.increasedMemory ? "On" : "Off")
                     LabeledContent("Extended addressing", value: Entitlements.extendedAddressing ? "On" : "Off")
                     LabeledContent("This \(Device.name)'s memory", value: ByteText.string(ProcessInfo.processInfo.physicalMemory))
-                    // One choice for the code region: 512 MB is Device.smallCodeRegion, the others JITBootstrap.codeCacheKey.
-                    Picker("Code cache", selection: Binding(get: { smallCodeRegion ? 512 : codeCacheMB },
-                                                            set: { mb in
-                                                                smallCodeRegion = mb == 512
-                                                                if mb != 512 { codeCacheMB = mb }
-                                                            })) {
-                        Text("512 MB").tag(512)
-                        Text("1 GB").tag(1024)
-                        Text("1.5 GB").tag(1536)
+                    if Device.hasLittleMemory {
+                        LabeledContent("Code cache", value: "512 MB")
+                    } else {
+                        Picker("Code cache", selection: $codeCacheMB) {
+                            Text("1 GB").tag(1024)
+                            Text("1.5 GB").tag(1536)
+                        }
+                        .pickerStyle(.segmented)
                     }
-                    .pickerStyle(.segmented)
                     Toggle("Keep the Mac's memory on storage while installing", isOn: $ramOnStorage)
-                    Text("The code cache is claimed whole, as real memory, when JIT turns on. A bigger one empties less often. With about 6 GB, 512 MB is the default: 1 GB took Henge to 2.85 GB with a 3 GB Mac and iOS closed it. Applies the next time Henge opens; if JIT stops turning on, choose a smaller one. Memory on storage is on by default with about 6 GB, for installs only; a running Mac always keeps its memory in RAM.")
+                    Text(Device.hasLittleMemory
+                         ? "The code cache is claimed whole, as real memory, when JIT turns on, so with about 6 GB it stays at 512 MB: bigger ones made iOS close Henge. Memory on storage is on by default here, for installs only; a running Mac always keeps its memory in RAM."
+                         : "The code cache is claimed whole, as real memory, when JIT turns on. A bigger one empties less often. Applies the next time Henge opens; if JIT stops turning on, choose 1 GB. Memory on storage is for installs only; a running Mac always keeps its memory in RAM.")
                         .font(.footnote).foregroundStyle(.secondary)
                     LabeledContent("Henge's limit", value: ByteText.string(UInt64(Entitlements.memoryLimitAtLaunch)))
                     LabeledContent("Free for Henge", value: ByteText.string(UInt64(henge_available_memory())))

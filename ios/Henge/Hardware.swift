@@ -67,20 +67,10 @@ enum Device {
     /// A device with about 6 GB (A14, A15 and A16 iPads and iPhones). iOS has no swap on these, so a 4 GB
     /// Mac plus the 1 GB code region can run the whole system out of memory (a restore killed by jetsam, #13).
     static let hasLittleMemory = ProcessInfo.processInfo.physicalMemory >> 20 < 7_000
-    static let smallCodeRegionKey = "henge.lowmem.smallCodeRegion"
     static let ramOnStorageKey = "henge.lowmem.ramOnStorage"
 
-    private static func setting(_ key: String) -> Bool {
-        UserDefaults.standard.object(forKey: key) as? Bool ?? hasLittleMemory
-    }
-    /// Half the code region: the translator flushes more often, which is slower but holds 512 MB less.
-    /// On by default with about 6 GB. The region is claimed whole when JIT turns on, so its size is real memory
-    /// from then on: with 1 GB, Henge took 2.85 GB with a 3 GB Mac on an iPhone 15 Plus, iOS thrashed its
-    /// compressor and killed Henge within four minutes. With 512 MB it took 1.6-1.9 GB and ran.
-    static var smallCodeRegion: Bool { UserDefaults.standard.object(forKey: smallCodeRegionKey) as? Bool ?? smallCodeRegionByDefault }
-    static var smallCodeRegionByDefault: Bool { hasLittleMemory }
     /// During a restore only: the Mac's memory in a file iOS can write out, instead of memory only its compressor can squeeze.
-    static var ramOnStorage: Bool { setting(ramOnStorageKey) }
+    static var ramOnStorage: Bool { UserDefaults.standard.object(forKey: ramOnStorageKey) as? Bool ?? hasLittleMemory }
 
     /// CPUs for a new Mac. A phone with about 6 GB has two fast cores: a third or fourth virtual CPU lands on
     /// a slow one, and every CPU then waits on the slowest whenever page tables change.

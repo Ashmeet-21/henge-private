@@ -65,20 +65,22 @@ static __thread uint32_t duty_count;
 static void park(HvCpu *cpu);
 static void unpark(HvCpu *cpu);
 
-static void duty_rest(HvCpu *cpu) {
+/* Returns 1 if it rested: parked, another CPU may have flushed every translation meanwhile. */
+static int duty_rest(HvCpu *cpu) {
     int duty = hv_knob[HV_K_DUTY];
-    if (duty <= 0 || duty >= 100) { duty_since = 0; return; }
-    if ((++duty_count & 63) != 0) return; /* the clock every 64 passes */
+    if (duty <= 0 || duty >= 100) { duty_since = 0; return 0; }
+    if ((++duty_count & 63) != 0) return 0; /* the clock every 64 passes */
     uint64_t now = mach_absolute_time();
-    if (!duty_since) { duty_since = now; return; }
+    if (!duty_since) { duty_since = now; return 0; }
     uint64_t ran = now - duty_since;
-    if (ran < 240000) return; /* 10 ms at 24 MHz */
+    if (ran < 240000) return 0; /* 10 ms at 24 MHz */
     uint64_t rest_us = ran / 24 * (uint64_t)(100 - duty) / (uint64_t)duty;
     if (rest_us > 50000) rest_us = 50000;
     park(cpu);
     usleep((useconds_t)rest_us);
     unpark(cpu);
     duty_since = mach_absolute_time();
+    return 1;
 }
 
 /* Held (hv_machine_hold): every CPU parks at its next pass and sleeps on hold_cv until let go. */
@@ -1015,8 +1017,17 @@ static int run_loop(HvCpu *cpu, int one) {
     __atomic_store_n(&cpu->pc_state->thread_port, (unsigned int)pthread_mach_thread_np(pthread_self()), __ATOMIC_RELEASE);
     unpark(cpu);
     for (;;) {
-        /* First, before anything can run guest code or read its clock (hv_machine_hold). */
-        if (__builtin_expect(__atomic_load_n(&hv_held, __ATOMIC_ACQUIRE), 0)) hold_wait(cpu);
+        /* First, before anything can run guest code or read its clock (hv_machine_hold), then the duty cap's rest.
+           Both park the CPU, and another may flush every translation meanwhile and be done before this one is back,
+           so the stub the last block left through may now belong to a new block: never chain it. (The dispatcher's
+           own parking, WFI and CPU_OFF, never has an exit waiting to be chained.) */
+        int rested = 0;
+        if (__builtin_expect(__atomic_load_n(&hv_held, __ATOMIC_ACQUIRE), 0)) hold_wait(cpu), rested = 1;
+        if (duty_rest(cpu)) rested = 1;
+        if (rested) {
+            pending_chain = NULL;
+            prev_b = NULL;
+        }
         if (__atomic_load_n(&m->flush_pending, __ATOMIC_SEQ_CST) || __atomic_load_n(&m->stw_active, __ATOMIC_SEQ_CST)) {
             stop_the_world(cpu);
             pending_chain = NULL;
@@ -1031,7 +1042,6 @@ static int run_loop(HvCpu *cpu, int one) {
             last_reason = HV_EXIT_EXCEPTION;
             continue;
         }
-        duty_rest(cpu);
         /* Someone asked the CPU to leave (the kicker, a device, an invalidation): service devices now. */
         int kicked = __atomic_exchange_n(&cpu->exit_req, 0, __ATOMIC_RELAXED) != 0;
         if (kicked && m->big_lock_on) {
