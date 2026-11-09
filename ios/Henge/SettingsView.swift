@@ -7,6 +7,7 @@ struct SettingsView: View {
     @AppStorage(HardwareMouse.reverseKey) private var reverseScrolling = false
     @AppStorage(HardwareMouse.scrollSpeedKey) private var scrollSpeed = 0.3
     @AppStorage(PhysicalMouseButtons.swapKey) private var swapMouseButtons = false
+    @AppStorage(HardwareKeys.windowsLayoutKey) private var windowsKeyboard = false
     @AppStorage(EngineTuning.refreshKey) private var refreshRate = 60
     @AppStorage(EngineTuning.fastFlushKey) private var fastFlush = true
     @AppStorage(EngineTuning.wfiSpinKey) private var wfiSpin = false
@@ -55,6 +56,9 @@ struct SettingsView: View {
                         }
                         Toggle("Swap physical right and middle buttons", isOn: $swapMouseButtons)
                         Text("Only enable this if your physical mouse's right and middle buttons are reversed in the Mac. Touch controls stay unchanged. Restart the Mac session to apply.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                        Toggle("Windows-layout keyboard", isOn: $windowsKeyboard)
+                        Text("For a keyboard made for Windows, such as most Logitech ones: Alt becomes Command and the Windows key becomes Option, so Mac shortcuts sit beside the space bar. Applies at once.")
                             .font(.footnote).foregroundStyle(.secondary)
                         Text("A Magic Keyboard or a Bluetooth mouse moves the Mac's pointer. Pointer speed changes apply the next time a Mac starts; scroll speed changes apply immediately.")
                             .font(.footnote).foregroundStyle(.secondary)

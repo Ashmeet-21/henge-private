@@ -158,7 +158,21 @@ enum HardwareKeys {
         return rest
     }
 
-    private static func key(_ usage: UInt8, down: Bool) {
+    /// A keyboard made for Windows (most Logitech ones) has Alt beside the space bar, where a Mac has Command.
+    /// On, Alt is Command and the Windows key is Option, on both sides, so shortcuts sit where a Mac's do.
+    static let windowsLayoutKey = "henge.keyboard.windowsLayout"
+
+    private static func key(_ pressed: UInt8, down: Bool) {
+        var usage = pressed
+        if UserDefaults.standard.bool(forKey: windowsLayoutKey) {
+            switch pressed {
+            case 0xe2: usage = 0xe3 // left Alt -> left Command
+            case 0xe3: usage = 0xe2 // left Windows -> left Option
+            case 0xe6: usage = 0xe7 // right Alt -> right Command
+            case 0xe7: usage = 0xe6 // right Windows -> right Option
+            default: break
+            }
+        }
         guard down || held.contains(usage) else { return }
         henge_vm_key_hid(usage, down ? 1 : 0)
         if usage < 0xe0 { lastKey = CACurrentMediaTime() }

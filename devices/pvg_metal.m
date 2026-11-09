@@ -2619,6 +2619,10 @@ void hv_pvg_metal_destroy(HvPvgMetal *m) {
             r->surfaces = nil;
             r->mapped_textures = nil;
             r->planar = nil;
+            r->planar_state = nil;
+            os_unfair_lock_lock(&wb_lock); /* the next Mac's mapping ids are its own */
+            [wb_unmapping removeAllObjects];
+            os_unfair_lock_unlock(&wb_lock);
             r->screen_tex = nil;
             r->cursor_tex = nil;
             r->last_cb = nil;
