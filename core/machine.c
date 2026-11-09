@@ -1,5 +1,6 @@
 #include "machine.h"
 
+#include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <mach/thread_switch.h>
 #include <pthread.h>
@@ -28,7 +29,7 @@ static void knobs_init(void) {
         hv_knob[i] = getenv(hv_knob_names[i]) ? atoi(getenv(hv_knob_names[i])) : 0;
     if (getenv("HV_NO_RAS") && !*getenv("HV_NO_RAS")) hv_knob[HV_K_NO_RAS] = 1;
     /* On unless asked: Golden Gate on the phone (2026-11-08) ran 200 process spawns ~3% faster with it, and none
-       of the checked skips (1 in 32 are checked, see sysreg.c) found an out-of-date entry. */
+       of the checked skips (1 in 32 were checked then; 1 in 128 since, see sysreg.c) found an out-of-date entry. */
     if (!getenv("HV_SWITCH_FLUSH")) hv_knob[HV_K_SWITCHFLUSH] = 2;
     if (!getenv("HV_IJC_PAGES")) hv_knob[HV_K_IJCPAGES] = 1;
     if (!getenv("HV_DNS_PROXY")) hv_knob[HV_K_DNSPROXY] = 1;
@@ -240,10 +241,27 @@ void hv_cpu_sync(HvCpu *self, HvCpu *target, uint64_t seq) {
         __atomic_store_n(&s->tlb_live, 0, __ATOMIC_SEQ_CST); /* others need not wait for this one meanwhile */
         ack_wake(s);
     }
-    int sleep = hv_knob[HV_K_SYNCWAIT];
+    int sleep = hv_knob[HV_K_SYNCWAIT], probed = !t0, probed_long = !t0;
+    if (s) __atomic_store_n(&s->phase, HV_PHASE_SYNC, __ATOMIC_RELAXED);
     for (uint32_t spins = 0;; spins++) {
         uint64_t ack = __atomic_load_n(&t->ack_seq, __ATOMIC_ACQUIRE);
         if (ack >= seq) break;
+        if (!probed && !(spins & 63) && mach_absolute_time() - t0 >= 2400) { /* 100 us: what is it doing? */
+            probed = 1;
+            thread_basic_info_data_t ti;
+            mach_msg_type_number_t cnt = THREAD_BASIC_INFO_COUNT;
+            int on = !t->thread || (thread_info(t->thread, THREAD_BASIC_INFO, (thread_info_t)&ti, &cnt) == KERN_SUCCESS && ti.run_state == TH_STATE_RUNNING);
+            mm->stats.sync_probe[on ? 1 : 0]++;
+            if (__atomic_load_n(&t->walk_seq, __ATOMIC_RELAXED) & 1) mm->stats.sync_probe[2]++;
+            if (__atomic_load_n(&t->ijc_seq, __ATOMIC_RELAXED) & 1) mm->stats.sync_probe[3]++;
+        }
+        if (probed && !probed_long && !(spins & 63) && mach_absolute_time() - t0 >= 24000) { /* 1 ms */
+            probed_long = 1;
+            thread_basic_info_data_t ti;
+            mach_msg_type_number_t cnt = THREAD_BASIC_INFO_COUNT;
+            int on = !t->thread || (thread_info(t->thread, THREAD_BASIC_INFO, (thread_info_t)&ti, &cnt) == KERN_SUCCESS && ti.run_state == TH_STATE_RUNNING);
+            mm->stats.sync_phase[on ? __atomic_load_n(&t->phase, __ATOMIC_RELAXED) % 5 : 5]++;
+        }
         if (!__atomic_load_n(&t->tlb_live, __ATOMIC_SEQ_CST)) break; /* parked: it does the work before it runs again */
         if (self) hv_cpu_process_requests(self);
         if (sleep && spins >= 64) {
@@ -264,10 +282,15 @@ void hv_cpu_sync(HvCpu *self, HvCpu *target, uint64_t seq) {
     if (s) {
         __atomic_store_n(&s->tlb_live, 1, __ATOMIC_SEQ_CST);
         hv_cpu_process_requests(self); /* anything that came in while we were not live */
+        __atomic_store_n(&s->phase, HV_PHASE_HELPER, __ATOMIC_RELAXED); /* TLBIs are waited for from a helper */
     }
     if (mm->stats_interval) {
+        uint64_t dt = mach_absolute_time() - t0;
+        int b = dt < 240 ? 0 : dt < 2400 ? 1 : dt < 24000 ? 2 : 3; /* 24 MHz ticks */
         mm->stats.syncs++;
-        mm->stats.sync_ticks += mach_absolute_time() - t0;
+        mm->stats.sync_ticks += dt;
+        mm->stats.sync_len[b]++;
+        mm->stats.sync_len_ticks[b] += dt;
     }
 }
 
@@ -338,7 +361,9 @@ void hv_machine_free(HvMachine *m) {
     for (int i = 0; i < m->nram; i++) {
         free(m->ram[i].code_pages);
         free(m->ram[i].page_gen);
-        free(m->ram[i].chain_heads);
+        free(m->ram[i].whint);
+        free(m->ram[i].ijc_va);
+        free(m->ram[i].xhead);
     }
     free(m->blocks);
     for (int i = 0; i < HV_MAX_CPUS; i++) {
@@ -370,9 +395,9 @@ int hv_machine_add_ram(HvMachine *m, uint64_t pa, uint64_t size, void *host, int
     r->page_gen = calloc(pages, sizeof *r->page_gen);
     r->npages = pages;
     r->whint = calloc(pages * HV_MAX_CPUS, sizeof *r->whint);
-    r->chain_heads = calloc(pages, sizeof *r->chain_heads);
     r->ijc_va = calloc(pages, sizeof *r->ijc_va);
-    return r->code_pages && r->page_gen && r->whint && r->chain_heads && r->ijc_va ? 0 : -1;
+    r->xhead = calloc(pages, sizeof *r->xhead);
+    return r->code_pages && r->page_gen && r->whint && r->ijc_va && r->xhead ? 0 : -1;
 }
 
 int hv_machine_add_mmio(HvMachine *m, uint64_t pa, uint64_t size, void *opaque,
@@ -420,11 +445,9 @@ void hv_invalidate_code(HvMachine *m, uint64_t pa) {
     pthread_mutex_lock(&m->tr_mu);
     uint64_t hold_start = m->stats_interval ? mach_absolute_time() : 0;
     if (m->stats_interval) m->stats.smc_lock_ticks += hold_start - wait_start;
-    uint32_t link = r->chain_heads[pg];
-    r->chain_heads[pg] = 0;
-    while (link) {
-        uint32_t idx = link - 1;
-        link = m->slot_xnext[idx];
+    for (uint32_t k = r->xhead[pg]; k;) {
+        uint32_t idx = k - 1;
+        k = m->slot_xnext[idx];
         m->slot_xnext[idx] = 0;
         if (m->stats_interval) m->stats.smc_link_checks++;
         m->slot_xpa[idx] = 0;
@@ -438,6 +461,7 @@ void hv_invalidate_code(HvMachine *m, uint64_t pa) {
         m->nxchained--;
         if (m->stats_interval) m->stats.smc_link_drops++;
     }
+    r->xhead[pg] = 0;
     if (m->stats_interval) m->stats.smc_hold_ticks += mach_absolute_time() - hold_start;
     pthread_mutex_unlock(&m->tr_mu);
     /* The indirect-branch cache may lead into the stale blocks: drop those entries (or, without HV_IJC_PAGES, the

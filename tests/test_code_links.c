@@ -46,36 +46,36 @@ int main(void) {
     target[3] = branch(BASE + PAGE + 12, BASE + 2 * PAGE);
     run(10);
     HvRam *region = &machine.ram[0];
-    check(region->chain_heads[0] && region->chain_heads[1], "real JIT branches indexed by target page");
+    check(region->xhead[0] && region->xhead[1], "real JIT branches indexed by target page");
 
     /* A large unrelated set must neither be examined nor unlinked when page 1 changes. */
     uint32_t unrelated_first = machine.nslots;
     for (unsigned i = 0; i < 1000; i++) {
         uint32_t slot = machine.nslots++;
         if (slot >= machine.max_slots) return 1;
-        machine.slot_xnext[slot] = region->chain_heads[2];
-        region->chain_heads[2] = slot + 1;
+        machine.slot_xnext[slot] = region->xhead[2];
+        region->xhead[2] = slot + 1;
         machine.slot_xpa[slot] = (BASE + 2 * PAGE) | 1;
         machine.slots[slot] = 0x1234;
         machine.nxchained++;
     }
     uint32_t affected = 0;
-    for (uint32_t link = region->chain_heads[1]; link; link = machine.slot_xnext[link - 1]) affected++;
-    uint32_t live = machine.nxchained, other_head = region->chain_heads[0];
+    for (uint32_t link = region->xhead[1]; link; link = machine.slot_xnext[link - 1]) affected++;
+    uint32_t live = machine.nxchained, other_head = region->xhead[0];
     uint64_t examined = machine.stats.smc_link_checks;
     uint32_t add_two = 0x91000800;
     check(hv_phys_write(&machine, BASE + PAGE, &add_two, 4) == 0, "write modified guest code");
-    check(!region->chain_heads[1] && machine.nxchained == live - affected, "only changed page's links removed");
+    check(!region->xhead[1] && machine.nxchained == live - affected, "only changed page's links removed");
     check(machine.stats.smc_link_checks - examined == affected, "invalidation work independent of unrelated links");
-    check(region->chain_heads[0] == other_head && region->chain_heads[2] != 0 &&
+    check(region->xhead[0] == other_head && region->xhead[2] != 0 &&
           machine.slots[unrelated_first] == 0x1234, "other pages' incoming links remain intact");
     run(20);
-    check(region->chain_heads[1] != 0, "invalidated slots can chain to replacement code");
+    check(region->xhead[1] != 0, "invalidated slots can chain to replacement code");
     hv_flush_blocks(&machine);
-    check(!region->chain_heads[0] && !region->chain_heads[1] && !region->chain_heads[2] && !machine.nxchained,
+    check(!region->xhead[0] && !region->xhead[1] && !region->xhead[2] && !machine.nxchained,
           "full flush clears all per-page lists before slot reuse");
     run(20);
-    check(region->chain_heads[0] && region->chain_heads[1], "chains rebuild after full flush");
+    check(region->xhead[0] && region->xhead[1], "chains rebuild after full flush");
     hv_machine_free(&machine);
     free(ram);
     return failures != 0;
