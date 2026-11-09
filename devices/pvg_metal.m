@@ -1871,10 +1871,7 @@ typedef struct {
     }
     const uint32_t *res = a + 3;
     const uint8_t *bufs = (const uint8_t *)(res + nres * 2);
-    static const char *trace_file;
-    static BOOL trace_checked;
-    if (!trace_checked) trace_checked = YES, trace_file = getenv("HV_PVG_TRACE_FILE");
-    tracing = trace_file && access(trace_file, F_OK) == 0;
+    tracing = hv_pvg_trace_on() != 0;
     if (tracing) fprintf(stderr, "trace: exec task %u, %u resources, %u buffers\n", task, nres, nbuf);
     double t_begin = now_seconds();
     id<MTLCommandBuffer> cb = [queue commandBuffer];
