@@ -67,12 +67,17 @@ struct SettingsView: View {
                     Toggle("Faster disk writes", isOn: $fastFlush)
                     Toggle("Quicker wake from idle", isOn: $wfiSpin)
                     Toggle("Superblocks (experimental)", isOn: $superblocks)
-                    Picker("Code cache", selection: $codeCacheMB) {
-                        Text("1 GB").tag(1024)
-                        Text("1.5 GB").tag(1536)
+                    if Device.hasLittleMemory {
+                        Text("Code cache: 512 MB, fixed on this \(Device.name): a bigger one and the Mac's memory together are more than iOS lets Henge have.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    } else {
+                        Picker("Code cache", selection: $codeCacheMB) {
+                            Text("1 GB").tag(1024)
+                            Text("1.5 GB").tag(1536)
+                        }
+                        Text("A bigger code cache empties less often and takes more memory; Henge picks 1.5 GB where there is room for it. Applies the next time Henge opens. If JIT stops turning on, choose 1 GB.")
+                            .font(.footnote).foregroundStyle(.secondary)
                     }
-                    Text("A bigger code cache empties less often and takes more memory; Henge picks 1.5 GB where there is room for it. Applies the next time Henge opens. If JIT stops turning on, choose 1 GB.")
-                        .font(.footnote).foregroundStyle(.secondary)
                     Text("macOS draws a frame for every refresh: 30 Hz leaves the most of the emulated CPU to apps, at the cost of choppier animation; 60 Hz is smoother. Faster disk writes order them without waiting for a full sync; a sudden power loss could lose the last ones. Quicker wake keeps an idle CPU watching for work for 50 µs, at some battery cost. Superblocks let translated code run past conditional branches. Changes apply the next time a Mac starts.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }

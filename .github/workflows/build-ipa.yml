@@ -1,0 +1,75 @@
+# Builds Henge.ipa on a Mac runner, for people without a Mac. The sideloader signs it.
+# Follows the README's Building section, with Husk's prebuilt pieces built from source.
+name: Build IPA
+on:
+  workflow_dispatch:
+  push:
+    branches: [ipad-a16-lowmem, a16-polish, ipad-stock]
+
+jobs:
+  ipa:
+    runs-on: xcode-27
+    timeout-minutes: 90
+    env:
+      HUSK: ${{ github.workspace }}/husk
+      IOS_DEPS: ${{ github.workspace }}/husk/build/ios-arm64/sysroot
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Leviidev/Husk
+          path: husk
+      - name: Tools
+        run: |
+          brew install xcodegen meson ninja pkg-config cmake nasm autoconf automake libtool bison gettext
+          rustup target add aarch64-apple-ios || { brew install rustup && rustup-init -y && . "$HOME/.cargo/env" && rustup target add aarch64-apple-ios; }
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          mkdir -p "$HOME/Desktop"
+      # Husk's source tarballs come from GitHub release downloads, which can answer 504 for an hour: keep them
+      - uses: actions/cache@v4
+        with:
+          path: husk/third_party/sources
+          key: husk-sources-${{ hashFiles('husk/scripts/sources.sh') }}
+      - name: Husk dependencies (libslirp, glib, on-device pairing)
+        working-directory: husk
+        run: |
+          # qemu (~140 MB) is not used by the pieces built here (libffi, glib, libslirp, rppairing): don't download it
+          sed -i '' 's/ "$QEMU_SRC"//g' scripts/fetch_sources.sh
+          grep -q QEMU_SRC scripts/fetch_sources.sh && { echo "qemu still listed in fetch_sources.sh"; exit 1; }
+          # libffi and libslirp ship in ci/sources (GitHub release downloads were failing); fetch skips files it has
+          (cd ../ci/sources && shasum -a 256 -c SHA256SUMS)
+          mkdir -p third_party/sources && cp ../ci/sources/*.tar.gz third_party/sources/
+          # GitHub release downloads sometimes answer 504 for a while: try again rather than fail the build
+          for try in 1 2 3 4 5 6; do ./scripts/fetch_sources.sh && break; [ $try = 6 ] && exit 1; echo "fetch failed, retry $try in 60 s"; sleep 60; done
+          # glib's build fetches pcre2 from Meson's WrapDB, which also answers 504 at times
+          for try in 1 2 3 4 5; do ./scripts/build_ios.sh libffi glib libslirp && break; [ $try = 5 ] && exit 1; echo "dependency build failed, retry $try in 90 s"; sleep 90; done
+          ./scripts/build_rppairing_ios.sh
+      - name: Henge
+        run: |
+          ios/scripts/fetch_deps.sh
+          tools/build_ios_restore.sh
+          make ios-lib IOS_DEPS="$IOS_DEPS"
+          mkdir -p ios/build
+          ios/scripts/package_ipa.sh
+      - name: Build log on failure
+        if: failure()
+        run: |
+          grep -E "error:|BUILD" ios/build/DerivedData.buildlog | sort -u | tail -40 || true
+          tail -30 husk/build/logs/*.log || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Henge-ipa
+          path: ~/Desktop/Henge.ipa
+          if-no-files-found: error
+          retention-days: 30
+      # The engine's own tests, on this Mac runner: the same core/ code the IPA runs, checked on arm64.
+      - name: Engine tests
+        if: always()
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          for t in test_classify test_operands test_mmu test_devices; do
+            echo "::group::$t"
+            make "build/$t" >/dev/null && "./build/$t" 2>&1 | tail -15 && echo "PASS $t" || echo "::error::FAIL $t"
+            echo "::endgroup::"
+          done

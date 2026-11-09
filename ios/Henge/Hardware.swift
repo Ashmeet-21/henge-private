@@ -38,15 +38,20 @@ enum Device {
     static var suggestedRAMGB: Int {
         let mb = ProcessInfo.processInfo.physicalMemory >> 20
         // m4 fork: an 8 GB iPad (7.4 GB usable) thrashes and kills the Mac at 6 GB: 16 GB devices only.
-        return mb >= 14_000 ? 8 : mb >= 10_000 ? 6 : 4
+        // About 6 GB: a 4 GB Mac ran the phone out of memory once booted (jetsam vm-pageshortage); 3 GB ran.
+        return mb >= 14_000 ? 8 : mb >= 10_000 ? 6 : mb >= 7_000 ? 4 : 3
     }
+
+    /// A device with about 6 GB (A14, A15 and A16 iPads and iPhones). iOS has no swap on these and gives an app
+    /// about 4 GB, so the code region and the Mac's memory have to fit in that together.
+    static let hasLittleMemory = ProcessInfo.processInfo.physicalMemory >> 20 < 7_000
 
     /// The choices for a Mac's memory, in GB.
     static let memoryChoices = 1...16
 
     /// What a choice risks on this device, if anything. An install always gets at least 2 GB (Installer.install).
     static func memoryNote(_ gb: Int) -> String? {
-        if gb < 4 { return "macOS has little room under 4 GB, so it can be very slow." }
+        if gb < 4 && !hasLittleMemory { return "macOS has little room under 4 GB, so it can be very slow." }
         if gb > suggestedRAMGB { return "More than \(suggestedRAMGB) GB is a lot for this \(name): iOS may close Henge when macOS gets busy." }
         return nil
     }

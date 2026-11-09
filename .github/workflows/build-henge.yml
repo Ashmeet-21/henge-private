@@ -14,10 +14,8 @@
 name: Build Henge IPA
 
 on:
+  # This fork builds with build-ipa.yml on push; this one only by hand (a private repo's macOS minutes count 10x).
   workflow_dispatch: {}
-  push:
-    branches:
-      - '**'
 
 env:
   HUSK: ${{ github.workspace }}/Husk
