@@ -276,6 +276,7 @@ void hv_ijc_drop_asid(HvCpu *cpu, uint16_t asid) {
 }
 
 void hv_ijc_reset(HvCpu *cpu, int kernel) {
+    if (cpu->m && cpu->m->stats_interval) cpu->m->stats.ijc_reset_kind[kernel ? 1 : 0]++;
     ret_new(cpu, kernel);
     if (cpu->pc_state) cpu->pc_state->last_fill[0] = cpu->pc_state->last_fill[1] = 0;
     /* Every entry of the half is dead now (new ids or kernel generation): so are their hints. */
@@ -379,7 +380,7 @@ static int maps_writable(const HvTlbEntry *e, const uint8_t *host_page) {
 
 /* RAM page pg just became code: drop write permission from cpu's entries for it. */
 void hv_tlb_protect_code_page(HvCpu *cpu, HvRam *ram, uint64_t pg) {
-    uint64_t *hint = &ram->whint[pg * HV_MAX_CPUS + cpu->index];
+    uint64_t *hint = &ram->whint[(size_t)cpu->index * ram->npages + pg];
     uint64_t h = __atomic_exchange_n(hint, 0, __ATOMIC_SEQ_CST);
     const uint8_t *host_page = ram->host + (pg << HV_TLB_PAGE_BITS);
     if (cpu->m) if (cpu->m->stats_interval) cpu->m->stats.protect_kind[h & HV_WHINT_MANY ? 2 : h ? 1 : 0]++;
@@ -530,26 +531,28 @@ void hv_ijc_drop_range(HvCpu *cpu, uint64_t va, uint64_t len, int asid) {
             return;
         }
     }
-    if (last - first >= 4096) { /* scanning the whole set costs more than the cold start: drop the address space */
+    /* Page by page, but only in the range's 32 MB chunks that hold cached targets (a big unmapping, a heap or a
+       file, mostly holds none); past 4096 such pages, scanning costs more than the cold start: drop the address space. */
+    uint64_t c0 = va >> 25, c1 = (va + len - 1) >> 25, n = 0;
+    int wide = c1 - c0 >= 255; /* the chunk bits wrap at 8 GB */
+    for (uint64_t c = c0; !wide && c <= c1 && n < 4096; c++)
+        if (cpu->pc_state->cid_chunks[cid][(c & 255) >> 6] >> (c & 63) & 1) {
+            uint64_t a = c << 11 > first ? c << 11 : first, b = ((c + 1) << 11) - 1 < last ? ((c + 1) << 11) - 1 : last;
+            n += b - a + 1;
+        }
+    if (wide || n >= 4096) {
+        if (m->stats_interval) m->stats.ijc_reset_kind[3]++;
         hv_ijc_drop_asid(cpu, (uint16_t)asid);
         return;
     }
-    {
-        for (uint64_t p = first; p <= last; p++)
+    for (uint64_t c = c0; c <= c1; c++) {
+        if (!(cpu->pc_state->cid_chunks[cid][(c & 255) >> 6] >> (c & 63) & 1)) continue;
+        uint64_t a = c << 11 > first ? c << 11 : first, b = ((c + 1) << 11) - 1 < last ? ((c + 1) << 11) - 1 : last;
+        for (uint64_t p = a; p <= b; p++)
             if (ucode_has(cpu->pc_state, cid, p << HV_TLB_PAGE_BITS)) {
                 m->stats.reset_why[2]++;
                 ijc_clear_page(cpu, p << HV_TLB_PAGE_BITS, 0, salt, 1);
             }
-        return;
-    }
-    for (uint32_t i = 0; i < 1u << HV_UCODE_BITS; i++) {
-        uint64_t k = cpu->pc_state->ucode[i];
-        if (!k || (k - 1) >> 40 != cid) continue;
-        uint64_t p = (k - 1) & 0xffffffffffull;
-        if (p >= (first & 0xffffffffffull) && p <= (last & 0xffffffffffull)) {
-            m->stats.reset_why[2]++;
-            ijc_clear_page(cpu, p << HV_TLB_PAGE_BITS, 0, salt, 1);
-        }
     }
 }
 
@@ -567,7 +570,7 @@ static void stash_drop(HvPerCpu *p, int asid);
    this CPU now maps it writable twice, makes the protector scan). The check
    that must follow, after a full fence, is write_guard's last two lines. */
 static void write_hint(HvCpu *cpu, HvRam *ram, uint64_t pg, uint32_t code) {
-    uint64_t *hint = &ram->whint[pg * HV_MAX_CPUS + cpu->index];
+    uint64_t *hint = &ram->whint[(size_t)cpu->index * ram->npages + pg];
     uint64_t mine = code + 1, old = __atomic_load_n(hint, __ATOMIC_RELAXED), now = old;
     const uint8_t *host_page = ram->host + (pg << HV_TLB_PAGE_BITS);
     if (!(old & HV_WHINT_MANY)) {

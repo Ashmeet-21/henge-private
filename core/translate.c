@@ -50,7 +50,7 @@ typedef struct {
     uint64_t site;      /* guest PC of the instruction that branches out of line */
     uint32_t retry;     /* loads and stores: where their translation starts, to run again after a refill */
     uint32_t rflags;    /* hv_tlb_refill's flags for it (0: no refill, straight to the helper) */
-    uint8_t plain;      /* exits: an ordinary branch (see put_branch_exit) */
+    uint8_t plain;      /* exits: an ordinary branch (see put_branch_exit); 2: one whose exit_req check is done already */
 } Ool;
 
 /* Loads and stores on one base register, close together in a block: the first
@@ -391,7 +391,7 @@ static int use_xjump(void) {
 }
 
 static void put_branch_exit(Emit *e, uint64_t target, int plain) {
-    int check = !(plain && target > e->cur_pc && !check_exits_always());
+    int check = !(plain && (target > e->cur_pc || plain == 2) && !check_exits_always());
     int p0 = e->in_cold;
     e->site_direct = 0;
     uint32_t slot_index = ~0u;
@@ -775,6 +775,38 @@ static void put_return(Emit *e) {
     if (!p0) cold_off(e);
 }
 
+/* HV_HOIST_CHECK: a conditional branch back (a loop's) tests exit_req before it, in the hot part, where the test is
+   one load and a branch not taken; its exit then needs none, so chaining takes the guest's branch straight to the
+   target block, one taken branch an iteration (as forward ones are) where the exit's own test made it two. Asked to
+   leave: the branch's condition again, and out to the dispatcher at whichever PC it picks. bare: the branch
+   instruction with no offset, x15 free. */
+static int hoist_check(Emit *e, uint64_t target, uint64_t pc) {
+    return hv_knob[HV_K_HOIST] && target <= pc && !check_exits_always() && !e->no_ijc;
+}
+
+static void put_exit_to(Emit *e, uint64_t va) { /* to the dispatcher at va, guest x0/x1 kept */
+    put(e, STP_X(0, 1, 28, 0));
+    put_lit(e, 0, va);
+    put(e, STR_X(0, 28, HV_CPU_PC));
+    put(e, LDR_X(1, 28, HV_CPU_EXIT));
+    put(e, BR_X(1));
+}
+
+static void put_hoisted_check(Emit *e, uint32_t bare, uint64_t target, uint64_t pc) {
+    put(e, 0xb9400000u | (HV_CPU_EXIT_REQ / 4) << 10 | 28 << 5 | 15); /* ldr w15, [x28, #exit_req] */
+    uint32_t to_req = e->n;
+    put(e, 0x35000000u | 15);                                         /* cbnz w15, asked (below) */
+    int p0 = e->in_cold;
+    if (!p0) cold_on(e);
+    link_here(e, to_req, p0);
+    uint32_t to_taken = e->n;
+    put(e, bare);                                                     /* the guest's condition: taken? */
+    put_exit_to(e, pc + 4);
+    patch_branch(&e->w[to_taken], (int64_t)e->n - to_taken);
+    put_exit_to(e, target);
+    if (!p0) cold_off(e);
+}
+
 /* Ends the block (returns 1), or 0 for a conditional branch the block goes on past. */
 static int translate_branch(Emit *e, uint32_t insn, uint64_t pc) {
     if ((insn & 0x7c000000) == 0x14000000) { /* B, BL */
@@ -793,8 +825,10 @@ static int translate_branch(Emit *e, uint32_t insn, uint64_t pc) {
             put_branch_exit(e, target, 1);
             return 1;
         }
+        int hoist = hoist_check(e, target, pc);
+        if (hoist) put_hoisted_check(e, 0x54000000u | cond, target, pc);
         put(e, 0x54000000u | cond);
-        put_ool(e, (Ool){.kind = OOL_EXIT, .pc = target, .plain = 1});
+        put_ool(e, (Ool){.kind = OOL_EXIT, .pc = target, .plain = (uint8_t)(hoist ? 2 : 1)});
         if (superblocks() && go_on(e, pc)) return 0;
         put_branch_exit(e, pc + 4, 1);
         return 1;
@@ -805,8 +839,10 @@ static int translate_branch(Emit *e, uint32_t insn, uint64_t pc) {
     uint32_t bare = tb ? insn & ~(0x3fffu << 5) : insn & ~(0x7ffffu << 5);
     int rt = insn & 0x1f;
     if (!is_stolen(rt)) {
+        int hoist = hoist_check(e, target, pc);
+        if (hoist) put_hoisted_check(e, bare, target, pc);
         put(e, bare);
-        put_ool(e, (Ool){.kind = OOL_EXIT, .pc = target, .plain = 1});
+        put_ool(e, (Ool){.kind = OOL_EXIT, .pc = target, .plain = (uint8_t)(hoist ? 2 : 1)});
         if (superblocks() && go_on(e, pc)) return 0;
         put_branch_exit(e, pc + 4, 1);
         return 1;

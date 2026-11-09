@@ -380,6 +380,7 @@ void hv_tlbi_apply(HvCpu *cpu, uint32_t op1, uint32_t crn, uint32_t crm, uint32_
         hv_tlb_flush_user(cpu);
         hv_tlb_stash_drop(cpu, (int)(xt >> 48));
         cpu->m->stats.reset_why[1]++;
+        if (cpu->m->stats_interval) cpu->m->stats.ijc_reset_kind[2]++;
         hv_ijc_drop_asid(cpu, (uint16_t)(xt >> 48));
     } else {
         if (cpu->m->log >= 2)

@@ -283,6 +283,30 @@ int main(void) {
         }
     }
 
+    /* A big range TLBI (128 MB) of one address space: only the cached targets in it go, found through the 32 MB chunks
+       that hold any; the address space keeps its id (and so its other targets). */
+    {
+        hv_cpu_reset(&cpu, &m);
+        cpu.tcr_el1 = 0;
+        cpu.ttbr0_el1 = 7ull << 48;
+        hv_ijc_switch(&cpu);
+        uint64_t salt = cpu.ijc_salt[0];
+        uint16_t cid = cpu.asid_cid[7];
+        static const uint64_t vas[2] = {0x203004010ull, 0x210000020ull}; /* in the range (its 3rd chunk), past it */
+        uint64_t *ents[2];
+        static HvBlock fake[2];
+        for (int i = 0; i < 2; i++) {
+            fake[i] = (HvBlock){.va = vas[i], .flags = 0, .code = (uint32_t *)(uintptr_t)0x1234};
+            hv_ijc_fill(&cpu, &fake[i]);
+            ents[i] = m.percpu[0].ijc + (size_t)hv_ijc_index(vas[i] ^ salt) * 2;
+        }
+        hv_ijc_drop_range(&cpu, 0x200000000ull, 128ull << 20, 7);
+        checks += 3;
+        if (ents[0][0] == (vas[0] ^ salt)) printf("  FAIL big range kept a target in it\n"), failures++;
+        if (ents[1][0] != (vas[1] ^ salt)) printf("  FAIL big range dropped a target past it\n"), failures++;
+        if (cpu.asid_cid[7] != cid) printf("  FAIL big range dropped the whole address space\n"), failures++;
+    }
+
     /* Another CPU's big range TLBI (64 user pages of ASID 5: over the 32 done from here by default). With HV_RANGE_DROP it is done from here in one pass:
        the second CPU's TLB slots and stashed entries in the range go, the rest stay, nothing is queued for it.
        Without, it is queued for that CPU to do (as before) and only happens when it does. */
