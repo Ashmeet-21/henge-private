@@ -12,7 +12,7 @@ import UIKit
 @MainActor
 enum MemoryGiver {
     static let enabledKey = "henge.perf.giveMemoryBack"
-    static var enabled: Bool { UserDefaults.standard.object(forKey: enabledKey) as? Bool ?? true }
+    static var enabled: Bool { UserDefaults.standard.object(forKey: enabledKey) as? Bool ?? false }
     /// Asked back before the Mac pauses in the background, percent of its memory.
     static let backgroundPercent = 25
     /// Per memory warning, and the most warnings may take, percent of the Mac's memory.

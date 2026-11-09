@@ -84,8 +84,18 @@ enum EngineTuning {
         if d.bool(forKey: superblocksKey) { env["HV_SUPERBLOCKS"] = "1" } else { unsetenv("HV_SUPERBLOCKS") }
         if d.bool(forKey: wfiSpinKey) { env["HV_WFI_SPIN"] = "50" }
         if d.object(forKey: fastFlushKey) as? Bool == false { env["HV_FLUSH"] = "0" }
-        // The memory balloon device, asked for nothing at boot (MemoryGiver asks when iOS needs memory).
-        if d.object(forKey: MemoryGiver.enabledKey) as? Bool ?? true { env["HV_BALLOON"] = "0" } else { unsetenv("HV_BALLOON") }
+        // The memory balloon device, asked for nothing at boot (MemoryGiver asks when iOS needs memory). Off unless
+        // turned on: in every log so far the Mac handed over 0 MB, and a misread page list would free memory macOS still uses.
+        if d.object(forKey: MemoryGiver.enabledKey) as? Bool ?? false { env["HV_BALLOON"] = "0" } else { unsetenv("HV_BALLOON") }
+        // About 6 GB (2 CPUs, a 512 MB code cache that empties every 30-40 s in Setup): the engine as it was when the
+        // iPhone got through Setup Assistant (2026-11-06, bc695ec). macOS panicked in Setup on the iPad three times with
+        // these on (launchd SIGSEGV, APFS use-after-free, 2026-11-09). henge-env.txt can still turn any of them back on.
+        if Device.hasLittleMemory {
+            env["HV_KICK_ALL"] = "1"     // every CPU kicked every 1 ms (upstream's way), not only when its timer is due
+            env["HV_SWITCH_FLUSH"] = "0" // never leave out the guest's TLBI VMALLE1 after a process switch
+            env["HV_WALK_LOG"] = "0"     // a remote TLB drop waits for every walk, not only those of its own pages
+            env["HV_IJC_PAGES"] = "0"    // a code change drops every cached branch target, not only its page's
+        }
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         // GPU command trace: on while Documents/trace-on exists (it is checked every frame, so it can be toggled live).
         env["HV_PVG_TRACE_FILE"] = docs.appendingPathComponent("trace-on").path
