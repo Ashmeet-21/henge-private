@@ -669,10 +669,9 @@ static void walk_begin(HvCpu *cpu, uint64_t va) {
     HvPerCpu *p = cpu->pc_state;
     if (!p) return;
     uint32_t k = p->walk_seq >> 1; /* only this CPU moves it */
-    /* The entry is walk k - WALK_LOG's too: a reader that sees it rewritten must also see walk_seq at 2k or past it
-       (walks_elsewhere's acquire fence pairs with this one; walk_end's release does not order this later store). */
-    __atomic_thread_fence(__ATOMIC_RELEASE);
-    __atomic_store_n(&p->walk_page[k & (WALK_LOG - 1)], va == HV_WALK_ANY ? HV_WALK_ANY : va & WALK_PAGE_BITS, __ATOMIC_RELAXED);
+    /* The entry is walk k - WALK_LOG's too: a reader that sees it rewritten must also see walk_seq at 2k or past it.
+       A release store (walks_elsewhere's acquire fence pairs with it; walk_end's release does not order a later store). */
+    __atomic_store_n(&p->walk_page[k & (WALK_LOG - 1)], va == HV_WALK_ANY ? HV_WALK_ANY : va & WALK_PAGE_BITS, __ATOMIC_RELEASE);
     __atomic_add_fetch(&p->walk_seq, 1, __ATOMIC_SEQ_CST); /* after the log entry, as its release */
 }
 

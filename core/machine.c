@@ -69,7 +69,7 @@ static int init_rest(HvMachine *m) {
     if (getenv("HV_HOIST_CHECK")) hv_knob[HV_K_HOIST] = atoi(getenv("HV_HOIST_CHECK"));
     /* On unless asked: a code change used to drop every CPU's whole branch cache (~100/s with JavaScriptCore's JIT
        on the Mac bench, 300-390K refills/s after); now only the page's targets (Mac 2026-11-09: resets 195 -> 2/s,
-       JIT check of 200 recompiled functions correct and ~4% faster). */
+       a JIT check of 200 recompiled functions correct; bench times the same within noise). */
     hv_knob[HV_K_IJCPAGES] = getenv("HV_IJC_PAGES") ? atoi(getenv("HV_IJC_PAGES")) : 1;
     hv_knob[HV_K_DNSPROXY] = getenv("HV_DNS_PROXY") ? atoi(getenv("HV_DNS_PROXY")) : 1;
     /* So the tests can run the translator these ways too (the iOS and --phone paths read them in knobs_init). */

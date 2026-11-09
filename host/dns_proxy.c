@@ -45,8 +45,9 @@ typedef struct {
     int nans, nodata, failed, done;
 } Query;
 
-static atomic_int inflight;
+static atomic_int inflight, unanswered_in_a_row;
 static atomic_ullong answered, handed_back, timed_out;
+#define GIVE_UP 8 /* lookups in a row the resolver took but never answered: back to libslirp for the session */
 
 static int64_t now_ms(void) {
     struct timespec ts;
@@ -209,7 +210,15 @@ static void *lookup(void *arg) {
             }
         }
         DNSServiceRefDeallocate(ref);
-        if (!q->done || q->failed) atomic_fetch_add(&timed_out, 1);
+        if (!q->done || q->failed) {
+            atomic_fetch_add(&timed_out, 1);
+            if (atomic_fetch_add(&unanswered_in_a_row, 1) + 1 == GIVE_UP && hv_knob[HV_K_DNSPROXY]) {
+                hv_knob[HV_K_DNSPROXY] = 0; /* not hv_knob_set: no translation depends on it */
+                fprintf(stderr, "hengevm: dns: %d lookups in a row unanswered by the system resolver: libslirp answers from now on\n", GIVE_UP);
+            }
+        } else {
+            atomic_store(&unanswered_in_a_row, 0);
+        }
         reply(q, q->done && !q->failed ? 0 : 2); /* SERVFAIL when nothing came */
         atomic_fetch_add(&answered, 1);
     }
