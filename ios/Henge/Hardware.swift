@@ -68,16 +68,70 @@ enum Device {
     static let chipTooOldText = "macOS won't run on this \(name). Henge needs an A14 or M1 chip or newer."
 }
 
-/// A keyboard attached to the device. iOS reports each key going down and coming up by its HID usage,
-/// which is what the Mac's USB keyboard sends, so every key and modifier goes straight across.
+/// A keyboard attached to the device, by HID usage, which is what the Mac's USB keyboard sends, so every
+/// key and modifier goes straight across. GameController reports each key going down and coming up.
+/// UIKit's presses are kept for when it has no keyboard: on an iPad on iPadOS 27 they never came, not
+/// to a plain view nor to one taking text (that got only text, so no modifiers or shortcuts).
 enum HardwareKeys {
     private static var held: Set<UInt8> = []
     private static var lastKey: CFTimeInterval = 0
+    private static var observers: [NSObjectProtocol] = []
+    private static var keyboard: GCKeyboard?
+    private static var noted: Set<String> = []
+    private static var gameControllerTyped = false
+
+    /// GameController has the keyboard, and has sent a key, so presses and the text iOS makes of its
+    /// keys aren't sent again. Until then they are, should it never send any.
+    static var fromGameController: Bool { keyboard != nil && gameControllerTyped }
 
     /// With the on-screen keyboard's view holding the keyboard, iOS may also offer a hardware key as
     /// text, and again as it repeats. The Mac has the key already, and repeats it itself.
     static var keyJustPressed: Bool {
-        held.contains { $0 < 0xe0 } || CACurrentMediaTime() - lastKey < 0.1
+        fromGameController || held.contains { $0 < 0xe0 } || CACurrentMediaTime() - lastKey < 0.1
+    }
+
+    static func start() {
+        attach(GCKeyboard.coalesced)
+        observers.append(NotificationCenter.default.addObserver(forName: .GCKeyboardDidConnect, object: nil, queue: .main) { _ in
+            HardwareKeys.attach(GCKeyboard.coalesced)
+        })
+        observers.append(NotificationCenter.default.addObserver(forName: .GCKeyboardDidDisconnect, object: nil, queue: .main) { _ in
+            HardwareKeys.releaseAll()
+            HardwareKeys.attach(GCKeyboard.coalesced)
+        })
+    }
+
+    static func stop() {
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers.removeAll()
+        attach(nil)
+        releaseAll()
+    }
+
+    private static func attach(_ next: GCKeyboard?) {
+        guard next !== keyboard else { return }
+        keyboard?.keyboardInput?.keyChangedHandler = nil
+        keyboard = next
+        gameControllerTyped = false
+        guard let input = next?.keyboardInput else {
+            keyboard = nil
+            return
+        }
+        HengeLog.log("input", "hardware keyboard by GameController")
+        input.keyChangedHandler = { _, _, code, down in
+            let raw = Int(code.rawValue)
+            guard raw >= 0x04, raw <= 0xe7 else { return }
+            // A sheet's text field (the Mac's name) types into the sheet, not the Mac.
+            guard !down || !HardwareKeys.sheetOpen else { return }
+            HardwareKeys.note("first key by GameController")
+            HardwareKeys.gameControllerTyped = true
+            HardwareKeys.key(UInt8(raw), down: down)
+        }
+    }
+
+    private static var sheetOpen: Bool {
+        UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
+            .contains { $0.isKeyWindow && $0.rootViewController?.presentedViewController != nil }
     }
 
     /// Sends the presses that are keys, and returns the rest.
@@ -98,57 +152,27 @@ enum HardwareKeys {
                 rest.insert(press)
                 continue
             }
-            let usage = UInt8(raw)
-            if usage >= 0xe0 {
-                fromFlags.remove(usage) // its own presses come after all
-                note(String(format: "modifier 0x%02x %@", usage, down ? "down" : "up"))
-            } else if down, let flags = press.key?.modifierFlags {
-                matchModifiers(flags)
-            }
-            henge_vm_key_hid(usage, down ? 1 : 0)
-            if usage < 0xe0 { lastKey = CACurrentMediaTime() }
-            if down {
-                held.insert(usage)
-            } else {
-                held.remove(usage)
-                if usage < 0xe0 { StickyKeys.shared.releaseAll() } // one key after a tap on ⌃, ⌥ or ⌘
-                if !held.contains(where: { $0 < 0xe0 }) { releaseFromFlags() }
-            }
+            note("first key by UIKit presses")
+            if !fromGameController { key(UInt8(raw), down: down) }
         }
         return rest
     }
 
-    /// Modifiers put down from a key's flags, let go with the last key.
-    private static var fromFlags: Set<UInt8> = []
-    private static let modifiers: [(flag: UIKeyModifierFlags, left: UInt8, right: UInt8)] = [
-        (.control, 0xe0, 0xe4), (.shift, 0xe1, 0xe5), (.alternate, 0xe2, 0xe6), (.command, 0xe3, 0xe7),
-    ]
-
-    /// With a text view holding the keyboard, iOS can keep a modifier's own presses to itself, but every
-    /// key comes with the modifiers held as it went down.
-    private static func matchModifiers(_ flags: UIKeyModifierFlags) {
-        for m in modifiers where flags.contains(m.flag) && !held.contains(m.left) && !held.contains(m.right) {
-            henge_vm_key_hid(m.left, 1)
-            held.insert(m.left)
-            fromFlags.insert(m.left)
-            note(String(format: "modifier 0x%02x down from a key's flags", m.left))
-        }
-    }
-
-    private static func releaseFromFlags() {
-        for usage in fromFlags {
-            henge_vm_key_hid(usage, 0)
+    private static func key(_ usage: UInt8, down: Bool) {
+        guard down || held.contains(usage) else { return }
+        henge_vm_key_hid(usage, down ? 1 : 0)
+        if usage < 0xe0 { lastKey = CACurrentMediaTime() }
+        if down {
+            held.insert(usage)
+        } else {
             held.remove(usage)
+            if usage < 0xe0 { StickyKeys.shared.releaseAll() } // one key after a tap on ⌃, ⌥ or ⌘
         }
-        fromFlags.removeAll()
     }
 
-    /// Which way modifiers arrive, for the first few: never which keys were typed.
-    private static var notes = 0
+    /// Which way keys arrive, once each: never which keys were typed.
     private static func note(_ line: String) {
-        guard notes < 40 else { return }
-        notes += 1
-        HengeLog.log("input", line)
+        if noted.insert(line).inserted { HengeLog.log("input", line) }
     }
 
     /// iPadOS can keep a key's release when it takes over, as it does for ⌘-Tab: the Mac must not
@@ -156,7 +180,6 @@ enum HardwareKeys {
     static func releaseAll() {
         for usage in held { henge_vm_key_hid(usage, 0) }
         held.removeAll()
-        fromFlags.removeAll()
     }
 }
 

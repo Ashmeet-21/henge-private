@@ -174,6 +174,7 @@ struct SessionView: View {
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true
             HardwareMouse.shared.start()
+            HardwareKeys.start()
         }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
@@ -181,6 +182,7 @@ struct SessionView: View {
             StickyKeys.shared.releaseAll()
             HardwareKeys.releaseAll()
             HardwareMouse.shared.stop()
+            HardwareKeys.stop()
         }
         .modifier(ExternalMacDisplayModifier(presentation: MacPresentation(display: display, aspect: mac.aspect)))
         .task { await run() }
