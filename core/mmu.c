@@ -669,6 +669,9 @@ static void walk_begin(HvCpu *cpu, uint64_t va) {
     HvPerCpu *p = cpu->pc_state;
     if (!p) return;
     uint32_t k = p->walk_seq >> 1; /* only this CPU moves it */
+    /* The entry is walk k - WALK_LOG's too: a reader that sees it rewritten must also see walk_seq at 2k or past it
+       (walks_elsewhere's acquire fence pairs with this one; walk_end's release does not order this later store). */
+    __atomic_thread_fence(__ATOMIC_RELEASE);
     __atomic_store_n(&p->walk_page[k & (WALK_LOG - 1)], va == HV_WALK_ANY ? HV_WALK_ANY : va & WALK_PAGE_BITS, __ATOMIC_RELAXED);
     __atomic_add_fetch(&p->walk_seq, 1, __ATOMIC_SEQ_CST); /* after the log entry, as its release */
 }
@@ -718,10 +721,11 @@ static int walks_elsewhere(HvCpu *target, uint32_t s1, uint32_t s2, uint64_t va,
         uint64_t pg = __atomic_load_n(&p->walk_page[k & (WALK_LOG - 1)], __ATOMIC_RELAXED);
         if (pg == HV_WALK_ANY || ((pg - lo) & 0x00ffffffffffffffull) < span) return 0;
     }
-    /* and no later walk wrote over an entry while it was read */
+    /* and no later walk wrote over an entry while it was read: walk k1 + WALK_LOG writes k1's entry once walk_seq is
+       2 (k1 + WALK_LOG), before it goes odd */
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
     uint32_t s3 = __atomic_load_n(&p->walk_seq, __ATOMIC_SEQ_CST);
-    if (((s3 + 1) >> 1) - k1 > WALK_LOG) return 0;
+    if ((s3 >> 1) - k1 >= WALK_LOG) return 0;
     if (target->m->stats_interval) target->m->stats.race_other_page++;
     return 1;
 }
