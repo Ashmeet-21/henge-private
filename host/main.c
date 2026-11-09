@@ -559,6 +559,14 @@ static void *input_thread(void *unused) {
                 fclose(bf);
             }
         }
+        else if (!strncmp(line, "btn ", 4)) { /* "btn CODE 1|0": any evdev button code on the virtio mouse (testing) */
+            unsigned code = 0;
+            int down = 0;
+            if (sscanf(line + 4, "%i %d", &code, &down) == 2) {
+                hv_virtio_input_send(board.mouse, HV_EV_KEY, (uint16_t)code, down);
+                hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
+            }
+        }
         else if (!strncmp(line, "press", 5) || !strncmp(line, "release", 7)) {
             hv_virtio_input_send(board.mouse, HV_EV_KEY, HV_BTN_LEFT, line[0] == 'p');
             hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
@@ -588,6 +596,14 @@ static void *input_thread(void *unused) {
         else if (sscanf(line, "wait %d", &x) == 1) sleep((unsigned)x);
         else if (!strncmp(line, "type ", 5)) type_text(line + 5);
         else if (!strncmp(line, "prof ", 5)) prof_dump(line + 5);
+        else if (!strncmp(line, "balloon ", 8)) { /* MB the guest should hand back (HV_BALLOON set at boot) */
+            HvVmapple *bd = hv_vm_board();
+            if (!bd || !bd->balloon) fprintf(stderr, "hengevm: no balloon (set HV_BALLOON)\n");
+            else {
+                hv_virtio_balloon_set_target(bd->balloon, (uint64_t)atoll(line + 8) << 20);
+                fprintf(stderr, "hengevm: balloon: the guest has handed over %llu MB\n", (unsigned long long)(hv_virtio_balloon_actual(bd->balloon) >> 20));
+            }
+        }
         else if (!strncmp(line, "knob ", 5)) {
             char name[32];
             if (sscanf(line, "knob %31s %d", name, &x) == 2 && !hv_knob_set(hv_vm_machine(), name, x))

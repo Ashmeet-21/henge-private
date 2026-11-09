@@ -17,6 +17,7 @@
 #include "xhci.h"
 #include "virtio_net.h"
 #include "virtio_snd.h"
+#include "virtio_balloon.h"
 
 /* The virtual Mac: QEMU's vmapple memory map and interrupt numbers (hw/vmapple/vmapple.c). */
 #define VMAPPLE_FIRMWARE   0x00100000ull /* 1 MB: the boot ROM */
@@ -65,11 +66,13 @@ typedef struct HvVmapple {
     HvVirtioBlk *aux_blk, *root_blk;
     HvVirtioNet *net;
     HvVirtioSnd *snd;
+    HvVirtioBalloon *balloon; /* HV_BALLOON=MB (the first target; 0 = none yet) adds it; off by default until tried on a phone */
     HvVirtioInput *keyboard, *mouse;
     HvXhci *usb;             /* USB controller with the keyboard macOS actually uses */
     HvVirtioUsb *vusb;       /* the USB device port an installer talks to (installer boots only) */
     uint8_t *cfg, *rom, *ram;
     uint64_t ram_size;
+    int ram_fd;              /* the file under guest RAM, kept open for the balloon's holes, or -1 */
     uint64_t panic_events;   /* last pvpanic event the guest reported */
     void (*poll)(void);      /* extra device work on the CPU thread each tick (Mac PVG) */
 } HvVmapple;

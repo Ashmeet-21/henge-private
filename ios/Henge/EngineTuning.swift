@@ -75,6 +75,8 @@ enum EngineTuning {
         if d.bool(forKey: superblocksKey) { env["HV_SUPERBLOCKS"] = "1" } else { unsetenv("HV_SUPERBLOCKS") }
         if d.bool(forKey: wfiSpinKey) { env["HV_WFI_SPIN"] = "50" }
         if d.object(forKey: fastFlushKey) as? Bool == false { env["HV_FLUSH"] = "0" }
+        // The memory balloon device, asked for nothing at boot (MemoryGiver asks when iOS needs memory).
+        if d.object(forKey: MemoryGiver.enabledKey) as? Bool ?? true { env["HV_BALLOON"] = "0" } else { unsetenv("HV_BALLOON") }
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         // GPU command trace: on while Documents/trace-on exists (it is checked every frame, so it can be toggled live).
         env["HV_PVG_TRACE_FILE"] = docs.appendingPathComponent("trace-on").path

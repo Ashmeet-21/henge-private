@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 /// Testing a build on a phone nobody is holding. Henge follows Documents/henge-autopilot.txt when it is
 /// launched with HENGE_AUTOPILOT set, as in
@@ -15,6 +16,10 @@ import Foundation
 ///   move X Y, click X Y  the pointer to a spot on the Mac's screen (its pixels), and a click there
 ///   pointer            where the pointer is now, into the log
 ///   knob NAME VALUE    a translation knob (core/machine.h)
+///   cpus N             the CPUs setting (1-6) for the next Mac started; it stays, so set it back afterwards
+///   env NAME [VALUE]   set (or unset) an engine environment setting for the next Mac started
+///   balloon MB         ask the Mac for that much of its memory back (HV_BALLOON set), log what it gave
+///   snap [NAME]        the Mac's screen (1920x1080) into Documents/NAME.jpg (snap.jpg)
 ///   log TEXT           a marker in henge.log
 ///   stop               stop the Mac
 ///   exit               quit Henge
@@ -106,6 +111,34 @@ enum Autopilot {
                 let found = henge_vm_knob(String(kv[0]), value)
                 HengeLog.log("autopilot", found != 0 ? "knob \(kv[0]) = \(value)" : "no knob \(kv[0]) (or no Mac running)")
             }
+        case "snap": // the Mac's screen, full size, into Documents/snap.jpg (or NAME.jpg): "snap", "snap safari"
+            let name = arg.isEmpty ? "snap" : arg
+            let url = docs.appendingPathComponent("\(name).jpg")
+            if let image = MacPreview.capture(width: 1920, height: 1080),
+               let data = UIImage(cgImage: image).jpegData(compressionQuality: 0.9), (try? data.write(to: url, options: .atomic)) != nil {
+                HengeLog.log("autopilot", "snap \(url.lastPathComponent), \(data.count / 1024) KB")
+            } else {
+                HengeLog.log("autopilot", "snap: no screen to read")
+            }
+        case "cpus": // "cpus 2": the CPU count the next Mac started gets (the CPUs setting, kept: put it back after a test)
+            if let n = Int(arg), (1...6).contains(n) {
+                UserDefaults.standard.set(n, forKey: "henge.cpus")
+                HengeLog.log("autopilot", "cpus \(n) for the next start")
+            } else {
+                HengeLog.log("autopilot", "cpus wants 1 to 6")
+            }
+        case "env": // "env HV_QOS ui": an engine setting read when the next Mac starts (one not in henge-env.txt, which wins)
+            let kv = arg.split(separator: " ", maxSplits: 1).map(String.init)
+            if kv.count == 2 {
+                setenv(kv[0], kv[1], 1)
+                HengeLog.log("autopilot", "env \(kv[0])=\(kv[1]) for the next start")
+            } else if kv.count == 1 {
+                unsetenv(kv[0])
+                HengeLog.log("autopilot", "env \(kv[0]) unset")
+            }
+        case "balloon": // "balloon 2048": ask the Mac to hand 2 GB of its memory back (needs HV_BALLOON in henge-env.txt)
+            let got = henge_vm_balloon(Int(arg) ?? -1)
+            HengeLog.log("autopilot", got < 0 ? "no balloon (set HV_BALLOON in henge-env.txt)" : "balloon: the Mac has handed over \(got) MB")
         case "log": // already in the log; the wall clock too, to line it up with things measured elsewhere
             HengeLog.log("autopilot", String(format: "at %.3f", Date().timeIntervalSince1970))
         case "stop":

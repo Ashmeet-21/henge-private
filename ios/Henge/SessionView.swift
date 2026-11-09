@@ -561,7 +561,7 @@ struct SessionView: View {
                             await Sharing.typeLighterCommand()
                         }
                     }
-                    Text("Once for each Mac, for smoother use on a phone: open Terminal on the Mac, tap this, then press Return and type the Mac's password when asked. It turns off Spotlight indexing, reopening windows and apps at login, update checks and Time Machine, and most animations (Genie becomes Scale). So that a tap opens fewer apps by accident, the Dock hides until the pointer reaches the bottom, screen corners do nothing, and a click on the wallpaper no longer moves the windows away. It types \(Sharing.lighterCommand); to undo, run the same with lighter-undo.")
+                    Text("Once for each Mac, for smoother use on a phone: open Terminal on the Mac, tap this, then press Return and type the Mac's password when asked. It turns off Spotlight indexing, reopening windows and apps at login, update checks and Time Machine, and most animations (Genie becomes Scale). Desktop widgets, the screen saver and the moving wallpaper go too (a still one replaces it). So that a tap opens fewer apps by accident, screen corners do nothing and a click on the wallpaper no longer moves the windows away; the Dock stays visible. It types \(Sharing.lighterCommand); to undo, run the same with lighter-undo.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("Free Up Space") {
@@ -624,6 +624,7 @@ struct SessionView: View {
             return
         }
         ThermalGovernor.start()
+        MemoryGiver.start()
         started = Date()
         var used = mac
         used.lastUsed = started

@@ -20,6 +20,8 @@ enum BackgroundKeeper {
     private(set) static var inBackground = false
     private static var engine: AVAudioEngine?
     private static var observing = false
+    /// Counts trips to the background, so a pause that waited for the memory balloon is not applied to a later one.
+    private static var trip = 0
 
     /// The scene left the foreground. Inactive comes first, while iOS still lets an app start its sound, so the
     /// silence starts then; the Mac is paused (or slowed) only once Henge is really in the background.
@@ -28,12 +30,20 @@ enum BackgroundKeeper {
         startSilence()
         guard toBackground, !inBackground else { return }
         inBackground = true
+        trip += 1
+        let thisTrip = trip
         if keepsRunning {
             ThermalGovernor.apply()
             HengeLog.log("background", "in the background: the Mac keeps running, each CPU at most \(runningPercent)% of the time")
+            Task { @MainActor in await MemoryGiver.leaving(wait: false) }
         } else {
-            henge_vm_set_hold(1)
-            HengeLog.log("background", "in the background: the Mac is paused (no CPU used, its clock stopped)")
+            // A paused Mac can't hand memory over, so the balloon gets a few seconds first (MemoryGiver).
+            Task { @MainActor in
+                await MemoryGiver.leaving(wait: true)
+                guard inBackground, trip == thisTrip, henge_vm_state() == 1 else { return }
+                henge_vm_set_hold(1)
+                HengeLog.log("background", "in the background: the Mac is paused (no CPU used, its clock stopped)")
+            }
         }
     }
 
@@ -43,6 +53,7 @@ enum BackgroundKeeper {
         guard inBackground else { return }
         inBackground = false
         henge_vm_set_hold(0)
+        MemoryGiver.backOnScreen()
         ThermalGovernor.apply()
         HengeLog.log("background", "back on screen: the Mac goes on")
     }

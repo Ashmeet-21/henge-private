@@ -35,6 +35,11 @@ void henge_vm_set_hold(int on);
 void henge_vm_set_duty(int percent);
 /* Testing: sets a translation knob (core/machine.h) in the running machine; nonzero if it exists. */
 int henge_vm_knob(const char *name, int value);
+/* The memory balloon (only with HV_BALLOON set before boot): asks the guest to hand over target_mb (when >= 0)
+   and returns how many MB it has handed over, or -1 without a balloon. */
+long henge_vm_balloon(long target_mb);
+/* The balloon's guest RAM size in MB, or -1 without a balloon. */
+long henge_vm_balloon_ram_mb(void);
 
 /* Progress, for the session screen. */
 uint64_t henge_vm_blocks(void);            /* blocks the CPUs entered */

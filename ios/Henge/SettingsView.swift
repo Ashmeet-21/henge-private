@@ -14,6 +14,7 @@ struct SettingsView: View {
     @AppStorage(EngineTuning.superblocksKey) private var superblocks = false
     @AppStorage(ThermalGovernor.enabledKey) private var keepCool = true
     @AppStorage(BackgroundKeeper.modeKey) private var backgroundMode = BackgroundKeeper.pause
+    @AppStorage(MemoryGiver.enabledKey) private var giveMemoryBack = true
     @AppStorage(EngineTuning.refreshKey) private var refreshRate = 60
     @AppStorage(JITBootstrap.codeCacheKey) private var codeCacheMB = JITBootstrap.defaultCodeCacheMB
 
@@ -52,6 +53,9 @@ struct SettingsView: View {
                     Text(backgroundMode == BackgroundKeeper.keepRunning
                          ? "When you leave Henge or lock the \(Device.name), the Mac keeps running, each CPU at most \(BackgroundKeeper.runningPercent)% of the time, for a download or a build. iOS draws nothing for apps in the background, so windows may need a moment to redraw when you come back, and iOS can still close Henge if another app needs its memory."
                          : "When you leave Henge or lock the \(Device.name), the Mac pauses: no CPU used, no heat, and its clock stops like a sleeping Mac's, so it goes on where it was when you come back. Henge plays silence meanwhile so iOS keeps it (and JIT) alive; iOS can still close it if another app needs its memory.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Toggle("Give memory back to iOS", isOn: $giveMemoryBack)
+                    Text("So iOS closes Henge less often: before the Mac pauses in the background, macOS hands a quarter of its memory back (free memory and caches first), and gets it back when you return. When iOS runs short while you use the Mac, it hands over 256 MB more at a time, up to a third, for two minutes. Applies the next time a Mac starts.")
                         .font(.footnote).foregroundStyle(.secondary)
                     Toggle("Faster disk writes", isOn: $fastFlush)
                     Toggle("Quicker wake from idle", isOn: $wfiSpin)

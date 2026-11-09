@@ -649,6 +649,57 @@ static const char install_script[] =
     "launchctl bootstrap \"gui/$(id -u)\" \"$P\"\n"
     "echo 'Henge is set up. You can close this window.'\n";
 
+/* What "curl -s http://10.0.2.4/.henge/lighten | sh" runs in macOS: less background work and drawing, for a Mac
+   whose CPUs are emulated: less animation and drawing, and the system part (update checks, Time Machine) with the
+   Mac's password once. Apple's own background agents can't be turned off with System Integrity Protection on
+   (launchctl disable of gui/ agents did not survive a log out on the Mac bench, 2026-11-08), so it doesn't try.
+   Reduce Motion and Reduce Transparency need System Settings (a script can't write com.apple.universalaccess).
+   Nothing reads the script's own stdin (sh is reading the script from it). */
+static const char lighten_script[] =
+    "#!/bin/sh\n"
+    "echo 'Making macOS lighter for Henge...'\n"
+    "defaults write com.apple.universalaccess reduceMotion -bool true 2>/dev/null </dev/null || "
+    "echo '  Reduce Motion: turn it on in System Settings, Accessibility, Motion.'\n"
+    "defaults write com.apple.universalaccess reduceTransparency -bool true 2>/dev/null </dev/null || "
+    "echo '  Reduce Transparency: turn it on in System Settings, Accessibility, Display.'\n"
+    "defaults write -g NSAutomaticWindowAnimationsEnabled -bool false </dev/null\n"
+    "defaults write -g NSWindowResizeTime -float 0.001 </dev/null\n"
+    "defaults write com.apple.dock launchanim -bool false </dev/null\n"
+    "defaults -currentHost write com.apple.screensaver idleTime -int 0 </dev/null\n"
+    "defaults write com.apple.WindowManager StandardHideWidgets -int 1 </dev/null\n"
+    "defaults write com.apple.WindowManager StageManagerHideWidgets -int 1 </dev/null\n"
+    "W=\"/System/Library/Desktop Pictures/Solid Colors/Black.png\"\n"
+    "[ -f \"$W\" ] || W=$(ls \"/System/Library/Desktop Pictures/Solid Colors/\"*.png 2>/dev/null | head -1)\n"
+    "if [ -n \"$W\" ]; then\n"
+    "  osascript -l JavaScript - \"$W\" >/dev/null 2>&1 <<'JS'\n"
+    "ObjC.import('AppKit');\n"
+    "function run(argv) {\n"
+    "  var url = $.NSURL.fileURLWithPath(argv[0]), screens = $.NSScreen.screens;\n"
+    "  for (var i = 0; i < screens.count; i++)\n"
+    "    $.NSWorkspace.sharedWorkspace.setDesktopImageURLForScreenOptionsError(url, screens.objectAtIndex(i), $({}), null);\n"
+    "}\n"
+    "JS\n"
+    "fi\n"
+    "killall Dock 2>/dev/null\n"
+    "echo 'Done: window and Dock animations, desktop widgets, the screen saver and a moving wallpaper are off.'\n"
+    "echo 'Also turn on Reduce Motion and Reduce Transparency: System Settings, Accessibility.'\n"
+    "echo 'Log out and back in for all of it to take effect. To undo: curl -s http://" HV_SHARE_ADDR "/.henge/unlighten | sh'\n";
+
+/* And back. The wallpaper stays as it is: pick one in System Settings. */
+static const char unlighten_script[] =
+    "#!/bin/sh\n"
+    "defaults write com.apple.universalaccess reduceMotion -bool false 2>/dev/null </dev/null\n"
+    "defaults write com.apple.universalaccess reduceTransparency -bool false 2>/dev/null </dev/null\n"
+    "defaults delete -g NSAutomaticWindowAnimationsEnabled 2>/dev/null </dev/null\n"
+    "defaults delete -g NSWindowResizeTime 2>/dev/null </dev/null\n"
+    "defaults delete com.apple.dock launchanim 2>/dev/null </dev/null\n"
+    "defaults -currentHost delete com.apple.screensaver idleTime 2>/dev/null </dev/null\n"
+    "defaults write com.apple.WindowManager StandardHideWidgets -int 0 </dev/null\n"
+    "defaults write com.apple.WindowManager StageManagerHideWidgets -int 0 </dev/null\n"
+    "killall Dock 2>/dev/null\n"
+    "echo 'Back as it was, apart from the wallpaper (System Settings, Wallpaper).'\n"
+    "echo 'Log out and back in (or restart) for all of it to take effect.'\n";
+
 static int serve_agent(Conn *c, Request *r, int touch) {
     if (body_discard(c, r) != 0) return -1;
     char path[PATH_MAX];
@@ -727,18 +778,18 @@ static const char lighter_script[] =
     "w com.apple.loginwindow TALLogoutSavesState -bool false\n"
     "w com.apple.universalaccess reduceTransparency -bool true\n"
     "w com.apple.universalaccess reduceMotion -bool true\n"
-    "# Fewer stray clicks from a touch trackpad, where a tap clicks whatever the pointer rests on: the Dock hides\n"
-    "# until the pointer reaches the bottom, no screen corner starts anything, a click on the wallpaper leaves the\n"
-    "# windows where they are, and apps open at logout are not opened again at login.\n"
-    "w com.apple.dock autohide -bool true\n"
+    "# Fewer stray clicks from a touch trackpad, where a tap clicks whatever the pointer rests on: no screen corner\n"
+    "# starts anything, a click on the wallpaper leaves the windows where they are, and apps open at logout are not\n"
+    "# opened again at login. The Dock stays visible (hidden, its apps were hard to find on a phone).\n"
     "w com.apple.dock show-recents -bool false\n"
     "for c in tl tr bl br; do w com.apple.dock wvous-$c-corner -int 1; w com.apple.dock wvous-$c-modifier -int 0; done\n"
     "w com.apple.WindowManager EnableStandardClickToShowDesktop -bool false\n"
     "w com.apple.loginwindow LoginwindowLaunchesRelaunchApps -bool false\n"
-    "echo '  The Dock hides until you reach it, screen corners do nothing, apps are not reopened at login'\n"
+    "echo '  Screen corners do nothing, apps are not reopened at login'\n"
+    "curl -s http://" HV_SHARE_ADDR "/.henge/lighten | sh 2>/dev/null | grep -v -e 'Log out' -e 'To undo' -e 'Also turn on'\n"
     "killall Dock 2>/dev/null\n"
     "echo 'Now the parts that need your Mac password (it is not shown as you type):'\n"
-    "sudo sh -c 'mdutil -a -i off >/dev/null 2>&1 && echo \"  Spotlight indexing: off\"; softwareupdate --schedule off >/dev/null 2>&1; tmutil disable >/dev/null 2>&1; echo \"  Automatic update checks and Time Machine: off\"'\n"
+    "sudo sh -c 'mdutil -a -i off >/dev/null 2>&1 && echo \"  Spotlight indexing: off\"; softwareupdate --schedule off >/dev/null 2>&1; for k in AutomaticCheckEnabled AutomaticDownload AutomaticallyInstallMacOSUpdates; do defaults write /Library/Preferences/com.apple.SoftwareUpdate $k -bool false; done; tmutil disable >/dev/null 2>&1; echo \"  Automatic update checks and Time Machine: off\"'\n"
     "echo 'Done. Log out and back in (or restart) for every change to apply.'\n";
 
 /* What "curl -s http://10.0.2.4/.henge/clean | sh" runs in macOS: frees space that macOS holds on to, which
@@ -770,8 +821,9 @@ static const char lighter_undo_script[] =
     "for k in autohide show-recents wvous-tl-corner wvous-tr-corner wvous-bl-corner wvous-br-corner wvous-tl-modifier wvous-tr-modifier wvous-bl-modifier wvous-br-modifier; do defaults delete com.apple.dock $k 2>/dev/null; done\n"
     "defaults delete com.apple.WindowManager EnableStandardClickToShowDesktop 2>/dev/null\n"
     "defaults delete com.apple.loginwindow LoginwindowLaunchesRelaunchApps 2>/dev/null\n"
+    "curl -s http://" HV_SHARE_ADDR "/.henge/unlighten | sh >/dev/null 2>&1\n"
     "killall Dock 2>/dev/null\n"
-    "sudo sh -c 'mdutil -a -i on >/dev/null 2>&1; softwareupdate --schedule on >/dev/null 2>&1; tmutil enable >/dev/null 2>&1'\n"
+    "sudo sh -c 'mdutil -a -i on >/dev/null 2>&1; softwareupdate --schedule on >/dev/null 2>&1; for k in AutomaticCheckEnabled AutomaticDownload AutomaticallyInstallMacOSUpdates; do defaults delete /Library/Preferences/com.apple.SoftwareUpdate $k 2>/dev/null; done; tmutil enable >/dev/null 2>&1'\n"
     "echo 'Put back. Log out and back in for every change to apply.'\n";
 
 static int serve_henge(Conn *c, Request *r) {
@@ -810,6 +862,11 @@ static int serve_henge(Conn *c, Request *r) {
         if (!valid) return respond_empty(c, r, 400, "Bad Request");
         hv_native_touch_report(generation, state);
         return respond_empty(c, r, 204, "No Content");
+    }
+    if ((!strcmp(what, "lighten") || !strcmp(what, "unlighten")) && !strcmp(r->method, "GET")) {
+        if (body_discard(c, r) != 0) return -1;
+        const char *s = what[0] == 'l' ? lighten_script : unlighten_script;
+        return respond(c, r, 200, "OK", "Content-Type: text/plain\r\n", s, strlen(s));
     }
     if (!strcmp(what, "clipboard") && !strcmp(r->method, "GET")) return clipboard_get(c, r);
     if (!strcmp(what, "clipboard") && !strcmp(r->method, "PUT")) return clipboard_put(c, r);

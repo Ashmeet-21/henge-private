@@ -195,8 +195,35 @@ static void link_here(Emit *e, uint32_t at, int from_cold) {
     plink(e, at, from_cold, e->n, e->in_cold);
 }
 
-/* ldr xR, =value */
+/* xR = value with MOVZ or MOVN and then MOVKs, if that takes at most max instructions. */
+static int put_mov_imm(Emit *e, int reg, uint64_t value, int max) {
+    int zeros = 0, ones = 0;
+    for (int i = 0; i < 4; i++) {
+        uint16_t h = (uint16_t)(value >> 16 * i);
+        zeros += h == 0, ones += h == 0xffff;
+    }
+    int inverted = ones > zeros; /* kernel addresses: start from all ones */
+    int n = 4 - (inverted ? ones : zeros);
+    if ((n ? n : 1) > max) return 0;
+    uint16_t skip = inverted ? 0xffff : 0;
+    int first = 1;
+    for (uint32_t i = 0; i < 4; i++) {
+        uint16_t h = (uint16_t)(value >> 16 * i);
+        if (h == skip) continue;
+        if (first) put(e, (inverted ? 0x92800000u : 0xd2800000u) | i << 21 | (uint32_t)(inverted ? (uint16_t)~h : h) << 5 | (uint32_t)reg);
+        else put(e, 0xf2800000u | i << 21 | (uint32_t)h << 5 | (uint32_t)reg); /* movk */
+        first = 0;
+    }
+    if (first) put(e, (inverted ? 0x92800000u : 0xd2800000u) | (uint32_t)reg); /* 0 or all ones */
+    return 1;
+}
+
+/* ldr xR, =value. The pool sits after the cold code, so a hot block's literal is a load from a line the data
+   cache rarely holds (5% of translated-code samples on the Mac): values that take at most three MOVZ/MOVN/MOVK
+   (nearly all addresses, user and kernel) can be built in the register instead, in as many words: HV_MOVIMM=1
+   (off: no measured gain on the Mac mix, 2026-11-08). */
 static void put_lit(Emit *e, int reg, uint64_t value) {
+    if (hv_knob[HV_K_MOVIMM] && put_mov_imm(e, reg, value, 3)) return;
     e->pool[e->npool] = value;
     e->fix[e->nfix++] = (LitFix){e->n, FIX_LDR, e->npool++, (uint8_t)(e->in_cold && !e->flat)};
     put(e, 0x58000000u | reg);
@@ -1026,8 +1053,8 @@ static void translate_mem(Emit *e, uint32_t insn, uint64_t pc) {
     /* hv_tlb_refill's flags: bit 9 set (so never 0), bit 0 write, bits 2..1 the table, 8..3 bytes - 1 */
     uint32_t rflags = can_refill ? 1u << 9 | (uint32_t)(op.store ? 1 : 0) | (uint32_t)el_idx << 1 | (op.bytes - 1) << 3 : 0;
     put_ool(e, (Ool){.kind = OOL_SLOW, .pc = pc, .insn = insn, .nrestore = 3, .restore = {A, T, U},
-                     /* The exact recheck for a page's last 15 bytes costs 6 words in every access's slow path; without it
-                        (HV_RECHECK=0, the default) such an access takes the refill, which sends it to the helper. */
+                     /* The exact recheck for a page's last 15 bytes costs 6 words in every access's slow path (on by default,
+                        see machine.c); with HV_RECHECK=0 such an access takes the refill, which sends it to the helper. */
                      .recheck = hv_knob[HV_K_RECHECK] && !(op.align && op.bytes > 1) && op.bytes <= HV_TLB_ADJ + 1, .addr = (uint8_t)addr,
                      .t = (uint8_t)T, .u = (uint8_t)U, .bytes = (uint8_t)op.bytes,
                      .tag_off = tlb + (op.store ? 8 : 0), .retry = retry, .rflags = rflags});
@@ -1886,7 +1913,7 @@ static int translate_emit(HvMachine *m, HvBlock *b, const uint32_t *code, uint32
     e->flat = hv_knob[HV_K_TEST2];
     e->overflow = 0;
     e->flags = b->flags;
-    e->slow_mem = m->slow_mem;
+    e->slow_mem = m->slow_mem || hv_knob[HV_K_PREDSTAT]; /* HV_PREDSTAT (measuring): every access through hv_mem_emulate */
     e->page = b->va & ~((1ull << HV_TLB_PAGE_BITS) - 1);
     e->no_ijc = !m->chain;
     e->m = m;

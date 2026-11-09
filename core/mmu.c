@@ -724,6 +724,47 @@ int hv_tlbi_drop_remote_va(HvCpu *target, uint64_t va, int asid) {
     return ok;
 }
 
+/* hv_tlbi_drop_remote_va for npages pages from va at once (big range TLBIs, HV_RANGE_DROP): one pass over the
+   stashes instead of one per page, then each page's TLB slots and cached branch targets, all inside one
+   walk_seq/ijc_seq window. Same answers: 1 done, 0 raced (try again), -1 only the target can do it. */
+static void stash_drop_range(HvPerCpu *p, uint64_t va, uint64_t npages, int asid);
+
+int hv_tlbi_drop_remote_range(HvCpu *target, uint64_t va, uint64_t npages, int asid) {
+    HvPerCpu *p = target->pc_state;
+    uint32_t s1 = __atomic_load_n(&p->walk_seq, __ATOMIC_SEQ_CST);
+    if (s1 & 1) { if (target->m->stats_interval) target->m->stats.race_kind[0]++; return 0; }
+    uint32_t c1 = __atomic_load_n(&p->ijc_seq, __ATOMIC_SEQ_CST);
+    if (c1 & 1) { if (target->m->stats_interval) target->m->stats.race_kind[1]++; return 0; }
+    if (!((va >> 55) & 1)) stash_drop_range(p, va, npages, asid);
+    int fetched = 0;
+    for (uint64_t i = 0; i < npages && i < HV_TLB_SIZE; i++) { /* past HV_TLB_SIZE pages the slots come round again */
+        uint32_t idx = (uint32_t)((va >> HV_TLB_PAGE_BITS) + i) & (HV_TLB_SIZE - 1);
+        for (int t = 0; t < 3; t++) {
+            HvTlbEntry *e = hv_tlb_ent(target, idx, t);
+            uint64_t x = __atomic_load_n(&e->exec_tag, __ATOMIC_RELAXED);
+            /* the slot whatever its tag, as for one page; fetched if it holds code from the range */
+            if (x != HV_TLB_INVALID) {
+                uint64_t off = ((hv_exec_key(x, e->addend) & 0x00ffffffffffc000ull) - (va & 0x00ffffffffffc000ull)) & 0x00ffffffffffffffull;
+                if (off < (npages << HV_TLB_PAGE_BITS)) fetched = 1;
+            }
+            __atomic_store_n(&e->read_tag, HV_TLB_INVALID, __ATOMIC_RELAXED);
+            __atomic_store_n(&e->write_tag, HV_TLB_INVALID, __ATOMIC_RELAXED);
+            __atomic_store_n(&e->exec_tag, HV_TLB_INVALID, __ATOMIC_RELAXED);
+        }
+    }
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    for (uint64_t i = 0; i < npages; i++)
+        if (!ijc_drop_va(target, va + (i << HV_TLB_PAGE_BITS), asid, 1)) return -1;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    int ok = __atomic_load_n(&p->walk_seq, __ATOMIC_SEQ_CST) == s1 && __atomic_load_n(&p->ijc_seq, __ATOMIC_SEQ_CST) == c1;
+    if (!ok) {
+        if (target->m->stats_interval) target->m->stats.race_kind[2]++;
+    } else if (fetched) {
+        hv_cpu_kick(target);
+    }
+    return ok;
+}
+
 const uint32_t *hv_mmu_fetch(HvCpu *cpu, uint64_t va, uint64_t *pa, uint32_t *avail) {
     if (va & 3) {
         hv_raise_sync(cpu, HV_EC_PC_ALIGN, 0, va, va);
@@ -961,6 +1002,29 @@ static void stash_drop_va(HvPerCpu *p, uint64_t va, int asid) {
             if (rt == HV_TLB_INVALID && wt == HV_TLB_INVALID && xt == HV_TLB_INVALID) continue;
             uint64_t tag = rt != HV_TLB_INVALID ? rt + HV_TLB_ADJ : xt != HV_TLB_INVALID ? hv_exec_key(xt, e->addend) : wt + HV_TLB_ADJ;
             if ((tag & 0x00ffffffffffffffull & ~(uint64_t)PAGE_MASK) != pg) continue;
+            __atomic_store_n(&e->read_tag, HV_TLB_INVALID, __ATOMIC_RELAXED);
+            __atomic_store_n(&e->write_tag, HV_TLB_INVALID, __ATOMIC_RELAXED);
+            __atomic_store_n(&e->exec_tag, HV_TLB_INVALID, __ATOMIC_RELAXED);
+        }
+    }
+}
+
+/* stash_drop_va for npages pages from va, in one pass. */
+static void stash_drop_range(HvPerCpu *p, uint64_t va, uint64_t npages, int asid) {
+    uint64_t lo = va & 0x00ffffffffffffffull & ~(uint64_t)PAGE_MASK, span = npages << HV_TLB_PAGE_BITS;
+    for (int i = 0; i < HV_STASHES; i++) {
+        HvTlbStash *s = &p->stash[i];
+        uint64_t t = __atomic_load_n(&s->ttbr0, __ATOMIC_SEQ_CST);
+        if (!t || (asid >= 0 && (int)(t >> 48) != asid)) continue;
+        uint32_t n = __atomic_load_n(&s->n, __ATOMIC_RELAXED);
+        if (n > HV_STASH_CAP) n = HV_STASH_CAP;
+        for (uint32_t k = 0; k < n; k++) {
+            HvTlbEntry *e = &s->ent[k];
+            uint64_t rt = __atomic_load_n(&e->read_tag, __ATOMIC_RELAXED), wt = __atomic_load_n(&e->write_tag, __ATOMIC_RELAXED),
+                     xt = __atomic_load_n(&e->exec_tag, __ATOMIC_RELAXED);
+            if (rt == HV_TLB_INVALID && wt == HV_TLB_INVALID && xt == HV_TLB_INVALID) continue;
+            uint64_t tag = rt != HV_TLB_INVALID ? rt + HV_TLB_ADJ : xt != HV_TLB_INVALID ? hv_exec_key(xt, e->addend) : wt + HV_TLB_ADJ;
+            if ((((tag & 0x00ffffffffffffffull & ~(uint64_t)PAGE_MASK) - lo) & 0x00ffffffffffffffull) >= span) continue;
             __atomic_store_n(&e->read_tag, HV_TLB_INVALID, __ATOMIC_RELAXED);
             __atomic_store_n(&e->write_tag, HV_TLB_INVALID, __ATOMIC_RELAXED);
             __atomic_store_n(&e->exec_tag, HV_TLB_INVALID, __ATOMIC_RELAXED);

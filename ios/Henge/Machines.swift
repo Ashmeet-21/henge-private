@@ -95,14 +95,39 @@ final class Machines: ObservableObject {
         removeLeftovers()
     }
 
+    /// The file the installer puts in a machine's folder once macOS is on its disk (it holds the release's name).
+    nonisolated static let installedMarker = "installed"
+
     /// Machine folders nothing refers to (an install cut short by a crash or by quitting): their disks take real space.
+    /// A folder whose install finished (Henge stopped before it was listed) is listed again instead, and nothing is
+    /// removed when the list itself could not be read: every Mac would look unreferenced.
     private func removeLeftovers() {
+        if listUnreadable {
+            HengeLog.log("machines", "the list of Macs could not be read: no machine folder is removed")
+            return
+        }
         let known = Set(all.map(\.id))
-        let items = (try? FileManager.default.contentsOfDirectory(at: Self.root, includingPropertiesForKeys: nil)) ?? []
+        let fm = FileManager.default
+        let items = (try? fm.contentsOfDirectory(at: Self.root, includingPropertiesForKeys: nil)) ?? []
         for item in items {
             guard let id = UUID(uuidString: item.lastPathComponent), !known.contains(id) else { continue }
+            let marker = item.appendingPathComponent(Self.installedMarker)
+            if fm.fileExists(atPath: marker.path), let data = try? Data(contentsOf: item.appendingPathComponent("machine.json")),
+               let info = try? JSONDecoder().decode(MachineFile.self, from: data),
+               fm.fileExists(atPath: item.appendingPathComponent("disk.img").path) {
+                var mac = VirtualMac(id: id, name: info.name ?? "Mac", ecid: info.ecid, seed: info.seed ?? 0,
+                                     ramMB: info.ramMB ?? Device.suggestedRAMGB * 1024, diskBytes: 64 << 30)
+                let os = (try? String(contentsOf: marker, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                mac.osName = os.isEmpty ? nil : os
+                (mac.screenWidth, mac.screenHeight) = Device.fittingScreen
+                all.append(mac)
+                save()
+                try? fm.removeItem(at: item.appendingPathComponent("restore"))
+                HengeLog.log("machines", "\(mac.name) finished installing but was not listed: listed again")
+                continue
+            }
             HengeLog.log("machines", "removing the unfinished machine \(id)")
-            try? FileManager.default.removeItem(at: item)
+            try? fm.removeItem(at: item)
         }
     }
 
@@ -279,8 +304,16 @@ final class Machines: ObservableObject {
         try? url.setResourceValues(values)
     }
 
+    /// machines.json is there but did not decode (damaged, or written by a newer Henge).
+    private var listUnreadable = false
+
     private func load() {
-        guard let data = try? Data(contentsOf: listURL), let list = try? JSONDecoder().decode([VirtualMac].self, from: data) else { return }
+        guard let data = try? Data(contentsOf: listURL) else { return }
+        guard let list = try? JSONDecoder().decode([VirtualMac].self, from: data) else {
+            listUnreadable = true
+            HengeLog.log("machines", "machines.json (\(data.count) bytes) could not be read")
+            return
+        }
         all = list.filter { FileManager.default.fileExists(atPath: $0.disk.path) }
     }
 
