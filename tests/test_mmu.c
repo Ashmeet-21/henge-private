@@ -337,12 +337,44 @@ int main(void) {
             st->ttbr0 = 0, st->n = 0;
         }
         hv_knob[HV_K_RANGEDROP] = 0;
-        /* A target in the middle of a page walk: raced, so it is queued instead. */
+        /* A target in the middle of a page walk (of a page in the range): raced, so it is queued instead. */
         hv_tlb_flush(&cpu2);
+        p2->walk_page[(p2->walk_seq >> 1) & 7] = base + (3ull << 14);
         __atomic_store_n(&p2->walk_seq, p2->walk_seq | 1, __ATOMIC_SEQ_CST);
         checks++;
         if (hv_tlbi_drop_remote_range(&cpu2, base, 64, 5) != 0) printf("  FAIL remote range ignored a page walk in progress\n"), failures++;
         __atomic_store_n(&p2->walk_seq, p2->walk_seq + 1, __ATOMIC_SEQ_CST);
+    }
+
+    /* HV_WALK_LOG: a drop races only a walk of one of its pages, or a process switch's (any page); a walk of another
+       page is let through. Walks under way, set up as walk_begin does (the page logged, then walk_seq odd). */
+    {
+        static HvCpu cpu3;
+        hv_cpu_reset_index(&cpu3, &m, 1);
+        HvPerCpu *p3 = cpu3.pc_state;
+        const uint64_t P = 0x100004000ull, Q = 0x100008000ull;
+        struct { const char *what; uint64_t walked; int knob, range, want; } cases[] = {
+            {"a walk of another page", Q, 1, 0, 1},       {"a walk of the page", P + 0x10, 1, 0, 0},
+            {"a process switch", ~0ull, 1, 0, 0},         {"a walk of another page, knob off", Q, 0, 0, 0},
+            {"a range with the walked page in it", Q, 1, 1, 0}, {"a range without it", Q + (8ull << 14), 1, 1, 1},
+            {"a tagged walk of another page", 0x5a00000000000000ull | Q, 1, 0, 1},
+            {"a tagged walk of the page", 0x5a00000000000000ull | P, 1, 0, 0},
+        };
+        for (size_t c = 0; c < sizeof cases / sizeof cases[0]; c++) {
+            hv_knob[HV_K_WALKLOG] = cases[c].knob;
+            uint32_t seq = __atomic_load_n(&p3->walk_seq, __ATOMIC_SEQ_CST) & ~1u;
+            uint64_t pg = cases[c].walked == ~0ull ? ~0ull : cases[c].walked & 0x00ffffffffffc000ull;
+            p3->walk_page[(seq >> 1) & 7] = pg;
+            __atomic_store_n(&p3->walk_seq, seq + 1, __ATOMIC_SEQ_CST);
+            int r = cases[c].range ? hv_tlbi_drop_remote_range(&cpu3, P, 2, 5) : hv_tlbi_drop_remote_va(&cpu3, P, 5);
+            __atomic_store_n(&p3->walk_seq, seq + 2, __ATOMIC_SEQ_CST);
+            checks++;
+            if ((r == 1) != cases[c].want) {
+                printf("  FAIL remote drop during %s: %s\n", cases[c].what, r == 1 ? "done" : "raced");
+                failures++;
+            }
+        }
+        hv_knob[HV_K_WALKLOG] = 1;
     }
 
     printf("%d checks, %d failures\n", checks, failures);

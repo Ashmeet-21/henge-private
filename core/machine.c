@@ -19,7 +19,7 @@ extern void hv_xjump_thunk(void);
 static int init_rest(HvMachine *m);
 
 int hv_knob[HV_K_COUNT];
-static const char *const hv_knob_names[HV_K_COUNT] = {"HV_NO_RAS", "HV_SUPERBLOCKS", "HV_GROUPS", "HV_WFI_SPIN", "HV_FLUSH", "HV_K1", "HV_K2", "HV_K3", "HV_TLBT", "HV_JIT_CAP", "HV_RECHECK", "HV_SYNC_WAIT", "HV_SWITCH_FLUSH", "HV_RANGE_DROP", "HV_MOVIMM", "HV_PREDSTAT"};
+static const char *const hv_knob_names[HV_K_COUNT] = {"HV_NO_RAS", "HV_SUPERBLOCKS", "HV_GROUPS", "HV_WFI_SPIN", "HV_FLUSH", "HV_K1", "HV_K2", "HV_K3", "HV_TLBT", "HV_JIT_CAP", "HV_RECHECK", "HV_SYNC_WAIT", "HV_SWITCH_FLUSH", "HV_RANGE_DROP", "HV_MOVIMM", "HV_PREDSTAT", "HV_WALK_LOG"};
 
 static void knobs_init(void) {
     for (int i = 0; i < HV_K_COUNT; i++)
@@ -61,6 +61,9 @@ static int init_rest(HvMachine *m) {
     /* HV_MOVIMM=1: constants built in registers instead of loaded from the pool (translate.c put_lit). Off: no
        measured gain (Mac mix 24.1 s either way, 2026-11-08); the tests pass with it on (HV_MOVIMM=1 make test). */
     hv_knob[HV_K_MOVIMM] = getenv("HV_MOVIMM") ? atoi(getenv("HV_MOVIMM")) : 0;
+    /* On unless asked: the Mac bench (2026-11-08) posted 130-400 raced remote drops/s with it against 710-1370
+       without (most walks a drop met were of other pages), and the phone's login storm waits up to 24% of a CPU. */
+    hv_knob[HV_K_WALKLOG] = getenv("HV_WALK_LOG") ? atoi(getenv("HV_WALK_LOG")) : 1;
     /* So the tests can run the translator these ways too (the iOS and --phone paths read them in knobs_init). */
     if (getenv("HV_SUPERBLOCKS")) hv_knob[HV_K_SUPERBLOCKS] = atoi(getenv("HV_SUPERBLOCKS"));
     /* The exact check for an access in a page's last 15 bytes, in the access's out-of-line path (code size only):

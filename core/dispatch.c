@@ -666,7 +666,8 @@ static void print_stats(HvCpu *cpu, int force) {
                 RATE(tlb_range_flushes), RATE(range_spared), RATE(kernel_ranges));
         fprintf(stderr, "  TLBIs left to other CPUs/s: raced %.0f, every address space's cached targets %.0f, big range %.0f, ASID or all %.0f\n",
                 RATE(posted_kind[0]), RATE(posted_kind[3]), RATE(posted_kind[1]), RATE(posted_kind[2]));
-        fprintf(stderr, "  remote drop races/s: walking %.0f, filling %.0f, during %.0f\n", RATE(race_kind[0]), RATE(race_kind[1]), RATE(race_kind[2]));
+        fprintf(stderr, "  remote drop races/s: walking %.0f, filling %.0f, during %.0f; walks of other pages let through %.0f\n", RATE(race_kind[0]), RATE(race_kind[1]), RATE(race_kind[2]),
+                RATE(race_other_page));
         {
             static const char *kn[16] = {"copy", "pcrel", "branch", "branch-reg", "eret", "literal", "memory", "prefetch",
                                          "exception", "sysreg", "sys", "barrier", "wait", "pac", "undef", "?"};
