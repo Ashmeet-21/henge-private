@@ -23,6 +23,9 @@ struct InstallView: View {
                 VStack(spacing: 0) {
                     switch installer.phase {
                     case .idle: chooser
+                    case .checking:
+                        ProgressView("Preparing to install macOS…")
+                            .padding(20)
                     case .downloading, .preparing, .installing: progress
                     case .done(let text): finished(text)
                     case .failed(let text): failed(text)
