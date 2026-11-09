@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include "../core/machine.h"
 #include "vm.h"
@@ -50,7 +51,7 @@ static void dump_words(void) {
     snprintf(path, sizeof path, "%s/Documents/hvprof-words.txt", home ? home : ".");
     FILE *f = fopen(path, "a");
     if (f) {
-        fprintf(f, "# dump jit %llu lost %llu\n", (unsigned long long)jit, (unsigned long long)words_lost);
+        fprintf(f, "# dump at %ld jit %llu lost %llu\n", (long)time(NULL), (unsigned long long)jit, (unsigned long long)words_lost);
         for (int i = 0; i < WORD_SLOTS; i++)
             if (words[i].n) fprintf(f, "p %u 0 %08x\n", words[i].n, words[i].w);
         fclose(f);
