@@ -17,6 +17,7 @@
 #include "net_slirp.h"
 #include "dns_proxy.h"
 #include "vm.h"
+#include "audio_mac.h"
 #include "install.h"
 
 #include <fcntl.h>
@@ -195,6 +196,11 @@ static int lock_running(void) {
     pthread_rwlock_unlock(&api_lock);
     return 0;
 }
+void henge_vm_power_button(int down) {
+    if (!lock_running()) return;
+    hv_vm_power_button(down);
+    pthread_rwlock_unlock(&api_lock);
+}
 void henge_vm_stop(void) {
     if (!lock_running()) return;
     hv_vm_stop();
@@ -318,6 +324,23 @@ void henge_vm_touch_button(int down) {
     hv_vm_touch_button(down);
     pthread_rwlock_unlock(&api_lock);
 }
+/* Remote desktop. */
+int henge_vm_stream_frame(void *pixel_buffer, int *w, int *h) {
+    if (!lock_running()) return -1;
+    int result = hv_vm_stream_frame(pixel_buffer, w, h);
+    pthread_rwlock_unlock(&api_lock);
+    return result;
+}
+void henge_vm_set_headless(int on) {
+    if (!lock_running()) return;
+    hv_vm_set_headless(on);
+    pthread_rwlock_unlock(&api_lock);
+}
+void henge_audio_tap(int on, int mute_here) { hv_audio_tap(on, mute_here); }
+int henge_audio_tap_read(uint8_t *out, int max, unsigned *channels, unsigned *format, unsigned *rate_hz) {
+    return hv_audio_tap_read(out, max, channels, format, rate_hz);
+}
+
 void henge_vm_set_display_layer(void *layer) {
     /* vm.c serializes this with unpublishing the old display before free.
        Main-thread layer detachment need not wait for disk/GPU teardown. */

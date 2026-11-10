@@ -14,6 +14,11 @@
 #import <objc/message.h>
 #import <TargetConditionals.h>
 #import <IOSurface/IOSurfaceRef.h>
+#import <CoreVideo/CoreVideo.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <unistd.h>
 #include <string.h>
 #include <sys/utsname.h>
 
@@ -39,6 +44,8 @@ static int cursor_scale(void) {
 #include <stdatomic.h>
 #include <mach/vm_map.h>
 #include <stdio.h>
+
+extern int hv_base_vertex_quirk_hits; /* core/translate.c */
 #include <stdlib.h>
 #include <string.h>
 
@@ -170,6 +177,23 @@ static NSCountedSet<NSNumber *> *wb_unmapping; /* mapping ids unmapped by the gu
     BOOL tess_factors; /* so is a tessellation factor buffer */
     uint32_t pre_raster_samples, pre_imageblock, pre_threadgroup, pre_tile_w, pre_tile_h; /* for the next pass */
     BOOL tracing; /* HV_PVG_TRACE_FILE exists: say what each exec draws */
+    id<MTLBuffer> trace_vb[32]; /* while tracing: the vertex buffers bound, with offset and stride */
+    NSUInteger trace_vo[32], trace_vs[32];
+    NSMutableSet<NSValue *> *trace_dumped; /* buffers already written to gpu-dump/ this trace */
+    id<MTLCommandBuffer> trace_cb; /* while tracing: the exec's command buffer, to look again once it has run */
+    unsigned trace_draws, trace_sliced; /* indexed draws traced, and those whose constants were kept, this trace */
+    BOOL base_vertex_warned;
+    /* Inspector (HV_INSPECT, tools/henge-inspect.py): lists the meshes drawn, hides them, hands one over to look at.
+       Worker queue only, apart from insp_on. */
+    BOOL insp_on;
+    double insp_until; /* capturing until then */
+    NSMutableDictionary<NSString *, NSMutableDictionary *> *insp_meshes; /* the last capture: key -> mesh */
+    NSMutableSet<NSString *> *insp_hidden;
+    NSMutableSet<NSNumber *> *insp_hidden_pipes;
+    NSString *insp_solo;
+    uint32_t cur_pipe;
+    NSString *cur_pipe_name;
+    NSArray<NSNumber *> *cur_strides; /* the pipeline's vertex buffer strides, by slot */
     /* The newest frame, BGRA, for hv_pvg_metal_frame, and the same without the pointer on it. */
     uint8_t *frame, *base;
     NSMutableArray<NSValue *> *retired_frames;
@@ -204,6 +228,9 @@ static NSCountedSet<NSNumber *> *wb_unmapping; /* mapping ids unmapped by the gu
     uint64_t screen_requests; /* fresh frames/cursor changes, not automatic retries */
     double drawable_retry_deadline; /* at most two seconds of retrying an unavailable target */
     uint32_t screen_w, screen_h;
+    uint64_t screen_seq; /* screen_lock: bumped on every new frame or pointer change, for the remote stream */
+    BOOL headless; /* screen_lock: remote desktop asked the phone to stop drawing */
+    CVMetalTextureCacheRef stream_cache;
     id<MTLBuffer> test_readback; /* HV_PVG_GPU_TEST: the drawable's pixels for screenshots */
     id<MTLBuffer> readback;
     const char *shot;
@@ -352,6 +379,8 @@ static void refresh_pages(HvReplay *r, uint32_t task, HvObject *o) {
     o->guest_copy = nil;
     if (o->plain_buffer) o->object = buffer_over_mapping(r, o);
     r->remaps++;
+    if (r->tracing) fprintf(stderr, "trace: remap len %llu vpage %llx generation %u plain %d\n", (unsigned long long)o->length,
+                            (unsigned long long)o->vpage, (unsigned)o->generation, (int)o->plain_buffer);
 }
 
 static void set_framebuffer_only(MTLTextureDescriptor *t, BOOL on) {
@@ -532,8 +561,28 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
             return nil;
         }
         NSError *err = nil;
-        id state = tag == 0xe ? [device newRenderPipelineStateWithDescriptor:descriptor error:&err]
+        BOOL reflect = tag == 0xe && getenv("HV_SHADER_DUMP") && atoi(getenv("HV_SHADER_DUMP"));
+        MTLRenderPipelineReflection *refl = nil;
+        id state = reflect ? [device newRenderPipelineStateWithDescriptor:descriptor options:MTLPipelineOptionBindingInfo reflection:&refl error:&err]
+                 : tag == 0xe ? [device newRenderPipelineStateWithDescriptor:descriptor error:&err]
                               : [device newRenderPipelineStateWithTileDescriptor:descriptor options:MTLPipelineOptionNone reflection:nil error:&err];
+        NSMutableString *vbind = [NSMutableString string]; /* debugging: which vertex slot holds what, to find the bone palette */
+        if (refl) for (id<MTLBinding> b in refl.vertexBindings) {
+            if (b.type != MTLBindingTypeBuffer) continue;
+            [vbind appendFormat:@" vb%lu:%@:%lu", (unsigned long)b.index, b.name, (unsigned long)((id<MTLBufferBinding>)b).bufferDataSize];
+        }
+        if (reflect) { /* and how the vertices are read: attribute format/offset/buffer, then each buffer's stride */
+            MTLVertexDescriptor *vd = ((MTLRenderPipelineDescriptor *)descriptor).vertexDescriptor;
+            for (NSUInteger a = 0; a < 31; a++) {
+                MTLVertexAttributeDescriptor *at = vd.attributes[a];
+                if (at.format != MTLVertexFormatInvalid)
+                    [vbind appendFormat:@" va%lu:f%lu@%lu/b%lu", (unsigned long)a, (unsigned long)at.format, (unsigned long)at.offset, (unsigned long)at.bufferIndex];
+            }
+            for (NSUInteger l = 0; l < 31; l++)
+                if (vd.layouts[l].stride) [vbind appendFormat:@" vl%lu:%lu/%lu", (unsigned long)l, (unsigned long)vd.layouts[l].stride, (unsigned long)vd.layouts[l].stepFunction];
+            for (MTLVertexAttribute *at in ((MTLRenderPipelineDescriptor *)descriptor).vertexFunction.vertexAttributes)
+                [vbind appendFormat:@" in%lu:%@:t%lu", (unsigned long)at.attributeIndex, at.name, (unsigned long)at.attributeType];
+        }
         if (!state) [self complain:[NSString stringWithFormat:@"pipeline %u: %@", tag, err.localizedDescription]];
         if (tag == 0xe && getenv("HV_SHADER_DUMP") && atoi(getenv("HV_SHADER_DUMP"))) { /* m4 fork: blend state as this iOS read it */
             MTLRenderPipelineDescriptor *rp = descriptor;
@@ -547,9 +596,15 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
                         (unsigned long)c.writeMask);
             }
         }
+        if (state && tag == 0xe) { /* the inspector reads vertices with these */
+            MTLVertexDescriptor *vd = ((MTLRenderPipelineDescriptor *)descriptor).vertexDescriptor;
+            NSMutableArray *strides = [NSMutableArray array];
+            for (NSUInteger l = 0; l < 31; l++) [strides addObject:@(vd.layouts[l].stride)];
+            objc_setAssociatedObject(state, "hvstrides", strides, OBJC_ASSOCIATION_RETAIN);
+        }
         if (state && tag == 0xe && getenv("HV_PVG_TRACE_FILE")) {
             MTLRenderPipelineDescriptor *rp = descriptor;
-            objc_setAssociatedObject(state, "hvname", [NSString stringWithFormat:@"%@ / %@ -> fmt %lu blend %d", rp.vertexFunction.name, rp.fragmentFunction.name, (unsigned long)rp.colorAttachments[0].pixelFormat, (int)rp.colorAttachments[0].blendingEnabled], OBJC_ASSOCIATION_RETAIN);
+            objc_setAssociatedObject(state, "hvname", [NSString stringWithFormat:@"%@ / %@ -> fmt %lu blend %d%@", rp.vertexFunction.name, rp.fragmentFunction.name, (unsigned long)rp.colorAttachments[0].pixelFormat, (int)rp.colorAttachments[0].blendingEnabled, vbind], OBJC_ASSOCIATION_RETAIN);
         }
         return state;
     }
@@ -1481,10 +1536,134 @@ typedef struct {
     else [(id<MTLComputeCommandEncoder>)e useHeaps:list count:have];
 }
 
+/* Tracing: what an indexed draw reads. The index range shows whether it stays inside its mesh; the
+   first values at each vertex stream's offset show the layout. Streams are the high slots (16 up). */
+/* Tracing: each buffer a draw reads, written once per trace to gpu-dump/<address>.bin beside the trace file, to check offline. */
+- (void)traceDump:(id<MTLBuffer>)b {
+    if (b.storageMode == MTLStorageModePrivate) return;
+    NSValue *key = [NSValue valueWithPointer:(__bridge void *)b];
+    if (!trace_dumped) trace_dumped = [NSMutableSet set];
+    if ([trace_dumped containsObject:key]) return;
+    [trace_dumped addObject:key];
+    NSString *dir = [[@(getenv("HV_PVG_TRACE_FILE") ?: "/tmp/x") stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"gpu-dump"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    [[NSData dataWithBytesNoCopy:b.contents length:b.length freeWhenDone:NO]
+        writeToFile:[dir stringByAppendingPathComponent:[NSString stringWithFormat:@"%p.bin", (__bridge void *)b]] atomically:NO];
+}
+
+- (void)traceIndexed:(id<MTLBuffer>)b offset:(NSUInteger)off type:(NSUInteger)type count:(NSUInteger)count instances:(NSUInteger)instances base:(NSInteger)base primitive:(NSUInteger)primitive {
+    NSUInteger size = type == MTLIndexTypeUInt32 ? 4 : 2;
+    [self traceDump:b];
+    for (uint32_t s = 0; s < 32; s++) if (trace_vb[s]) [self traceDump:trace_vb[s]];
+    unsigned serial = trace_draws++;
+    fprintf(stderr, "trace:  indexed d%u prim %lu idxtype %lu count %lu inst %lu base %ld idxoff %lu idxlen %lu ibuf %p", serial, (unsigned long)primitive, (unsigned long)type,
+            (unsigned long)count, (unsigned long)instances, (long)base, (unsigned long)off, (unsigned long)b.length, (__bridge void *)b);
+    if (b.storageMode != MTLStorageModePrivate && count && off <= b.length && count <= (b.length - off) / size) {
+        const uint8_t *p = (const uint8_t *)b.contents + off;
+        uint32_t lo = UINT32_MAX, hi = 0;
+        for (NSUInteger i = 0; i < count; i++) {
+            uint32_t v = 0;
+            memcpy(&v, p + i * size, size);
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+        }
+        fprintf(stderr, " min %u max %u", lo, hi);
+    }
+    fprintf(stderr, "\n");
+    /* The low slots hold constants such as bone matrices, rewritten every frame: keep this draw's slice of each
+       as gpu-dump/d<serial>-s<slot>.bin, for the first big draws of a trace. */
+    BOOL slices = count >= 300 && trace_sliced < 400;
+    if (slices) trace_sliced++;
+    NSString *dir = [[@(getenv("HV_PVG_TRACE_FILE") ?: "/tmp/x") stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"gpu-dump"];
+    for (uint32_t s = 0; s < 16; s++) {
+        id<MTLBuffer> v = trace_vb[s];
+        if (!v) continue;
+        fprintf(stderr, "trace:   const %u off %lu len %lu buf %p\n", s, (unsigned long)trace_vo[s], (unsigned long)v.length, (__bridge void *)v);
+        if (slices && v.storageMode != MTLStorageModePrivate && trace_vo[s] < v.length) {
+            NSUInteger o = trace_vo[s], n = MIN(v.length - o, (NSUInteger)16384);
+            [[NSData dataWithBytes:(const uint8_t *)v.contents + o length:n]
+                writeToFile:[dir stringByAppendingPathComponent:[NSString stringWithFormat:@"d%u-s%u.bin", serial, s]] atomically:NO];
+            /* and again once the GPU has run the draw: a difference means the guest rewrote it while the GPU used it */
+            NSString *after = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"d%u-s%u-after.bin", serial, s]];
+            [trace_cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
+                (void)done;
+                [[NSData dataWithBytes:(const uint8_t *)v.contents + o length:n] writeToFile:after atomically:NO];
+            }];
+        }
+    }
+    for (uint32_t s = 16; s < 32; s++) {
+        id<MTLBuffer> v = trace_vb[s];
+        if (!v) continue;
+        fprintf(stderr, "trace:   stream %u off %lu stride %lu len %lu buf %p:", s, (unsigned long)trace_vo[s], (unsigned long)trace_vs[s], (unsigned long)v.length, (__bridge void *)v);
+        if (v.storageMode != MTLStorageModePrivate && trace_vo[s] < v.length) {
+            const float *f = (const float *)((const uint8_t *)v.contents + trace_vo[s]);
+            NSUInteger n = MIN((v.length - trace_vo[s]) / 4, (NSUInteger)24);
+            for (NSUInteger k = 0; k < n; k++) fprintf(stderr, " %g", f[k]);
+        }
+        fprintf(stderr, "\n");
+    }
+}
+
+/* Inspector: a mesh is its index buffer, offset, count and base vertex, the same from one frame to the next.
+   While capturing, the first draw of each mesh keeps a copy of what it reads: its indices, the vertices they
+   reach in each stream, and the start of each constant buffer (bones and the like change every frame). */
+static NSData *insp_slice(id<MTLBuffer> b, NSUInteger from, NSUInteger length) {
+    if (!b || b.storageMode == MTLStorageModePrivate || from >= b.length) return nil;
+    return [NSData dataWithBytes:(const uint8_t *)b.contents + from length:MIN(length, b.length - from)];
+}
+
+- (BOOL)inspect:(id<MTLBuffer>)b offset:(NSUInteger)off type:(NSUInteger)type count:(NSUInteger)count instances:(NSUInteger)inst base:(NSInteger)base {
+    /* Nothing being captured and nothing hidden: no key to make. This runs for every indexed draw. */
+    BOOL capturing = insp_until > 0 && now_seconds() < insp_until;
+    if (!capturing && !insp_hidden.count && !insp_hidden_pipes.count && !insp_solo) return NO;
+    NSString *key = [NSString stringWithFormat:@"%p:%lu:%lu:%ld", (__bridge void *)b, (unsigned long)off, (unsigned long)count, (long)base];
+    if (capturing) {
+        NSMutableDictionary *m = insp_meshes[key];
+        if (m) m[@"draws"] = @([m[@"draws"] intValue] + 1);
+        else if (insp_meshes.count < 4000) {
+            m = [NSMutableDictionary dictionary];
+            [m addEntriesFromDictionary:@{@"key": key, @"pipe": @(cur_pipe), @"name": cur_pipe_name ?: @"", @"count": @(count),
+                                          @"instances": @(inst), @"base": @(base), @"index_type": @(type), @"draws": @1}];
+            NSUInteger size = type == MTLIndexTypeUInt32 ? 4 : 2;
+            NSData *idx = insp_slice(b, off, count * size);
+            uint32_t lo = UINT32_MAX, hi = 0;
+            if (idx.length == count * size && count) {
+                for (NSUInteger i = 0; i < count; i++) {
+                    uint32_t v = 0;
+                    memcpy(&v, (const uint8_t *)idx.bytes + i * size, size);
+                    if (v < lo) lo = v;
+                    if (v > hi) hi = v;
+                }
+                [m addEntriesFromDictionary:@{@"indices": idx, @"min": @(lo), @"max": @(hi)}];
+                NSMutableDictionary *streams = [NSMutableDictionary dictionary];
+                for (uint32_t s = 16; s < 31; s++) {
+                    NSUInteger stride = s < cur_strides.count ? cur_strides[s].unsignedIntegerValue : 0;
+                    if (!stride || !trace_vb[s] || (NSInteger)lo + base < 0) continue;
+                    NSData *d = insp_slice(trace_vb[s], trace_vo[s] + ((NSUInteger)((NSInteger)lo + base)) * stride, (NSUInteger)(hi - lo + 1) * stride);
+                    if (d) streams[[@(s) stringValue]] = @{@"stride": @(stride), @"data": d};
+                }
+                m[@"streams"] = streams;
+            }
+            NSMutableDictionary *consts = [NSMutableDictionary dictionary];
+            for (uint32_t s = 0; s < 16; s++) {
+                NSData *d = insp_slice(trace_vb[s], trace_vo[s], 16384);
+                if (d) consts[[@(s) stringValue]] = d;
+            }
+            m[@"consts"] = consts;
+            insp_meshes[key] = m;
+        }
+    }
+    return [insp_hidden containsObject:key] || [insp_hidden_pipes containsObject:@(cur_pipe)] || (insp_solo && ![insp_solo isEqualToString:key]);
+}
+
 - (void)render:(id<MTLRenderCommandEncoder>)e tag:(uint32_t)tag rec:(Rec)r task:(uint32_t)task {
     BOOL draw = tag <= 19 || tag == 28 || tag == 29 || tag == 155 || tag == 162;
     if (!pipeline_set && draw) return;
-    if (tracing && draw) fprintf(stderr, "trace:  draw tag %u\n", tag);
+    if (tracing && draw) { /* and the record as the guest wrote it: which bytes hold what is settled by looking */
+        fprintf(stderr, "trace:  draw tag %u size %u raw", tag, r.size);
+        for (uint32_t k = 0; k < r.size && k < 72; k++) fprintf(stderr, " %02x", r.p[k]);
+        fprintf(stderr, "\n");
+    }
     switch (tag) {
     case 24: { /* {fence, stages} */
         id f = [self get:U32(0) task:task];
@@ -1506,6 +1685,9 @@ typedef struct {
         id state = [self get:U32(0) task:task];
         if (state) [e setRenderPipelineState:state];
         pipeline_set = state != nil;
+        cur_pipe = U32(0);
+        cur_pipe_name = objc_getAssociatedObject(state, "hvname");
+        cur_strides = objc_getAssociatedObject(state, "hvstrides");
         if (tracing) fprintf(stderr, "trace:  pipeline %u %s\n", U32(0), [objc_getAssociatedObject(state, "hvname") UTF8String]);
         break;
     }
@@ -1521,8 +1703,11 @@ typedef struct {
             offsets[i] = (NSUInteger)U64(12 + i * 12);
         }
         NSRange range = NSMakeRange(index, count);
+        if (insp_on && !tracing && tag == 125) for (uint32_t i = 0; i < count && index + i < 32; i++)
+            trace_vb[index + i] = strong[i], trace_vo[index + i] = offsets[i], trace_vs[index + i] = 0;
         if (tracing) for (uint32_t i = 0; i < count; i++) { /* m4 fork: what the shaders are given */
             id<MTLBuffer> bb = strong[i];
+            if (tag == 125 && index + i < 32) trace_vb[index + i] = bb, trace_vo[index + i] = offsets[i], trace_vs[index + i] = 0;
             fprintf(stderr, "trace:  %s buf %u ref %u off %lu len %lu:", tag == 125 ? "vtx" : tag == 110 ? "frag" : "tile", index + i, U32(8 + i * 12),
                     (unsigned long)offsets[i], (unsigned long)bb.length);
             if (bb && bb.storageMode != MTLStorageModePrivate && offsets[i] < bb.length) {
@@ -1537,7 +1722,10 @@ typedef struct {
         else [e setTileBuffers:buffers offsets:offsets withRange:range];
         break;
     }
-    case 126: [e setVertexBufferOffset:(NSUInteger)U64(4) atIndex:U32(0)]; break;
+    case 126:
+        if ((tracing || insp_on) && U32(0) < 32) trace_vo[U32(0)] = (NSUInteger)U64(4);
+        [e setVertexBufferOffset:(NSUInteger)U64(4) atIndex:U32(0)];
+        break;
     case 111: [e setFragmentBufferOffset:(NSUInteger)U64(4) atIndex:U32(0)]; break;
     case 114: case 161: { /* fragment, tile textures */
         uint32_t index = U32(0), count = U32(4);
@@ -1689,10 +1877,14 @@ typedef struct {
             offsets[i] = (NSUInteger)U64(12 + i * 20);
             strides[i] = (NSUInteger)U64(20 + i * 20);
         }
+        if (tracing || insp_on) for (uint32_t i = 0; i < count && index + i < 32; i++) trace_vb[index + i] = strong[i], trace_vo[index + i] = offsets[i], trace_vs[index + i] = strides[i];
         [e setVertexBuffers:buffers offsets:offsets attributeStrides:strides withRange:NSMakeRange(index, count)];
         break;
     }
-    case 166: [e setVertexBufferOffset:(NSUInteger)U64(4) attributeStride:(NSUInteger)U64(12) atIndex:U32(0)]; break;
+    case 166:
+        if ((tracing || insp_on) && U32(0) < 32) trace_vo[U32(0)] = (NSUInteger)U64(4), trace_vs[U32(0)] = (NSUInteger)U64(12);
+        [e setVertexBufferOffset:(NSUInteger)U64(4) attributeStride:(NSUInteger)U64(12) atIndex:U32(0)];
+        break;
     case 101: {
         float c[4];
         memcpy(c, r.p, sizeof c);
@@ -1795,16 +1987,26 @@ typedef struct {
         break;
     case 10: case 28: { /* {primitive, index type, ref, offset 64, count 64, instances 64, base vertex 64, base instance 64} */
         id<MTLBuffer> b = [self get:U32(4) task:task];
+        if (tag == 28 && !hv_base_vertex_quirk_hits && !base_vertex_warned) {
+            /* The guest's driver cuts record 28's base vertex to 16 bits unless the translator took that out
+               (base_vertex_quirk in core/translate.c): a driver it does not recognise is not corrected. */
+            base_vertex_warned = YES;
+            fprintf(stderr, "hengevm: pvg-metal: indexed draws arrive in record 28 and the driver's base vertex cut was not found: meshes past vertex 65535 of a buffer will be drawn wrong\n");
+        }
+        if (insp_on && b && [self inspect:b offset:(NSUInteger)U64(8) type:U16(2) count:(NSUInteger)U64(16) instances:(NSUInteger)U64(24) base:(NSInteger)U64(32)]) break;
         if (b) [e drawIndexedPrimitives:(MTLPrimitiveType)U16(0) indexCount:(NSUInteger)U64(16) indexType:(MTLIndexType)U16(2) indexBuffer:b indexBufferOffset:(NSUInteger)U64(8)
                           instanceCount:(NSUInteger)U64(24) baseVertex:(NSInteger)U64(32) baseInstance:(NSUInteger)U64(40)];
+        if (tracing && b) [self traceIndexed:b offset:(NSUInteger)U64(8) type:U16(2) count:(NSUInteger)U64(16) instances:(NSUInteger)U64(24) base:(NSInteger)U64(32) primitive:U16(0)];
         draws++;
         break;
     }
     case 11: case 29: { /* {primitive, index type, ref, offset 16, count 16, instances 16, base vertex 16, base instance 16}; 29's base vertex can be negative */
         id<MTLBuffer> b = [self get:U32(4) task:task];
         NSInteger base_vertex = tag == 29 ? (NSInteger)(int16_t)U16(14) : (NSInteger)U16(14);
+        if (insp_on && b && [self inspect:b offset:U16(8) type:U16(2) count:U16(10) instances:U16(12) base:base_vertex]) break;
         if (b) [e drawIndexedPrimitives:(MTLPrimitiveType)U16(0) indexCount:U16(10) indexType:(MTLIndexType)U16(2) indexBuffer:b indexBufferOffset:U16(8)
                           instanceCount:U16(12) baseVertex:base_vertex baseInstance:U16(16)];
+        if (tracing && b) [self traceIndexed:b offset:U16(8) type:U16(2) count:U16(10) instances:U16(12) base:base_vertex primitive:U16(0)];
         draws++;
         break;
     }
@@ -2170,9 +2372,11 @@ typedef struct {
     const uint32_t *res = a + 3;
     const uint8_t *bufs = (const uint8_t *)(res + nres * 2);
     tracing = hv_pvg_trace_on() != 0;
+    if (!tracing) trace_dumped = nil, trace_draws = trace_sliced = 0;
     if (tracing) fprintf(stderr, "trace: exec task %u, %u resources, %u buffers\n", task, nres, nbuf);
     double t_begin = now_seconds();
     id<MTLCommandBuffer> cb = [queue commandBuffer];
+    trace_cb = tracing ? cb : nil;
     id<MTLBlitCommandEncoder> blit = nil;
     BOOL sync_after = NO;
     for (uint32_t i = 0; i < nres; i++) {
@@ -2336,6 +2540,21 @@ static const uint8_t *half_to_byte(void) {
         [self complain:@"pointer image unreadable"];
         return;
     }
+    /* The pointer is drawn as colour already multiplied by alpha (colour + what is under it * (1 - alpha)). An app's
+       own pointer can come with plain colour instead (Roblox's: white at an alpha of a few): added whole, that gave
+       white specks around it. No multiplied pixel has a colour above its alpha, so one that does says which it is. */
+    BOOL plain = NO;
+    for (uint32_t y = 0; y < h && !plain; y++) {
+        const uint8_t *px = bits + (size_t)y * stride;
+        for (uint32_t x = 0; x < w; x++, px += 4)
+            if (px[0] > px[3] || px[1] > px[3] || px[2] > px[3]) { plain = YES; break; }
+    }
+    if (plain)
+        for (uint32_t y = 0; y < h; y++) {
+            uint8_t *px = bits + (size_t)y * stride;
+            for (uint32_t x = 0; x < w; x++, px += 4)
+                for (int c = 0; c < 3; c++) px[c] = (uint8_t)((px[c] * px[3] + 127) / 255);
+        }
     free(cursor);
     MTLTextureDescriptor *ct = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:w height:h mipmapped:NO];
     ct.storageMode = MTLStorageModeShared;
@@ -2412,6 +2631,27 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
     "  return t.sample(s, v.uv); }\n";
 
 - (BOOL)prepareScreenForLayer:(CAMetalLayer *)target {
+    if (![self preparePipelines]) return NO;
+    // Pipelines are shared, but a newly connected monitor has a fresh layer.
+    if (prepared_layer != target) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        target.device = device;
+        target.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        target.framebufferOnly = !(getenv("HV_PVG_GPU_TEST") || getenv("HV_COLOR_PROBE")); /* the probe copies the drawable out */
+        target.allowsNextDrawableTimeout = YES;
+        target.maximumDrawableCount = 3;
+        [CATransaction commit];
+        prepared_layer = target;
+        fprintf(stderr, "hengevm: pvg-metal: half-float display surfaces are shown %s (HV_PVG_HALF=%s)\n",
+                hv_half_mode_get() == 1 ? "as LINEAR light with an sRGB encode" : "as display-encoded values, passed through", hv_half_mode_get() == 1 ? "linear" : "encoded/default");
+        if (cp.on) cp_log_layer(self, target);
+    }
+    return YES;
+}
+
+/* The pipelines that draw the screen and pointer: the phone's layer and the remote stream both use them. */
+- (BOOL)preparePipelines {
     if (!screen_pipe || !linear_pipe || !cursor_pipe) {
         NSError *err = nil;
         id<MTLLibrary> lib = [device newLibraryWithSource:screen_shaders options:nil error:&err];
@@ -2437,22 +2677,76 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
         cursor_sampler = [device newSamplerStateWithDescriptor:sd];
         if (!screen_pipe || !linear_pipe || !cursor_pipe || !screen_sampler || !cursor_sampler) { [self complain:[NSString stringWithFormat:@"screen pipelines: %@", err.localizedDescription]]; return NO; }
     }
-    // Pipelines are shared, but a newly connected monitor has a fresh layer.
-    if (prepared_layer != target) {
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        target.device = device;
-        target.pixelFormat = MTLPixelFormatBGRA8Unorm;
-        target.framebufferOnly = !(getenv("HV_PVG_GPU_TEST") || getenv("HV_COLOR_PROBE")); /* the probe copies the drawable out */
-        target.allowsNextDrawableTimeout = YES;
-        target.maximumDrawableCount = 3;
-        [CATransaction commit];
-        prepared_layer = target;
-        fprintf(stderr, "hengevm: pvg-metal: half-float display surfaces are shown %s (HV_PVG_HALF=%s)\n",
-                hv_half_mode_get() == 1 ? "as LINEAR light with an sRGB encode" : "as display-encoded values, passed through", hv_half_mode_get() == 1 ? "linear" : "encoded/default");
-        if (cp.on) cp_log_layer(self, target);
-    }
     return YES;
+}
+
+/* The screen, then the pointer over it, into whatever target the encoder has (W x H: the screen's size). */
+- (void)drawScreen:(id<MTLRenderCommandEncoder>)e tex:(id<MTLTexture>)tex half:(BOOL)half cursor:(id<MTLTexture>)ctex shown:(BOOL)shown
+                 w:(uint32_t)W h:(uint32_t)H cw:(uint32_t)cw0 ch:(uint32_t)ch0 hx:(int)hx hy:(int)hy {
+    [e setRenderPipelineState:half ? linear_pipe : screen_pipe];
+    float rect[4] = {-1, -1, 2, 2};
+    [e setVertexBytes:rect length:sizeof rect atIndex:0];
+    [e setFragmentTexture:tex atIndex:0];
+    [e setFragmentSamplerState:screen_sampler atIndex:0];
+    if (half) {
+        uint32_t half_mode = (uint32_t)hv_half_mode_get();
+        [e setFragmentBytes:&half_mode length:sizeof half_mode atIndex:0];
+    }
+    [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+    const uint8_t *page = hv_pvg_lite_display_page(lite);
+    uint32_t where = page ? __atomic_load_n((const uint32_t *)(page + 0xe00), __ATOMIC_ACQUIRE) : 0xffffffff;
+    if (ctex && where != 0xffffffff && (shown || page[0xe04])) {
+        const float scale = cursor_scale();
+        float x = (float)(where & 0xffff) - hx * scale, y = (float)(where >> 16) - hy * scale;
+        float cw = cw0 * scale, ch = ch0 * scale;
+        float r[4] = {x / W * 2 - 1, 1 - (y + ch) / H * 2, cw / W * 2, ch / H * 2};
+        [e setRenderPipelineState:cursor_pipe];
+        [e setVertexBytes:r length:sizeof r atIndex:0];
+        [e setFragmentTexture:ctex atIndex:0];
+        NSNumber *sharpSetting = [[NSUserDefaults standardUserDefaults] objectForKey:@"henge.cursor.sharp"];
+        [e setFragmentSamplerState:sharpSetting && !sharpSetting.boolValue ? screen_sampler : cursor_sampler atIndex:0];
+        [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+    }
+}
+
+/* Remote desktop: the screen and pointer drawn into a pixel buffer for the video encoder, scaled to its size.
+   Returns a count that changes whenever the screen or pointer did, or -1 before there is a screen. */
+- (int)streamInto:(CVPixelBufferRef)pb w:(int *)w h:(int *)h {
+    os_unfair_lock_lock(&screen_lock);
+    id<MTLTexture> tex = screen_tex, ctex = cursor_tex;
+    BOOL half = screen_half, shown = cursor_shown;
+    uint32_t W = screen_w, H = screen_h, cw0 = cursor_w, ch0 = cursor_h;
+    int hx = cursor_hot_x, hy = cursor_hot_y, seq = (int)(screen_seq & 0x7fffffff);
+    os_unfair_lock_unlock(&screen_lock);
+    if (w) *w = (int)W;
+    if (h) *h = (int)H;
+    if (!tex) return -1;
+    if (!pb) return seq;
+    if (![self preparePipelines]) return -1;
+    if (!stream_cache && CVMetalTextureCacheCreate(NULL, NULL, device, NULL, &stream_cache) != kCVReturnSuccess) return -1;
+    CVMetalTextureRef ref = NULL;
+    if (CVMetalTextureCacheCreateTextureFromImage(NULL, stream_cache, pb, NULL, MTLPixelFormatBGRA8Unorm,
+                                                  CVPixelBufferGetWidth(pb), CVPixelBufferGetHeight(pb), 0, &ref) != kCVReturnSuccess) return -1;
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = CVMetalTextureGetTexture(ref);
+    pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:pass];
+    [self drawScreen:e tex:tex half:half cursor:ctex shown:shown w:W h:H cw:cw0 ch:ch0 hx:hx hy:hy];
+    [e endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    CFRelease(ref);
+    return seq;
+}
+
+/* Remote desktop: stop drawing on the phone (the stream goes on), or start again. */
+- (void)setHeadless:(BOOL)on {
+    os_unfair_lock_lock(&screen_lock);
+    headless = on;
+    os_unfair_lock_unlock(&screen_lock);
+    if (!on) [self screenChanged];
 }
 
 /* The display, drawn by the GPU. Waiting for a drawable can take until the screen's next
@@ -2462,7 +2756,8 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
     /* screen_lock held */
     if (atomic_load(&stopping)) return;
     if (fresh) screen_requests++;
-    if (presenter_running || !layer || !screen_tex || drawable_retry_pending) return;
+    screen_seq++;
+    if (presenter_running || !layer || !screen_tex || drawable_retry_pending || headless) return;
     if (drawable_retry_cooldown) {
         double delay = drawable_retry_cooldown - now_seconds();
         if (delay > 0) {
@@ -2608,30 +2903,7 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
         pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:pass];
-        [e setRenderPipelineState:half ? linear_pipe : screen_pipe];
-        float rect[4] = {-1, -1, 2, 2};
-        [e setVertexBytes:rect length:sizeof rect atIndex:0];
-        [e setFragmentTexture:tex atIndex:0];
-        [e setFragmentSamplerState:screen_sampler atIndex:0];
-        if (half) {
-            uint32_t half_mode = (uint32_t)hv_half_mode_get();
-            [e setFragmentBytes:&half_mode length:sizeof half_mode atIndex:0];
-        }
-        [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
-        const uint8_t *page = hv_pvg_lite_display_page(lite);
-        uint32_t where = page ? __atomic_load_n((const uint32_t *)(page + 0xe00), __ATOMIC_ACQUIRE) : 0xffffffff;
-        if (ctex && where != 0xffffffff && (shown || page[0xe04])) {
-            const float scale = cursor_scale();
-            float x = (float)(where & 0xffff) - hx * scale, y = (float)(where >> 16) - hy * scale;
-            float cw = cw0 * scale, ch = ch0 * scale;
-            float r[4] = {x / W * 2 - 1, 1 - (y + ch) / H * 2, cw / W * 2, ch / H * 2};
-            [e setRenderPipelineState:cursor_pipe];
-            [e setVertexBytes:r length:sizeof r atIndex:0];
-            [e setFragmentTexture:ctex atIndex:0];
-            NSNumber *sharpSetting = [[NSUserDefaults standardUserDefaults] objectForKey:@"henge.cursor.sharp"];
-            [e setFragmentSamplerState:sharpSetting && !sharpSetting.boolValue ? screen_sampler : cursor_sampler atIndex:0];
-            [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
-        }
+        [self drawScreen:e tex:tex half:half cursor:ctex shown:shown w:W h:H cw:cw0 ch:ch0 hx:hx hy:hy];
         [e endEncoding];
         if (cp.on) cp_capture_post(self, drawable.texture, W, H, cb);
 #if !TARGET_OS_IPHONE
@@ -2752,6 +3024,110 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
 
 @end
 
+/* Inspector server (HV_INSPECT): one JSON request a line on 127.0.0.1:5902, one JSON reply a line. Loopback only,
+   so only this device and a computer through usbmux (iproxy 15902:5902) reach it.
+   {"op":"capture","seconds":s}  the meshes drawn in the next s seconds, without their data
+   {"op":"hide","keys":[..],"pipes":[..],"solo":key|null}  what not to draw from now on (replaces the last)
+   {"op":"mesh","key":k}  one mesh of the last capture with its data, base64 */
+static id insp_json_safe(id v) {
+    if ([v isKindOfClass:NSData.class]) return [(NSData *)v base64EncodedStringWithOptions:0];
+    if ([v isKindOfClass:NSDictionary.class]) {
+        NSMutableDictionary *o = [NSMutableDictionary dictionary];
+        [(NSDictionary *)v enumerateKeysAndObjectsUsingBlock:^(id k, id x, BOOL *stop) { (void)stop; o[k] = insp_json_safe(x); }];
+        return o;
+    }
+    return v;
+}
+
+static NSDictionary *insp_handle(HvReplay *r, NSDictionary *q) {
+    NSString *op = q[@"op"];
+    if ([op isEqual:@"capture"]) {
+        double secs = MIN(MAX([q[@"seconds"] doubleValue], 0.05), 2.0);
+        dispatch_sync(r->worker, ^{ r->insp_meshes = [NSMutableDictionary dictionary]; r->insp_until = now_seconds() + secs; });
+        usleep((useconds_t)((secs + 0.15) * 1e6));
+        NSMutableArray *list = [NSMutableArray array];
+        dispatch_sync(r->worker, ^{
+            r->insp_until = 0;
+            for (NSMutableDictionary *m in r->insp_meshes.allValues) {
+                NSMutableDictionary *summary = [NSMutableDictionary dictionary];
+                for (NSString *k in @[@"key", @"pipe", @"name", @"count", @"instances", @"base", @"index_type", @"draws", @"min", @"max"])
+                    if (m[k]) summary[k] = m[k];
+                [list addObject:summary];
+            }
+        });
+        return @{@"meshes": list};
+    }
+    if ([op isEqual:@"hide"]) {
+        NSArray *keys = [q[@"keys"] isKindOfClass:NSArray.class] ? q[@"keys"] : @[];
+        NSArray *pipes = [q[@"pipes"] isKindOfClass:NSArray.class] ? q[@"pipes"] : @[];
+        NSString *solo = [q[@"solo"] isKindOfClass:NSString.class] ? q[@"solo"] : nil;
+        dispatch_sync(r->worker, ^{
+            r->insp_hidden = [NSMutableSet setWithArray:keys];
+            r->insp_hidden_pipes = [NSMutableSet setWithArray:pipes];
+            r->insp_solo = solo;
+        });
+        return @{@"ok": @YES};
+    }
+    if ([op isEqual:@"mesh"]) {
+        __block id out = nil;
+        dispatch_sync(r->worker, ^{ NSDictionary *m = r->insp_meshes[q[@"key"]]; if (m) out = insp_json_safe(m); });
+        return out ?: @{@"error": @"not in the last capture"};
+    }
+    return @{@"error": @"unknown op"};
+}
+
+/* One server for the app's life: a Mac that is shut down and started again gets a new HvReplay, and the port
+   stays the one it was. Requests go to whichever is running. */
+static os_unfair_lock insp_lock = OS_UNFAIR_LOCK_INIT;
+static HvReplay *insp_current;
+static BOOL insp_started;
+
+static void insp_serve(void) {
+    int s = socket(AF_INET, SOCK_STREAM, 0), one = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    struct sockaddr_in a = {0};
+    a.sin_len = sizeof a, a.sin_family = AF_INET, a.sin_port = htons(5902), a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (s < 0 || bind(s, (struct sockaddr *)&a, sizeof a) || listen(s, 2)) {
+        fprintf(stderr, "hengevm: inspector: can't listen on 127.0.0.1:5902\n");
+        if (s >= 0) close(s);
+        return;
+    }
+    fprintf(stderr, "hengevm: inspector on 127.0.0.1:5902 (from a computer: iproxy 15902:5902)\n");
+    for (;;) {
+        int c = accept(s, NULL, NULL);
+        if (c < 0) continue;
+        setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+        NSMutableData *in = [NSMutableData data];
+        char chunk[8192];
+        ssize_t n;
+        BOOL alive = YES;
+        while (alive && (n = recv(c, chunk, sizeof chunk, 0)) > 0) @autoreleasepool {
+            [in appendBytes:chunk length:(NSUInteger)n];
+            for (;;) {
+                const char *b = in.bytes, *nl = in.length ? memchr(b, '\n', in.length) : NULL;
+                if (!nl) break;
+                NSData *line = [in subdataWithRange:NSMakeRange(0, (NSUInteger)(nl - b))];
+                [in replaceBytesInRange:NSMakeRange(0, (NSUInteger)(nl - b) + 1) withBytes:NULL length:0];
+                id q = [NSJSONSerialization JSONObjectWithData:line options:0 error:nil];
+                os_unfair_lock_lock(&insp_lock);
+                HvReplay *r = insp_current;
+                os_unfair_lock_unlock(&insp_lock);
+                NSDictionary *reply = ![q isKindOfClass:NSDictionary.class] ? @{@"error": @"bad request"} : r ? insp_handle(r, q) : @{@"error": @"no Mac is running"};
+                NSMutableData *out = [[NSJSONSerialization dataWithJSONObject:reply options:0 error:nil] mutableCopy] ?: [NSMutableData data];
+                [out appendBytes:"\n" length:1];
+                for (NSUInteger sent = 0; sent < out.length;) {
+                    ssize_t k = send(c, (const uint8_t *)out.bytes + sent, out.length - sent, 0);
+                    if (k <= 0) { alive = NO; break; }
+                    sent += (NSUInteger)k;
+                }
+                if (!alive) break;
+            }
+        }
+        close(c);
+    }
+}
+
 HvPvgMetal *hv_pvg_metal_create(HvPvgLite *lite) {
     @autoreleasepool {
         id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
@@ -2779,6 +3155,15 @@ HvPvgMetal *hv_pvg_metal_create(HvPvgLite *lite) {
         r->complaints = [NSMutableSet new];
         r->shot = getenv("HV_PVG_SHOT");
         cp_start(r);
+        if (getenv("HV_INSPECT")) { /* debugging: tools/henge-inspect.py */
+            r->insp_on = YES;
+            os_unfair_lock_lock(&insp_lock);
+            insp_current = r;
+            BOOL start = !insp_started;
+            insp_started = YES;
+            os_unfair_lock_unlock(&insp_lock);
+            if (start) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ insp_serve(); });
+        }
 #if !TARGET_OS_IPHONE
         if (getenv("HV_PVG_GPU_TEST")) r->layer = [CAMetalLayer layer];
 #endif
@@ -2803,6 +3188,9 @@ void hv_pvg_metal_destroy(HvPvgMetal *m) {
     @autoreleasepool {
         HvReplay *r = CFBridgingRelease(m);
         atomic_store(&r->stopping, 1);
+        os_unfair_lock_lock(&insp_lock);
+        if (insp_current == r) insp_current = nil;
+        os_unfair_lock_unlock(&insp_lock);
         if (r->shot_timer) { dispatch_source_cancel(r->shot_timer); r->shot_timer = nil; }
         if (cp.timer) { dispatch_source_cancel(cp.timer); cp.timer = nil; }
         os_unfair_lock_lock(&r->screen_lock);
@@ -2975,6 +3363,16 @@ void hv_pvg_metal_unmap(HvPvgMetal *m, uint32_t mapping) {
         [wb_unmapping removeObject:@((uint64_t)mapping)];
         os_unfair_lock_unlock(&wb_lock);
     });
+}
+
+int hv_pvg_metal_stream_frame(HvPvgMetal *m, void *pixel_buffer, int *w, int *h) {
+    if (!m) return -1;
+    HvReplay *r = (__bridge HvReplay *)m;
+    @autoreleasepool { return [r streamInto:(CVPixelBufferRef)pixel_buffer w:w h:h]; }
+}
+
+void hv_pvg_metal_set_headless(HvPvgMetal *m, int on) {
+    if (m) [(__bridge HvReplay *)m setHeadless:on != 0];
 }
 
 /* A small picture of what the display shows, BGRA with no padding, for the app's home screen.

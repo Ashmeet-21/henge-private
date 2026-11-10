@@ -38,6 +38,8 @@ enum HengeVmOutcome {
     HENGE_VM_OUTCOME_HOST_STOP, HENGE_VM_OUTCOME_PANIC
 };
 int henge_vm_exit_outcome(void);
+/* The Mac's power button, down (1) and up (0): macOS shows its shut down dialog and closes apps first. */
+void henge_vm_power_button(int down);
 void henge_vm_stop(void);
 /* Testing: sets a translation knob (core/machine.h) in the running machine; nonzero if it exists. */
 int henge_vm_knob(const char *name, int value);
@@ -80,6 +82,15 @@ void henge_vm_touch_button(int down); /* the pad's full press (a click) */
 int henge_vm_pointer(int *x, int *y);
 /* A small picture of the display, BGRA, width * height * 4 bytes. 0, or -1 before anything shows. */
 int henge_vm_snapshot(uint8_t *bgra, int width, int height);
+/* Remote desktop: the screen and pointer drawn into a CVPixelBufferRef (BGRA, scaled to its size), or only
+   the screen's size with NULL. A count that changes whenever the screen does, or -1 before there is one. */
+int henge_vm_stream_frame(void *pixel_buffer, int *w, int *h);
+/* Remote desktop: 1 stops drawing on the phone (the stream goes on), 0 starts again. */
+void henge_vm_set_headless(int on);
+/* Remote desktop: keep a copy of the Mac's sound (on), silent on the phone meanwhile (mute_here). */
+void henge_audio_tap(int on, int mute_here);
+/* Up to max bytes of that copy, whole frames; its format: channels, 5 s16 / 17 s32 / 19 float, rate. */
+int henge_audio_tap_read(uint8_t *out, int max, unsigned *channels, unsigned *format, unsigned *rate_hz);
 
 /* The boot framebuffer (Apple logo and progress bar), 32-bit BGRA, or -1 if
    the kernel has not got that far. A successful call returns an owned copy;

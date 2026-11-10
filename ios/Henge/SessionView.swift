@@ -27,6 +27,11 @@ struct SessionView: View {
     @AppStorage("henge.cursor.scale") private var cursorScale = Device.isPad ? 1 : 3
     @AppStorage("henge.cursor.sharp") private var sharpCursor = true
     @AppStorage(HardwareMouse.scrollSpeedKey) private var scrollSpeed = 0.3
+    @ObservedObject private var remote = RemoteDesktop.shared
+    @AppStorage(RemoteDesktop.enabledKey) private var remoteEnabled = false
+    @AppStorage(RemoteDesktop.headlessKey) private var remoteHeadless = true
+    @AppStorage(RemoteDesktop.wifiKey) private var remoteWifi = false
+    @AppStorage(RemoteDesktop.muteHereKey) private var remoteMuteHere = true
 
     @State private var typing = false
     @State private var zoomed = false
@@ -43,6 +48,8 @@ struct SessionView: View {
     @AppStorage("henge.tips.stillWallpaperShown") private var stillWallpaperTipShown = false
     @State private var showWallpaperTip = false
     @State private var confirmStop = false
+    @State private var restartWanted = false // Restart was chosen here: start again once macOS has shut down
+    @State private var askedMac: Date? // when macOS was last asked to shut down or restart
     @State private var zoomCentre = CGPoint(x: 0.5, y: 0.5) // where the zoomed view is, 0...1 of the Mac's screen
     @State private var map: UIImage?
     @State private var zoomFollowing: Task<Void, Never>?
@@ -74,6 +81,23 @@ struct SessionView: View {
                             .foregroundStyle(.white)
                             .multilineTextAlignment(.center)
                             .padding()
+                            .accessibilityElement(children: .combine)
+                        }
+                    }
+                    .overlay {
+                        if remote.connected && remoteHeadless {
+                            ZStack {
+                                Color.black
+                                VStack(spacing: 8) {
+                                    Image(systemName: "desktopcomputer").font(.largeTitle)
+                                    Text("Streaming to \(remote.client)").font(.headline)
+                                    Text("The Mac is shown on the computer. The trackpad still works here.")
+                                        .font(.subheadline)
+                                }
+                                .foregroundStyle(.white)
+                                .multilineTextAlignment(.center)
+                                .padding()
+                            }
                             .accessibilityElement(children: .combine)
                         }
                     }
@@ -172,9 +196,13 @@ struct SessionView: View {
             Text("Copy text on your iPad and allow Henge to paste if prompted.")
         }
         .confirmationDialog("Shut down \(mac.name)?", isPresented: $confirmStop, titleVisibility: .visible) {
-            Button("Shut Down", role: .destructive) { finish() }
+            Button("Shut Down") { askMac(restart: false) }
+            Button("Restart") { askMac(restart: true) }
+            Button("Force Off", role: .destructive) { finish() }
         } message: {
-            Text("This turns the Mac off at once. Anything not saved on it is lost.")
+            Text(askedMac == nil
+                 ? "Shut Down and Restart press the Mac's power button: macOS shows its own dialog and closes apps first. Force Off turns the Mac off at once, and anything not saved on it is lost."
+                 : "macOS has been asked. If it is stuck, Force Off turns the Mac off at once: anything not saved on it is lost.")
         }
         .onChange(of: zoomed) { on in
             zoomFollowing?.cancel()
@@ -196,13 +224,19 @@ struct SessionView: View {
         .onChange(of: confirmStop) { showing in
             if showing { HardwareKeys.releaseAll(); StickyKeys.shared.releaseAll() }
         }
+        .onChange(of: remoteEnabled) { on in
+            if on { RemoteDesktop.shared.start() } else { RemoteDesktop.shared.stop() }
+        }
+        .onChange(of: remoteHeadless) { _ in RemoteDesktop.shared.applyHeadless() }
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true
             HardwareMouse.shared.start()
             HardwareKeys.start()
+            if remoteEnabled { RemoteDesktop.shared.start() }
             VolumeClicks.shared.start()
         }
         .onDisappear {
+            RemoteDesktop.shared.stop()
             UIApplication.shared.isIdleTimerDisabled = false
             zoomFollowing?.cancel()
             StickyKeys.shared.releaseAll()
@@ -516,6 +550,21 @@ struct SessionView: View {
                     Text("The Mac supplies a small pointer image. Enlarging it can look blurry; 1× is the sharpest on an iPad. Scroll speed changes apply immediately.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
+                Section("Remote desktop") {
+                    Toggle("Stream to a computer", isOn: $remoteEnabled)
+                    Toggle("Hide the Mac here while streaming", isOn: $remoteHeadless)
+                    Toggle("Allow over Wi-Fi with a code", isOn: $remoteWifi)
+                    Toggle("Silent here while the computer plays the sound", isOn: $remoteMuteHere)
+                    if remoteEnabled {
+                        LabeledContent("Status", value: remote.connected ? "Streaming to \(remote.client)" : "Waiting on port \(RemoteDesktop.port)")
+                        if remoteWifi {
+                            if let ip = RemoteDesktop.wifiAddress() { LabeledContent("Wi-Fi address", value: "\(ip):\(RemoteDesktop.port)") }
+                            LabeledContent("Code", value: remote.code)
+                        }
+                    }
+                    Text("Run tools/henge-remote.py on the computer. Over USB, start iproxy 15901:5901 there first and connect to 127.0.0.1:15901. Over Wi-Fi, give it the address and --code. Keep Henge open: iOS pauses it in the background.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
                 Section("Sharing") {
                     LabeledContent("Clipboard and folder", value: helperRunning ? "On" : "Not set up")
                     if !helperRunning {
@@ -656,7 +705,14 @@ struct SessionView: View {
                 HardwareMouse.shared.stop()
                 UIApplication.shared.isIdleTimerDisabled = false
                 HengeLog.log("session", "showing stopped Mac: \(String(cString: henge_vm_exit_reason()))")
-                if henge_vm_exit_outcome() == Int32(HENGE_VM_OUTCOME_RESTART.rawValue) && henge_vm_can_start() != 0 {
+                // A restart asked for here ends as a shut down by macOS: start again, unless that was long ago
+                // (the dialog in macOS was cancelled, and this shut down is a later one).
+                let outcome = henge_vm_exit_outcome()
+                let again = restartWanted && outcome == Int32(HENGE_VM_OUTCOME_SHUTDOWN.rawValue)
+                    && (askedMac.map { Date().timeIntervalSince($0) < 300 } ?? false)
+                restartWanted = false
+                askedMac = nil
+                if (outcome == Int32(HENGE_VM_OUTCOME_RESTART.rawValue) || again) && henge_vm_can_start() != 0 {
                     bootAttempt += 1
                 }
                 break
@@ -678,6 +734,19 @@ struct SessionView: View {
             if tick % 30 == 0 { HengeLog.logFootprint("session") } // how close to the limit, for a memory kill leaves no crash report
             if tick % 60 == 0 { MacPreview.save(for: mac) }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+    }
+
+    /// Shut Down or Restart from here: the Mac's power button, which macOS answers with its own dialog. A restart is a
+    /// shut down that this screen follows with a start (see the stopped state in the watch loop).
+    private func askMac(restart: Bool) {
+        restartWanted = restart
+        askedMac = Date()
+        HengeLog.log("session", restart ? "power button pressed, to restart" : "power button pressed, to shut down")
+        Task.detached {
+            henge_vm_power_button(1)
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            henge_vm_power_button(0)
         }
     }
 

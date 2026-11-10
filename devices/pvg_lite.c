@@ -411,6 +411,14 @@ int hv_pvg_lite_snapshot(HvPvgLite *p, uint8_t *bgra, uint32_t width, uint32_t h
     return p && p->metal ? hv_pvg_metal_snapshot(p->metal, bgra, width, height) : -1;
 }
 
+int hv_pvg_lite_stream_frame(HvPvgLite *p, void *pixel_buffer, int *w, int *h) {
+    return p && p->metal ? hv_pvg_metal_stream_frame(p->metal, pixel_buffer, w, h) : -1;
+}
+
+void hv_pvg_lite_set_headless(HvPvgLite *p, int on) {
+    if (p && p->metal) hv_pvg_metal_set_headless(p->metal, on);
+}
+
 int hv_pvg_lite_frame(HvPvgLite *p, const uint8_t **pixels, uint32_t *width, uint32_t *height) {
     return p && p->metal ? hv_pvg_metal_frame(p->metal, pixels, width, height) : -1;
 }

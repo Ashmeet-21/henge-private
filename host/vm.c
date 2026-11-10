@@ -443,6 +443,12 @@ failed:
     return -1;
 }
 
+/* The power button: pin 3 of the GPIO, as QEMU's vmapple has it. macOS answers a press with its own dialog
+   (Restart, Sleep, Cancel, Shut Down; it shuts down by itself after a minute), so apps get to close first. */
+void hv_vm_power_button(int down) {
+    if (board.gpio) hv_pl061_set_input(board.gpio, 3, down);
+}
+
 void hv_vm_stop(void) {
     hv_machine_halt(&m, HV_HALT_HOST);
 }
@@ -498,8 +504,10 @@ static void move_now(void *ctx) {
     if (atomic_load(&input_stopping)) return;
     int64_t packed = (int64_t)(intptr_t)ctx;
     int32_t dx = (int32_t)(packed >> 32), dy = (int32_t)packed;
-    if (dx) hv_virtio_input_send(board.mouse, HV_EV_REL, HV_REL_X, dx);
-    if (dy) hv_virtio_input_send(board.mouse, HV_EV_REL, HV_REL_Y, dy);
+    /* Both axes every time, zero or not: macOS's driver keeps the last value of an axis a report leaves out, so a
+       slow move to the right after one with a little dy went on diagonally until the next dy, a zigzag. */
+    hv_virtio_input_send(board.mouse, HV_EV_REL, HV_REL_X, dx);
+    hv_virtio_input_send(board.mouse, HV_EV_REL, HV_REL_Y, dy);
     hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
 }
 
@@ -584,4 +592,14 @@ int hv_vm_snapshot(uint8_t *bgra, int width, int height) {
     HvPvgLite *pvg = atomic_load_explicit(&display_pvg, memory_order_acquire);
     if (!pvg || width <= 0 || height <= 0) return -1;
     return hv_pvg_lite_snapshot(pvg, bgra, (uint32_t)width, (uint32_t)height);
+}
+
+int hv_vm_stream_frame(void *pixel_buffer, int *w, int *h) {
+    HvPvgLite *pvg = atomic_load_explicit(&display_pvg, memory_order_acquire);
+    return pvg ? hv_pvg_lite_stream_frame(pvg, pixel_buffer, w, h) : -1;
+}
+
+void hv_vm_set_headless(int on) {
+    HvPvgLite *pvg = atomic_load_explicit(&display_pvg, memory_order_acquire);
+    if (pvg) hv_pvg_lite_set_headless(pvg, on);
 }

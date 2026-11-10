@@ -66,6 +66,8 @@ void hv_vm_cpu_qos(void);
 int hv_vm_run_cpu0(void);
 /* Stop at the next block; the CPUs' threads end. */
 void hv_vm_stop(void);
+/* Presses (1) or lets go of (0) the machine's power button: the guest decides what to do about it. */
+void hv_vm_power_button(int down);
 void hv_vm_flush_disks(void);
 const char *hv_vm_reason_name(int reason);
 
@@ -86,5 +88,9 @@ void hv_vm_touch_button(int down); /* the pad's full press (a click) */
 int hv_vm_pointer(int *x, int *y);
 /* A small picture of the display, BGRA, width * height * 4 bytes. 0, or -1 before anything shows. */
 int hv_vm_snapshot(uint8_t *bgra, int width, int height);
+/* Remote desktop: the screen drawn into a CVPixelBufferRef (NULL: only its size). A count that changes with the screen, or -1. */
+int hv_vm_stream_frame(void *pixel_buffer, int *w, int *h);
+/* Remote desktop: stop drawing on the device's own display (1) or start again (0). */
+void hv_vm_set_headless(int on);
 
 #endif

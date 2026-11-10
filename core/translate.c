@@ -1,5 +1,6 @@
 #include "translate.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -1944,7 +1945,35 @@ static int emit_group_copies(Emit *e, const uint32_t *code, uint64_t va, uint32_
 
 static int translate_emit(HvMachine *m, HvBlock *b, const uint32_t *code, uint32_t avail, int nogroup);
 
+/* macOS's Metal driver for the virtual GPU (AppleParavirtGPUMetalIOGPUFamily and AppleParavirtGPUMetal, seen in
+   15.6.1) cuts the base vertex of an indexed draw to 16 bits when it writes the wide record (28):
+       stp x22, x21, [x26, #8];  ldp x8, x9, [sp, #0x18];  and x8, x8, #0xffff;  str x9, [x26, #0x18];  str x8, [x26, #0x20]
+   in -[PGSerializerRenderCommandEncoder drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:
+   instanceCount:baseVertex:baseInstance:]. A mesh whose vertices start past 65535 in its buffer (Roblox keeps
+   131072 to a buffer) is then drawn from 65536 vertices before it. Those five instructions, in user code, are
+   translated without the `and`: the record then holds the base vertex whole, which is how the device reads it. */
+int hv_base_vertex_quirk_hits; /* blocks translated without it: 0 says this guest's driver is not the one known */
+
+static const uint32_t *base_vertex_quirk(const HvBlock *b, const uint32_t *code, uint32_t avail) {
+    static __thread uint32_t patched[HV_MAX_BLOCK_INSNS];
+    static int said;
+    uint32_t max = avail < HV_MAX_BLOCK_INSNS ? avail : HV_MAX_BLOCK_INSNS;
+    if (b->flags & HV_BLOCK_EL1) return code;
+    for (uint32_t i = 2; i + 2 < max; i++) {
+        if (code[i] != 0x92403d08u || code[i - 1] != 0xa941a7e8u || code[i + 1] != 0xf9000f49u || code[i - 2] != 0xa900d756u ||
+            code[i + 2] != 0xf9001348u)
+            continue;
+        memcpy(patched, code, max * sizeof code[0]);
+        patched[i] = 0xd503201fu; /* nop */
+        hv_base_vertex_quirk_hits = 1;
+        if (!said) said = 1, fprintf(stderr, "hengevm: the virtual GPU driver's base vertex is left whole (block %llx)\n", (unsigned long long)b->va);
+        return patched;
+    }
+    return code;
+}
+
 int hv_translate_emit(HvMachine *m, HvBlock *b, const uint32_t *code, uint32_t avail) {
+    code = base_vertex_quirk(b, code, avail); /* at most HV_MAX_BLOCK_INSNS of them are read */
     /* HV_GROUPS=1: group accesses (off by default: measured no faster, and the
        plain copies make the code about 15% bigger, so the JIT region fills sooner). */
     if (hv_knob[HV_K_GROUPS] && translate_emit(m, b, code, avail, 0) == 0) return 0;

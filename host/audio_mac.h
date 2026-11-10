@@ -8,4 +8,9 @@ void hv_audio_attach(HvVirtioSnd *d);
 /* Stops and disposes the output unit, waiting for its last render callback. */
 void hv_audio_detach(void);
 
+/* Remote desktop: keep a copy of the sound played (on), and play silence here meanwhile (mute_here). */
+void hv_audio_tap(int on, int mute_here);
+/* Up to max bytes of the copy, whole frames, in the stream's current format (HV_VSND_FMT_*). */
+int hv_audio_tap_read(uint8_t *out, int max, unsigned *channels, unsigned *format, unsigned *rate_hz);
+
 #endif

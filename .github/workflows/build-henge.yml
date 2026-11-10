@@ -17,6 +17,17 @@ name: Build Henge IPA
 on:
   # This fork builds with build-ipa.yml on push; this one only by hand (a private repo's macOS minutes count 10x).
   workflow_dispatch: {}
+  push:
+    branches:
+      - '**'
+    # Nothing in the app comes from these: a push that only touches them builds nothing.
+    # (Run it by hand from the Actions tab if an IPA is wanted anyway.)
+    paths-ignore:
+      - 'tools/henge-remote.py'
+      - 'tools/henge-inspect.py'
+      - 'docs/**'
+      - '**.md'
+      - '.gitignore'
 
 env:
   HUSK: ${{ github.workspace }}/Husk
@@ -119,3 +130,26 @@ jobs:
           name: Henge-tipa-${{ github.sha }}
           path: /Users/runner/Desktop/Henge.tipa
           if-no-files-found: error
+
+  # The engine's own tests, on the same Apple-silicon runner: the translator, memory, exceptions, devices, and
+  # a Mac shutting down, restarting and starting again through the app's native bridge. Independent of the IPA.
+  engine-tests:
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - name: Check out Henge (this fork)
+        uses: actions/checkout@v4
+
+      - name: Engine tests
+        run: |
+          set -euxo pipefail
+          make build/test_classify build/test_jit_region build/test_operands build/test_jit build/test_mem build/test_mmu build/test_exc build/test_devices build/test_shutdown
+          ulimit -s 65520
+          for t in test_classify test_jit_region test_operands test_jit test_mem test_mmu test_exc test_devices test_shutdown; do echo "== $t"; build/$t; done
+
+      - name: Mac lifecycle through the app's bridge
+        run: |
+          set -euxo pipefail
+          brew install libslirp pkg-config
+          ulimit -s 65520
+          make test-vm-lifecycle

@@ -87,6 +87,13 @@ targets:
           - "AVFAudio"
           - "-framework"
           - "CoreFoundation"
+          # Remote desktop: the screen through the hardware video encoder.
+          - "-framework"
+          - "CoreVideo"
+          - "-framework"
+          - "CoreMedia"
+          - "-framework"
+          - "VideoToolbox"
     dependencies:
       # Built-in StikJIT's debugger process. Embedded into PlugIns/.
       - target: HengeJITHelper
