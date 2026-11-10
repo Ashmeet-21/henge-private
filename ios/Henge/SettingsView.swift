@@ -11,7 +11,6 @@ struct SettingsView: View {
     @AppStorage(VolumeClicks.inputModeKey) private var inputMode = VolumeClicks.InputMode.touchscreen
     @AppStorage(VolumeClicks.modeKey) private var volumeMode = VolumeClicks.Mode.delayHold
     @AppStorage(VolumeClicks.swapKey) private var swapButtons = false
-    @AppStorage(PhysicalMouseButtons.swapKey) private var swapMouseButtons = false
     @AppStorage(EngineTuning.refreshKey) private var refreshRate = 60
     @AppStorage(EngineTuning.fastFlushKey) private var fastFlush = true
     @AppStorage(EngineTuning.wfiSpinKey) private var wfiSpin = false
