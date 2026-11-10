@@ -33,6 +33,7 @@ final class Installer: NSObject, ObservableObject {
 
     enum Phase: Equatable {
         case idle
+        case checking
         case downloading
         case preparing
         case installing
@@ -57,7 +58,7 @@ final class Installer: NSObject, ObservableObject {
 
     var busy: Bool {
         switch phase {
-        case .downloading, .preparing, .installing: return true
+        case .checking, .downloading, .preparing, .installing: return true
         default: return false
         }
     }
@@ -90,6 +91,7 @@ final class Installer: NSObject, ObservableObject {
 
     func start(_ release: MacOSRelease, name: String, ramMB: Int, cpus: Int, keepImage: Bool) {
         guard !busy else { return }
+        phase = .checking
         machineName = name
         UIApplication.shared.isIdleTimerDisabled = true // the screen locking would suspend the download and the restore
         grace = UIApplication.shared.beginBackgroundTask(withName: "Henge install") {
