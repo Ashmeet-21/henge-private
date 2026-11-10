@@ -1020,6 +1020,16 @@ static void sync_iosurface(HvObject *s) {
     if (!objs) tasks[@(task)] = objs = [NSMutableDictionary new];
     HvObject *o = objs[@(ref)];
     if (o && !memcmp(o->entry, e, 12)) {
+        if (tracing && o->mapped && o->vpage && o->length) { /* debugging: bound as it was mapped, though the guest's pages moved? */
+            uint64_t n = (o->length + 0x3fff) >> 14;
+            uint32_t *now = malloc(n * 4);
+            hv_pvg_lite_task_pages(lite, task, o->vpage, n, now);
+            uint64_t moved = 0;
+            for (uint64_t i = 0; i < n; i++) moved += now[i] != o->pages[i];
+            if (moved) fprintf(stderr, "trace: stale binding ref %u len %llu: %llu of %llu pages moved since mapped (plain %d)\n",
+                               ref, (unsigned long long)o->length, (unsigned long long)moved, (unsigned long long)n, (int)o->plain_buffer);
+            free(now);
+        }
         if (!o->follows) return o;
         if (o->follows->mapped) refresh_pages(self, task, o->follows);
         if (o->follows->generation == o->follows_generation) return o;
