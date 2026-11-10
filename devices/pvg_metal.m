@@ -150,6 +150,9 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     NSMutableSet<NSValue *> *trace_dumped; /* buffers already written to gpu-dump/ this trace */
     id<MTLCommandBuffer> trace_cb; /* while tracing: the exec's command buffer, to look again once it has run */
     unsigned trace_draws, trace_sliced; /* indexed draws traced, and those whose constants were kept, this trace */
+    NSArray<NSString *> *skip_rules; /* debugging: Documents/skip-draws, a line each; draws whose pipeline's trace name holds one aren't drawn */
+    double skip_checked;
+    BOOL skip_pipe; /* the pipeline set now matches a rule */
     /* The newest frame, BGRA, for hv_pvg_metal_frame, and the same without the pointer on it. */
     uint8_t *frame, *base;
     uint32_t frame_w, frame_h;
@@ -1314,6 +1317,7 @@ typedef struct {
 - (void)render:(id<MTLRenderCommandEncoder>)e tag:(uint32_t)tag rec:(Rec)r task:(uint32_t)task {
     BOOL draw = tag <= 19 || tag == 28 || tag == 29 || tag == 155 || tag == 162;
     if (!pipeline_set && draw) return;
+    if (skip_pipe && draw) return; /* debugging: skip-draws */
     if (tracing && draw) fprintf(stderr, "trace:  draw tag %u\n", tag);
     switch (tag) {
     case 24: { /* {fence, stages} */
@@ -1336,6 +1340,11 @@ typedef struct {
         id state = [self get:U32(0) task:task];
         if (state) [e setRenderPipelineState:state];
         pipeline_set = state != nil;
+        skip_pipe = NO;
+        if (skip_rules) {
+            NSString *name = objc_getAssociatedObject(state, "hvname");
+            for (NSString *rule in skip_rules) if ([name containsString:rule]) skip_pipe = YES;
+        }
         if (tracing) fprintf(stderr, "trace:  pipeline %u %s\n", U32(0), [objc_getAssociatedObject(state, "hvname") UTF8String]);
         break;
     }
@@ -1984,6 +1993,21 @@ typedef struct {
     const uint8_t *bufs = (const uint8_t *)(res + nres * 2);
     tracing = hv_pvg_trace_on() != 0;
     if (!tracing) trace_dumped = nil, trace_draws = trace_sliced = 0;
+    if (now_seconds() - skip_checked > 0.5) { /* debugging: which draws make a picture wrong, by leaving groups of them out live */
+        skip_checked = now_seconds();
+        const char *tf = getenv("HV_PVG_TRACE_FILE");
+        NSString *text = tf ? [NSString stringWithContentsOfFile:[[@(tf) stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"skip-draws"]
+                                                       encoding:NSUTF8StringEncoding error:nil] : nil;
+        NSMutableArray *rules = [NSMutableArray array];
+        for (NSString *line in [text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+            NSString *t = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+            if (t.length && ![t hasPrefix:@"#"]) [rules addObject:t];
+        }
+        NSArray *now_rules = rules.count ? rules : nil;
+        if (!(now_rules == skip_rules || [now_rules isEqualToArray:skip_rules]))
+            fprintf(stderr, "hengevm: skip-draws: %s\n", now_rules ? [[now_rules componentsJoinedByString:@" | "] UTF8String] : "off");
+        skip_rules = now_rules;
+    }
     if (tracing) fprintf(stderr, "trace: exec task %u, %u resources, %u buffers\n", task, nres, nbuf);
     double t_begin = now_seconds();
     id<MTLCommandBuffer> cb = [queue commandBuffer];
@@ -2051,7 +2075,7 @@ typedef struct {
             }
             continue;
         }
-        if (!e && type == 1) e = [cb computeCommandEncoder], pipeline_set = NO;
+        if (!e && type == 1) e = [cb computeCommandEncoder], pipeline_set = NO, skip_pipe = NO;
         if (!e && type == 2) e = [cb blitCommandEncoder];
         etype = type;
         @try {
