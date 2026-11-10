@@ -16,7 +16,8 @@ import os, socket, struct, sys, threading
 # While the mouse is captured, the keyboard is too: on Wayland that asks the compositor (KWin, GNOME) to stop its own
 # shortcuts, so Super+Q reaches the Mac as Command-Q instead of the desktop.
 os.environ.setdefault("SDL_GRAB_KEYBOARD", "1")
-os.environ.setdefault("SDL_VIDEODRIVER", "wayland,x11")
+if sys.platform.startswith("linux"):  # Windows and macOS pick their own driver
+    os.environ.setdefault("SDL_VIDEODRIVER", "wayland,x11")
 import av
 import pygame
 
