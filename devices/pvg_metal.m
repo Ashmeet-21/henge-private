@@ -148,6 +148,7 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     id<MTLBuffer> trace_vb[32]; /* while tracing: the vertex buffers bound, with offset and stride */
     NSUInteger trace_vo[32], trace_vs[32];
     NSMutableSet<NSValue *> *trace_dumped; /* buffers already written to gpu-dump/ this trace */
+    id<MTLCommandBuffer> trace_cb; /* while tracing: the exec's command buffer, to look again once it has run */
     unsigned trace_draws, trace_sliced; /* indexed draws traced, and those whose constants were kept, this trace */
     /* The newest frame, BGRA, for hv_pvg_metal_frame, and the same without the pointer on it. */
     uint8_t *frame, *base;
@@ -298,6 +299,8 @@ static void refresh_pages(HvReplay *r, uint32_t task, HvObject *o) {
     o->guest_copy = nil;
     if (o->plain_buffer) o->object = buffer_over_mapping(r, o);
     r->remaps++;
+    if (r->tracing) fprintf(stderr, "trace: remap len %llu vpage %llx generation %u plain %d\n", (unsigned long long)o->length,
+                            (unsigned long long)o->vpage, (unsigned)o->generation, (int)o->plain_buffer);
 }
 
 static void set_framebuffer_only(MTLTextureDescriptor *t, BOOL on) {
@@ -1283,9 +1286,17 @@ typedef struct {
         id<MTLBuffer> v = trace_vb[s];
         if (!v) continue;
         fprintf(stderr, "trace:   const %u off %lu len %lu buf %p\n", s, (unsigned long)trace_vo[s], (unsigned long)v.length, (__bridge void *)v);
-        if (slices && v.storageMode != MTLStorageModePrivate && trace_vo[s] < v.length)
-            [[NSData dataWithBytes:(const uint8_t *)v.contents + trace_vo[s] length:MIN(v.length - trace_vo[s], (NSUInteger)16384)]
+        if (slices && v.storageMode != MTLStorageModePrivate && trace_vo[s] < v.length) {
+            NSUInteger o = trace_vo[s], n = MIN(v.length - o, (NSUInteger)16384);
+            [[NSData dataWithBytes:(const uint8_t *)v.contents + o length:n]
                 writeToFile:[dir stringByAppendingPathComponent:[NSString stringWithFormat:@"d%u-s%u.bin", serial, s]] atomically:NO];
+            /* and again once the GPU has run the draw: a difference means the guest rewrote it while the GPU used it */
+            NSString *after = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"d%u-s%u-after.bin", serial, s]];
+            [trace_cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
+                (void)done;
+                [[NSData dataWithBytes:(const uint8_t *)v.contents + o length:n] writeToFile:after atomically:NO];
+            }];
+        }
     }
     for (uint32_t s = 16; s < 32; s++) {
         id<MTLBuffer> v = trace_vb[s];
@@ -1976,6 +1987,7 @@ typedef struct {
     if (tracing) fprintf(stderr, "trace: exec task %u, %u resources, %u buffers\n", task, nres, nbuf);
     double t_begin = now_seconds();
     id<MTLCommandBuffer> cb = [queue commandBuffer];
+    trace_cb = tracing ? cb : nil;
     id<MTLBlitCommandEncoder> blit = nil;
     BOOL sync_after = NO;
     for (uint32_t i = 0; i < nres; i++) {
