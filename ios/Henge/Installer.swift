@@ -8,10 +8,21 @@ struct MacOSRelease: Identifiable, Hashable {
     let url: URL
     let bytes: Int64
     let note: String
+    /// Room the new Mac takes once installed and set up, with a margin for its first updates and caches.
+    var macBytes: Int64 = 24 << 30
 
-    /// The builds offered, newest last. Apple's catalog (mesu.apple.com) only lists the newest;
+    /// The builds offered, oldest first. Apple's catalog (mesu.apple.com) only lists the newest;
     /// these are the same images from Apple's CDN, and Apple still signs them for virtual Macs.
     static let all: [MacOSRelease] = [
+        MacOSRelease(id: "21G115", name: "macOS Monterey 12.6",
+                     url: URL(string: "https://updates.cdn-apple.com/2022FallFCS/fullrestores/012-40537/0EC7C669-13E9-49FB-BD64-9EECC1D174B2/UniversalMac_12.6_21G115_Restore.ipsw")!,
+                     bytes: 13_430 << 20, note: "The lightest: for devices with less memory or storage."),
+        MacOSRelease(id: "22G120", name: "macOS Ventura 13.6",
+                     url: URL(string: "https://updates.cdn-apple.com/2023FallFCS/fullrestores/042-55833/C0830847-A2F8-458F-B680-967991820931/UniversalMac_13.6_22G120_Restore.ipsw")!,
+                     bytes: 12_297 << 20, note: "Lighter than Sequoia."),
+        MacOSRelease(id: "23G93", name: "macOS Sonoma 14.6.1",
+                     url: URL(string: "https://updates.cdn-apple.com/2024SummerFCS/fullrestores/062-52859/932E0A8F-6644-4759-82DA-F8FA8DEA806A/UniversalMac_14.6.1_23G93_Restore.ipsw")!,
+                     bytes: 14_106 << 20, note: "Lighter than Sequoia, and still supported by most apps."),
         MacOSRelease(id: "24G90", name: "macOS Sequoia 15.6.1",
                      url: URL(string: "https://updates.cdn-apple.com/2025SummerFCS/fullrestores/093-10809/CFD6DD38-DAF0-40DA-854F-31AAD1294C6F/UniversalMac_15.6.1_24G90_Restore.ipsw")!,
                      bytes: 16_035 << 20, note: "Recommended: the version Henge is tested with."),
@@ -22,6 +33,9 @@ struct MacOSRelease: Identifiable, Hashable {
                      url: URL(string: "https://updates.cdn-apple.com/2026FallFCS/c9671975-52db-4fb5-9af2-00217169ba8d/UniversalMac_27.2_26B123_Restore.ipsw")!,
                      bytes: 24_409 << 20, note: "The newest. Not tested with Henge yet."),
     ]
+
+    /// Selected in the Install tab when nothing is downloaded yet: the one Henge is tested with most.
+    static let recommended = all.first { $0.id == "24G90" } ?? all[0]
 }
 
 /// Downloads a restore image and installs it on a new virtual Mac, on the
@@ -78,8 +92,7 @@ final class Installer: NSObject, ObservableObject {
     static func deleteImage(_ r: MacOSRelease) { try? FileManager.default.removeItem(at: imagePath(r)) }
 
     /// Free space an install takes: the new Mac's disk, and the download if it is not here yet.
-    static func spaceNeeded(_ r: MacOSRelease) -> Int64 { (haveImage(r) ? 0 : r.bytes) + newMacBytes }
-    private static let newMacBytes: Int64 = 24 << 30
+    static func spaceNeeded(_ r: MacOSRelease) -> Int64 { (haveImage(r) ? 0 : r.bytes) + r.macBytes }
 
     func reset() { if !busy { phase = .idle } }
 
