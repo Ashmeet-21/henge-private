@@ -27,6 +27,9 @@ typedef struct HvVmConfig {
 
 /* Returns 0, or -1 with a reason in err. */
 int hv_vm_create(const HvVmConfig *cfg, char *err, size_t errlen);
+/* After CPUs stop, detach backends and release the old machine. Borrowed iOS
+   JIT memory stays owned by the app and can be attached to the next machine. */
+void hv_vm_destroy(void);
 HvMachine *hv_vm_machine(void);
 HvVmapple *hv_vm_board(void);
 HvCpu *hv_vm_cpu(int index);
@@ -53,7 +56,8 @@ void hv_vm_set_poll(void (*poll)(void));
    CPUs and the 1 ms kicker. on_exit is called on CPU 0's thread when the
    machine stops (powered off, a fatal error, or hv_vm_stop), after the disks
    are flushed; reason is an HV_EXIT_* value. */
-void hv_vm_start(int cpu0, void (*on_exit)(int reason));
+/* Returns -1 if a thread could not start; already-started workers are joined. */
+int hv_vm_start(int cpu0, void (*on_exit)(int reason));
 /* Call on a thread before it runs guest code (hv_vm_start's threads do): see vm.c. */
 void hv_vm_prepare_cpu_thread(void);
 /* That, and the scheduling class the guest's CPUs run at. */
