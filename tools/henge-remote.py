@@ -3,7 +3,8 @@
 
     pip install av pygame-ce
     iproxy 15901:5901 &                 # over USB (libimobiledevice)
-    python3 tools/henge-remote.py [--speed 2]                   # USB, through iproxy; --speed scales the pointer
+    python3 tools/henge-remote.py [--speed 2] [--alt-cmd]       # USB, through iproxy; --speed scales the pointer,
+                                                                # --alt-cmd makes Alt Command (if the desktop keeps Super)
     python3 tools/henge-remote.py 192.168.1.20:5901 --code 123456   # Wi-Fi: allow it in Henge, use the code it shows
 
 Click the window to capture the mouse; Left Ctrl + Left Alt lets it go. The protocol is in ios/Henge/RemoteDesktop.swift:
@@ -11,11 +12,18 @@ H.264 Annex-B one way, 6-byte input messages [type][a][x int16 LE][y int16 LE] t
 """
 import os, socket, struct, sys, threading
 os.environ.setdefault("SDL_RENDER_SCALE_QUALITY", "linear")  # a resized window is filtered, not pixel-doubled unevenly
+# While the mouse is captured, the keyboard is too: on Wayland that asks the compositor (KWin, GNOME) to stop its own
+# shortcuts, so Super+Q reaches the Mac as Command-Q instead of the desktop.
+os.environ.setdefault("SDL_GRAB_KEYBOARD", "1")
+os.environ.setdefault("SDL_VIDEODRIVER", "wayland,x11")
 import av
 import pygame
 
 args = sys.argv[1:]
-code, speed = None, 2.0
+code, speed, alt_cmd = None, 2.0, False
+if "--alt-cmd" in args:  # Alt is Command and Super is Option, as a Mac keyboard has them laid out
+    alt_cmd = True
+    args.remove("--alt-cmd")
 if "--speed" in args:  # pointer speed: Henge's own trackpad moves the Mac's pointer 2-3x what a finger moves
     i = args.index("--speed")
     speed = float(args[i + 1])
@@ -139,7 +147,9 @@ while running:
                 held.clear()
                 capture(False)
                 continue
-            usage = e.scancode  # SDL scancodes are USB HID keyboard usages
+            usage = e.scancode  # SDL scancodes are USB HID keyboard usages: Super (227/231) is Command on the Mac
+            if alt_cmd:
+                usage = {226: 227, 227: 226, 230: 231, 231: 230}.get(usage, usage)
             if not captured or not 0 < usage < 256:
                 continue
             down = e.type == pygame.KEYDOWN
