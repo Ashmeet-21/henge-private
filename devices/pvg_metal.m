@@ -488,6 +488,18 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
             if (b.type != MTLBindingTypeBuffer) continue;
             [vbind appendFormat:@" vb%lu:%@:%lu", (unsigned long)b.index, b.name, (unsigned long)((id<MTLBufferBinding>)b).bufferDataSize];
         }
+        if (reflect) { /* and how the vertices are read: attribute format/offset/buffer, then each buffer's stride */
+            MTLVertexDescriptor *vd = ((MTLRenderPipelineDescriptor *)descriptor).vertexDescriptor;
+            for (NSUInteger a = 0; a < 31; a++) {
+                MTLVertexAttributeDescriptor *at = vd.attributes[a];
+                if (at.format != MTLVertexFormatInvalid)
+                    [vbind appendFormat:@" va%lu:f%lu@%lu/b%lu", (unsigned long)a, (unsigned long)at.format, (unsigned long)at.offset, (unsigned long)at.bufferIndex];
+            }
+            for (NSUInteger l = 0; l < 31; l++)
+                if (vd.layouts[l].stride) [vbind appendFormat:@" vl%lu:%lu/%lu", (unsigned long)l, (unsigned long)vd.layouts[l].stride, (unsigned long)vd.layouts[l].stepFunction];
+            for (MTLVertexAttribute *at in ((MTLRenderPipelineDescriptor *)descriptor).vertexFunction.vertexAttributes)
+                [vbind appendFormat:@" in%lu:%@:t%lu", (unsigned long)at.attributeIndex, at.name, (unsigned long)at.attributeType];
+        }
         if (!state) [self complain:[NSString stringWithFormat:@"pipeline %u: %@", tag, err.localizedDescription]];
         if (tag == 0xe && getenv("HV_SHADER_DUMP") && atoi(getenv("HV_SHADER_DUMP"))) { /* m4 fork: blend state as this iOS read it */
             MTLRenderPipelineDescriptor *rp = descriptor;

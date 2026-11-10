@@ -3,7 +3,7 @@
 
     pip install av pygame-ce
     iproxy 15901:5901 &                 # over USB (libimobiledevice)
-    python3 tools/henge-remote.py                               # USB, through iproxy
+    python3 tools/henge-remote.py [--speed 2]                   # USB, through iproxy; --speed scales the pointer
     python3 tools/henge-remote.py 192.168.1.20:5901 --code 123456   # Wi-Fi: allow it in Henge, use the code it shows
 
 Click the window to capture the mouse; Left Ctrl + Left Alt lets it go. The protocol is in ios/Henge/RemoteDesktop.swift:
@@ -14,7 +14,11 @@ import av
 import pygame
 
 args = sys.argv[1:]
-code = None
+code, speed = None, 2.0
+if "--speed" in args:  # pointer speed: Henge's own trackpad moves the Mac's pointer 2-3x what a finger moves
+    i = args.index("--speed")
+    speed = float(args[i + 1])
+    del args[i:i + 2]
 if "--code" in args:
     i = args.index("--code")
     code = args[i + 1]
@@ -86,8 +90,19 @@ def capture(on):
 
 capture(False)
 held = set()
+move = [0.0, 0.0]  # pointer motion not yet sent: a batch of events goes as one move
+
+
+def flush_move():
+    dx, dy = int(move[0]), int(move[1])
+    if dx or dy:
+        send(1, 0, dx, dy)
+        move[0] -= dx
+        move[1] -= dy
+
+
 while running:
-    for e in pygame.event.get():
+    for e in [pygame.event.wait()] + pygame.event.get():
         if e.type == pygame.QUIT:
             running = False
         elif e.type == NEW_FRAME:
@@ -105,13 +120,14 @@ while running:
             if e.button in BUTTONS:
                 capture(True)
         elif e.type == pygame.MOUSEMOTION and captured:
-            dx, dy = e.rel
-            if dx or dy:
-                send(1, 0, dx, dy)
+            move[0] += e.rel[0] * speed
+            move[1] += e.rel[1] * speed
         elif e.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP) and captured and e.button in BUTTONS:
+            flush_move()  # a click lands where the pointer is by then
             send(2, BUTTONS[e.button], 1 if e.type == pygame.MOUSEBUTTONDOWN else 0)
         elif e.type == pygame.MOUSEWHEEL and captured:
-            send(3, 0, e.x, -e.y)
+            flush_move()
+            send(3, 0, e.x, e.y)
         elif e.type in (pygame.KEYDOWN, pygame.KEYUP):
             mods = pygame.key.get_mods()
             if e.type == pygame.KEYDOWN and captured and mods & pygame.KMOD_LCTRL and mods & pygame.KMOD_LALT:
@@ -131,6 +147,8 @@ while running:
                 send(4, usage, 0)
             held.clear()
             capture(False)
+    if captured:
+        flush_move()
 
 sock.close()
 pygame.quit()

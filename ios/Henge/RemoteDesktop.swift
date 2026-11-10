@@ -24,6 +24,7 @@ final class RemoteDesktop: ObservableObject {
 
     private let queue = DispatchQueue(label: "henge.remote", qos: .userInteractive)
     private let inputQueue = DispatchQueue(label: "henge.remote.input", qos: .userInteractive)
+    private let netQueue = DispatchQueue(label: "henge.remote.net", qos: .userInteractive)
     // queue only
     private var listener: NWListener?
     private var connection: NWConnection?
@@ -112,21 +113,26 @@ final class RemoteDesktop: ObservableObject {
         }
         c.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
-            if case .failed = state, c === self.connection { self.drop() }
-            if case .cancelled = state, c === self.connection { self.drop() }
+            switch state {
+            case .failed, .cancelled: self.queue.async { if c === self.connection { self.drop() } }
+            default: break
+            }
         }
-        c.start(queue: queue)
+        // Its own queue: `queue` waits on the GPU for each frame, which under a game would hold up input behind it.
+        c.start(queue: netQueue)
         if usb { promote(c); return }
         // Over Wi-Fi the first 6 bytes must be the code shown on the phone; until then no picture and no input.
         // A wrong code shuts Wi-Fi out for 2 s, so guessing a million codes takes weeks.
         c.receive(minimumIncompleteLength: 6, maximumLength: 6) { [weak self] data, _, _, _ in
-            guard let self else { return }
-            if let data, [UInt8](data) == self.codeBytes, !self.codeBytes.isEmpty {
-                self.promote(c)
-            } else {
-                HengeLog.log("remote", "wrong code from \(c.endpoint)")
-                self.lockedUntil = CACurrentMediaTime() + 2
-                c.cancel()
+            self?.queue.async {
+                guard let self else { return }
+                if let data, [UInt8](data) == self.codeBytes, !self.codeBytes.isEmpty {
+                    self.promote(c)
+                } else {
+                    HengeLog.log("remote", "wrong code from \(c.endpoint)")
+                    self.lockedUntil = CACurrentMediaTime() + 2
+                    c.cancel()
+                }
             }
         }
         queue.asyncAfter(deadline: .now() + 10) { [weak self] in
