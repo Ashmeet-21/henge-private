@@ -786,9 +786,15 @@ static IOSurfaceRef make_iosurface(HvObject *to, const uint8_t *desc, uint64_t a
         uint16_t bpe;
         if (compact) {
             const uint8_t *cp = desc + 0x40 + i * 0x40;
-            uint32_t v[6];
+            uint32_t v[6], base;
             memcpy(v, cp + 0x0c, sizeof v); /* offset, size, width << 8, height << 8, row, bytes per element */
             off = v[0], size = v[1], w = v[2] >> 8, h = v[3] >> 8, row = v[4], bpe = (uint16_t)v[5];
+            /* +0x08: where the plane's first visible pixel is. A video decoder's buffers carry extended pixels
+               around the picture (Sonoma's 10-bit HEVC: 96 columns and 71 rows before it), and the guest's
+               GPU reads the plane from there; from the allocation's start, every converted frame came out
+               moved right and down with a green band at the top and left (the menu bar and left strip). */
+            memcpy(&base, cp + 0x08, 4);
+            if (base > off && base - off < size) size -= base - off, off = base;
         } else
         memcpy(&off, pl + 8, 8), memcpy(&size, pl + 0x18, 8), memcpy(&w, pl + 0x20, 8), memcpy(&h, pl + 0x28, 8), memcpy(&row, pl + 0x30, 8), memcpy(&bpe, pl + 0x38, 2);
         [info addObject:@{(__bridge id)kIOSurfacePlaneWidth: @(w), (__bridge id)kIOSurfacePlaneHeight: @(h), (__bridge id)kIOSurfacePlaneBytesPerRow: @(row),
@@ -863,10 +869,11 @@ static void sync_iosurface_locked(HvObject *s) {
     BOOL by_plane = s->plane_hash && s->plane_count && IOSurfaceGetPlaneCount(s->iosurface) >= s->plane_count;
     uint64_t hashes[4] = {0};
     uint32_t changed = 0;
+    uint64_t *have = s->plane_hash;
     if (by_plane) {
         for (uint32_t i = 0; i < s->plane_count && i < 4; i++) {
             hashes[i] = hash_bytes(from + s->plane_from[i], plane_bytes(s, i));
-            if (hashes[i] != s->plane_hash[i]) changed |= 1u << i;
+            if (hashes[i] != have[i]) changed |= 1u << i;
         }
         if (!changed) return;
     } else {
@@ -903,7 +910,7 @@ static void sync_iosurface_locked(HvObject *s) {
            requested. Copy each changed video plane through its actual host layout. */
         for (uint32_t i = 0; i < s->plane_count && i < 4; i++) {
             if (!(changed & 1u << i)) continue;
-            s->plane_hash[i] = hashes[i];
+            have[i] = hashes[i];
             uint8_t *dst = IOSurfaceGetBaseAddressOfPlane(s->iosurface, i);
             size_t dst_row = IOSurfaceGetBytesPerRowOfPlane(s->iosurface, i);
             size_t rows = MIN((size_t)s->plane_h[i], IOSurfaceGetHeightOfPlane(s->iosurface, i));
@@ -982,6 +989,11 @@ static void write_back_iosurface_locked(HvObject *s) {
        macOS 14's driver writes a compact one: u32 allocation at 0x10, width and height << 8 at 0x14 and 0x18, u32 row
        at 0x1c, bytes per pixel at 0x20 (BGRA 1920x1080: 007ec000 00078080 00043880 00001e00 00000004); one plane. */
     BOOL compact = hv_pvg_lite_old_driver(lite) != 0;
+    if (getenv("HV_PVG_DESC_DUMP")) {
+        fprintf(stderr, "surface-desc %llu:", mapping);
+        for (int i = 0; i < 0x200; i += 4) fprintf(stderr, "%s%08x", i % 32 ? " " : "\n  ", *(const uint32_t *)(desc + i));
+        fprintf(stderr, "\n");
+    }
     uint32_t compact_planes = 1;
     if (compact) memcpy(&compact_planes, desc + 0x24, 4);
     uint8_t planes = compact ? (uint8_t)MIN(MAX(compact_planes, 1u), 4u) : desc[0x3e];
@@ -1031,8 +1043,10 @@ static void write_back_iosurface_locked(HvObject *s) {
         surface->alloc = alloc;
         IOSurfaceRef made = make_iosurface(surface, desc, alloc, compact);
         /* The same guest memory, format and size under another mapping id (another process): the same host
-           IOSurface, or what that process drew is not what this one sees. Its pixels are already there (or
-           drawn over since), so they are not copied again now. */
+           IOSurface, or what that process drew is not what this one sees. Whether its pixels are there is in
+           the hashes it shares: a video decoder's process writes frames with the CPU and never uses the GPU, so
+           nothing had copied them, and the first process to draw with one (the wallpaper's lock-screen image
+           during Setup) read an empty frame: solid green. */
         NSString *pk = [NSString stringWithFormat:@"%x/%08x/%llux%llu/%llu", pages[0] & ~1u, surface->fourcc,
                         (unsigned long long)sw, (unsigned long long)sh, (unsigned long long)alloc];
         id shared = planar[pk];
@@ -1104,6 +1118,11 @@ static void write_back_iosurface_locked(HvObject *s) {
     }
     HvObject *surface = [self currentSurface:h.mapping];
     o->on_mapping = h.mapping;
+    if (hv_pvg_trace_on()) {
+        fprintf(stderr, "trace: mapped texture ref %u tag %#x size %u mapping %llu:", h.ref, h.tag, h.size, h.mapping);
+        for (int i = 0; i < 64; i += 4) fprintf(stderr, " %08x", *(uint32_t *)(h.d + i));
+        fprintf(stderr, "\n");
+    }
     MTLTextureDescriptor *t = h.tag == 0x39 ? descriptor_v2(h.d) : descriptor_v1(h.d);
     if (!surface) surface = [self newSurface:h.mapping];
     if (!surface) return;
@@ -1888,10 +1907,21 @@ typedef struct {
             buffers[i] = strong[i];
             offsets[i] = (NSUInteger)U64(12 + i * 12);
         }
+        if (tracing) for (uint32_t i = 0; i < count; i++) {
+            id<MTLBuffer> x = strong[i];
+            fprintf(stderr, "trace:  cbuf %u ref %u off %lu len %lu:", index + i, U32(8 + i * 12), (unsigned long)offsets[i], (unsigned long)x.length);
+            if (x && x.storageMode != MTLStorageModePrivate && offsets[i] < x.length)
+                for (NSUInteger k = 0; k < 96 && offsets[i] + k + 4 <= x.length; k += 4)
+                    fprintf(stderr, " %08x", *(uint32_t *)((uint8_t *)x.contents + offsets[i] + k));
+            fprintf(stderr, "\n");
+        }
         [e setBuffers:buffers offsets:offsets withRange:NSMakeRange(index, count)];
         break;
     }
-    case 207: [e setBufferOffset:(NSUInteger)U64(4) atIndex:U32(0)]; break;
+    case 207:
+        if (tracing) fprintf(stderr, "trace:  cbuf %u offset now %llu\n", U32(0), (unsigned long long)U64(4));
+        [e setBufferOffset:(NSUInteger)U64(4) atIndex:U32(0)];
+        break;
     case 206: {
         uint32_t index = U32(0), count = U32(4);
         if (count > 128) break;
