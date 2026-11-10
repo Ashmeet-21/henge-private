@@ -3,6 +3,7 @@
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <sched.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -59,6 +60,22 @@ int hv_machine_init_jit(HvMachine *m, void *rx, void *rw, size_t jit_bytes) {
 }
 
 static int init_rest(HvMachine *m) {
+    pthread_mutex_init(&m->big_mu, NULL);
+    pthread_cond_init(&m->big_cv, NULL);
+    pthread_mutexattr_t ra;
+    pthread_mutexattr_init(&ra);
+    pthread_mutexattr_settype(&ra, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&m->dev_mu, &ra);
+    pthread_mutexattr_destroy(&ra);
+    pthread_mutex_init(&m->tr_mu, NULL);
+    pthread_mutex_init(&m->stw_mu, NULL);
+    pthread_cond_init(&m->stw_cv, NULL);
+    for (int i = 0; i < HV_MAX_CPUS; i++) {
+        pthread_mutex_init(&m->percpu[i].wake_mu, NULL);
+        pthread_cond_init(&m->percpu[i].wake_cv, NULL);
+        pthread_mutex_init(&m->percpu[i].req_mu, NULL);
+    }
+    m->locks_initialized = 1;
     /* The TLB layout (cpu.h): HV_TLBT from the environment here too, so the Mac tool and the tests can pick it. */
     hv_knob[HV_K_TLBT] = getenv("HV_TLBT") ? atoi(getenv("HV_TLBT")) : 1; /* table-major unless asked: 9-20% faster in 5 of 6 paired rounds of the mix */
     hv_tlb_tmajor = hv_knob[HV_K_TLBT] != 0;
@@ -100,15 +117,6 @@ static int init_rest(HvMachine *m) {
     m->slot_xpa = calloc(m->max_slots, sizeof *m->slot_xpa);
     m->slot_xnext = calloc(m->max_slots, sizeof *m->slot_xnext);
     if (!m->slots || !m->slot_site || !m->slot_stub || !m->slot_cond || !m->slot_xa || !m->slot_xpa || !m->slot_xnext) return -1;
-    pthread_mutex_init(&m->big_mu, NULL);
-    pthread_cond_init(&m->big_cv, NULL);
-    pthread_mutexattr_t ra;
-    pthread_mutexattr_init(&ra);
-    pthread_mutexattr_settype(&ra, PTHREAD_MUTEX_RECURSIVE);
-    pthread_mutex_init(&m->dev_mu, &ra);
-    pthread_mutex_init(&m->tr_mu, NULL);
-    pthread_mutex_init(&m->stw_mu, NULL);
-    pthread_cond_init(&m->stw_cv, NULL);
     for (int i = 0; i < HV_MAX_CPUS; i++) { /* untouched pages cost nothing, so every CPU gets its tables now */
         HvPerCpu *p = &m->percpu[i];
         p->ijc = calloc(HV_IJC_TABLES * HV_IJC_TABLE_BYTES / 8, 8);
@@ -120,9 +128,6 @@ static int init_rest(HvMachine *m) {
             p->stash[k].ent = calloc(HV_STASH_CAP, sizeof *p->stash[k].ent);
             if (!p->stash[k].slot || !p->stash[k].ent) return -1;
         }
-        pthread_mutex_init(&p->wake_mu, NULL);
-        pthread_cond_init(&p->wake_cv, NULL);
-        pthread_mutex_init(&p->req_mu, NULL);
     }
     return 0;
 }
@@ -344,6 +349,22 @@ void hv_machine_kick_all(HvMachine *m) {
     __asm__ volatile("sev" ::: "memory");
 }
 
+void hv_machine_halt(HvMachine *m, enum HvHaltReason reason) {
+    for (int i = 0; i < m->ncpus; i++) if (m->cpus[i]) {
+        /* CPU_ON resets a parked CPU under this lock. It must not erase a
+           terminal halt while another CPU is shutting the machine down. */
+        HvPerCpu *p = m->cpus[i]->pc_state;
+        pthread_mutex_lock(&p->wake_mu);
+        int running = HV_HALT_NONE;
+        atomic_compare_exchange_strong(&m->cpus[i]->halted, &running, reason);
+        pthread_mutex_unlock(&p->wake_mu);
+    }
+    /* CPU_OFF sleeps on wake_cv without a timeout. exit_req/SEV alone only
+       interrupts translated code and cannot release that condition wait. */
+    for (int i = 0; i < m->ncpus; i++)
+        if (m->cpus[i]) hv_cpu_wake(m->cpus[i]);
+}
+
 /* Device work is for CPU 0, which polls the devices. */
 void hv_machine_wake(HvMachine *m) {
     if (m->stats_interval) m->stats.kick_src[3]++;
@@ -361,8 +382,20 @@ void hv_machine_free(HvMachine *m) {
     }
     free(m->blocks);
     for (int i = 0; i < HV_MAX_CPUS; i++) {
+        /* hv_run keeps a thread send right for statistics; CPU workers have ended. */
+        if (m->percpu[i].thread) mach_port_deallocate(mach_task_self(), m->percpu[i].thread);
         free(m->percpu[i].ijc);
         free(m->percpu[i].ucode);
+        free(m->percpu[i].cid_chunks);
+        for (int k = 0; k < HV_STASHES; k++) {
+            free(m->percpu[i].stash[k].slot);
+            free(m->percpu[i].stash[k].ent);
+        }
+        if (m->locks_initialized) {
+            pthread_mutex_destroy(&m->percpu[i].wake_mu);
+            pthread_cond_destroy(&m->percpu[i].wake_cv);
+            pthread_mutex_destroy(&m->percpu[i].req_mu);
+        }
     }
     free(m->slots);
     free(m->slot_site);
@@ -371,6 +404,15 @@ void hv_machine_free(HvMachine *m) {
     free(m->slot_xa);
     free(m->slot_xpa);
     free(m->slot_xnext);
+    if (m->locks_initialized) {
+        pthread_mutex_destroy(&m->big_mu);
+        pthread_cond_destroy(&m->big_cv);
+        pthread_mutex_destroy(&m->dev_mu);
+        pthread_mutex_destroy(&m->tr_mu);
+        pthread_mutex_destroy(&m->stw_mu);
+        pthread_cond_destroy(&m->stw_cv);
+    }
+    memset(m, 0, sizeof *m);
 }
 
 int hv_machine_add_ram(HvMachine *m, uint64_t pa, uint64_t size, void *host, int readonly) {
@@ -571,6 +613,7 @@ void hv_cpu_reset_index(HvCpu *cpu, HvMachine *m, uint32_t index) {
     memset((char *)cpu + b + sizeof cpu->pc_state, 0, sizeof *cpu - b - sizeof cpu->pc_state);
     cpu->m = m;
     cpu->index = index;
+    cpu->cntvoff = m->cntvoff;
     cpu->pc_state = &m->percpu[index];
     m->cpus[index] = cpu;
     if (m->ncpus <= (int)index) m->ncpus = (int)index + 1;

@@ -81,17 +81,6 @@ static void unpark(HvCpu *cpu) {
     hv_cpu_process_requests(cpu); /* what came in while it was parked */
 }
 
-/* Back from a wait: queue for the big lock while still parked, so a CPU flushing need
-   not wait for one that is waiting for it. If the lock came on during the wait, unpark
-   is what guarantees it is on for good, so take a turn after it. */
-static void big_lock_then_unpark(HvCpu *cpu) {
-    HvMachine *m = cpu->m;
-    int had = m->big_lock_on;
-    hv_big_lock(m);
-    unpark(cpu);
-    if (!had && m->big_lock_on) hv_big_lock(m);
-}
-
 static uint32_t block_flags(HvCpu *cpu) {
     uint32_t flags = cpu->el ? HV_BLOCK_EL1 : 0;
     if (cpu->el && cpu->spsel) flags |= HV_BLOCK_SPX;
@@ -499,7 +488,8 @@ static int wait_for_interrupt(HvCpu *cpu) {
     }
     p->wake_pending = 0;
     pthread_mutex_unlock(&p->wake_mu);
-    big_lock_then_unpark(cpu);
+    unpark(cpu);
+    hv_big_lock(m);
     m->stats.wfi++;
     m->stats.wfi_ticks += mach_absolute_time() - t0;
     m->tick(m, cpu);
@@ -855,7 +845,8 @@ static void wait_while_off(HvCpu *cpu) {
     }
     __atomic_store_n(&cpu->parked_off, 0, __ATOMIC_SEQ_CST);
     pthread_mutex_unlock(&p->wake_mu);
-    big_lock_then_unpark(cpu);
+    unpark(cpu);
+    hv_big_lock(m);
 }
 
 /* Dropping every translation: the CPU that finds a flush pending waits until
@@ -882,24 +873,16 @@ static void stop_the_world(HvCpu *cpu) {
         pthread_mutex_lock(&m->tr_mu);
         hv_flush_blocks(m);
         pthread_mutex_unlock(&m->tr_mu);
-        /* Every other CPU is parked and holds no turn, so the big lock can come on here. They queue on the way back. */
-        if (__atomic_load_n(&m->big_lock_want, __ATOMIC_SEQ_CST) && !m->big_lock_on) {
-            m->big_lock_on = 1;
-            hv_big_lock(m);
-            fprintf(stderr, "hengevm: big lock on (HV_BIG_LOCK_FILE)\n");
-        }
         if (cpu->pc_state) __atomic_store_n(&cpu->pc_state->phase, HV_PHASE_RUN, __ATOMIC_RELAXED);
         pthread_mutex_lock(&m->stw_mu);
         __atomic_store_n(&m->stw_active, 0, __ATOMIC_SEQ_CST);
         pthread_cond_broadcast(&m->stw_cv);
         pthread_mutex_unlock(&m->stw_mu);
     } else if (m->stw_active) {
-        int had_big_lock = m->big_lock_on;
         park(cpu);
         while (m->stw_active) pthread_cond_wait(&m->stw_cv, &m->stw_mu);
         pthread_mutex_unlock(&m->stw_mu);
         unpark(cpu);
-        if (!had_big_lock && m->big_lock_on) hv_big_lock(m); /* it came on while this CPU was parked */
     } else {
         pthread_mutex_unlock(&m->stw_mu);
     }
@@ -978,12 +961,7 @@ static int run_loop(HvCpu *cpu, int one) {
             /* Give another CPU its turn. Whatever it does in between may touch
                what this CPU's exclusive monitor watches, so the monitor clears. */
             cpu->excl_addr = ~0ull;
-            /* Parked while it waits for its turn: the holder may flush, and a flush waits for every unparked CPU. */
-            park(cpu);
             hv_big_yield(m);
-            unpark(cpu);
-            pending_chain = NULL; /* a flush may have dropped what these point at */
-            prev_b = NULL;
         }
         /* Ticks take the device lock, so not every few blocks: on a kick (the 1 ms
            kicker, a device with work for CPU 0, an interrupt raised for this

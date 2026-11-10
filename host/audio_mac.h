@@ -5,6 +5,8 @@
 
 /* Play the guest's virtio-snd output on the Mac's default output device. */
 void hv_audio_attach(HvVirtioSnd *d);
+/* Stops and disposes the output unit, waiting for its last render callback. */
+void hv_audio_detach(void);
 
 /* Remote desktop: keep a copy of the sound played (on), and play silence here meanwhile (mute_here). */
 void hv_audio_tap(int on, int mute_here);

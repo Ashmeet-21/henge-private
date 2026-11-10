@@ -1442,9 +1442,10 @@ static int translate_msr_inline(Emit *e, uint32_t insn, uint64_t pc) {
     return 0;
 }
 
-/* The guest's counter is the host's mach_absolute_time (CNTVOFF is 0): the
-   counter register the commpage names plus the commpage's offset, read the way
-   libsystem does. EL0 reads check CNTKCTL_EL1's enables and trap through the
+/* The guest's physical counter is the host's mach_absolute_time: the counter
+   register the commpage names plus the commpage's offset, read the way libsystem
+   does; its virtual counter is that less the CPU's CNTVOFF (the count when the
+   machine started). EL0 reads check CNTKCTL_EL1's enables and trap through the
    helper when they are off. */
 #define COMMPAGE_TIMEBASE_OFFSET 0xfffffc088ull
 #define COMMPAGE_TIMEBASE_TYPE   0xfffffc090ull
@@ -1467,6 +1468,10 @@ static int translate_counter(Emit *e, uint32_t insn, uint64_t pc, int physical) 
     put_lit(e, 6, COMMPAGE_TIMEBASE_OFFSET);
     put(e, LDR_X(6, 6, 0));
     put(e, ADD_LSL(r, r, 6, 0));
+    if (!physical) {
+        put(e, LDR_X(6, 28, HV_CPU_CNTVOFF));
+        put(e, SUB_X(r, r, 6));
+    }
     if (r != rt) put(e, STR_X(r, 28, slot_of(rt)));
     if (el0) e->ool[slow].join = e->n;
     return 1;
@@ -1519,6 +1524,15 @@ static int translate_sysreg_inline(Emit *e, uint32_t insn, uint64_t pc) {
         put_load_field(e, rt, off);
         return 1;
     }
+    case SR(3, 0, 2, 0, 2): /* TCR_EL1, PAR_EL1: reads (writes change translation; PAR is written by AT) */
+    case SR(3, 0, 7, 4, 0):
+        if (!read || !el1) return 0;
+        put_load_field(e, rt, reg == SR(3, 0, 2, 0, 2) ? HV_CPU_TCR_EL1 : HV_CPU_PAR_EL1);
+        return 1;
+    case SR(3, 0, 4, 2, 3): /* PAN: a block is translated for one PAN state (HV_BLOCK_PAN) and every write ends it */
+        if (!read || !el1) return 0;
+        put_const_to(e, rt, (e->flags & HV_BLOCK_PAN) ? HV_PSTATE_PAN : 0);
+        return 1;
     case SR(3, 0, 4, 1, 0): /* SP_EL0: only while it is banked (SPSel = 1) */
         if (!el1 || !spx) return 0;
         if (read) put_load_field(e, rt, HV_CPU_SP_EL0);

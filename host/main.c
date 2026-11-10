@@ -567,6 +567,18 @@ static void *input_thread(void *unused) {
                 hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
             }
         }
+        else if (!strncmp(line, "tp ", 3)) { /* "tp ID 0|1|2 X Y": a finger down/move/up on the USB Magic Trackpad 2, sensor units (testing) */
+            int id = 0, phase = 0, px = 0, py = 0;
+            if (sscanf(line + 3, "%d %d %d %d", &id, &phase, &px, &py) == 4) {
+                struct timespec ts;
+                clock_gettime(CLOCK_MONOTONIC, &ts);
+                uint32_t ms = (uint32_t)((uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000);
+                hv_xhci_touch(board.usb, id, phase, px, py, ms);
+                if (phase == 1) hv_xhci_touch_frame(board.usb, ms);
+            }
+        }
+        else if (!strncmp(line, "tpclick ", 8)) /* "tpclick 1|0": the Magic Trackpad 2's own press (testing) */
+            hv_xhci_touch_button(board.usb, atoi(line + 8));
         else if (!strncmp(line, "press", 5) || !strncmp(line, "release", 7)) {
             hv_virtio_input_send(board.mouse, HV_EV_KEY, HV_BTN_LEFT, line[0] == 'p');
             hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
@@ -667,12 +679,14 @@ static void *input_thread(void *unused) {
             }
             fprintf(stderr, "hengevm: find: %d places\n", n);
         }
-        else if (!strncmp(line, "grep ", 5)) { /* lines of text in guest RAM (the kernel's log) */
+        else if (!strncmp(line, "grep ", 5) || !strncmp(line, "grepall ", 8)) { /* lines of text in guest RAM (the kernel's
+                                                                                   log, launchd's); grep stops at 40 */
             HvVmapple *bd = hv_vm_board();
-            const char *word = line + 5;
+            int all = line[4] == 'a';
+            const char *word = line + (all ? 8 : 5);
             size_t wn = strlen(word);
             uint64_t hits = 0;
-            for (uint64_t i = 0; i + wn < bd->ram_size && hits < 40; i++) {
+            for (uint64_t i = 0; i + wn < bd->ram_size && (all || hits < 40); i++) {
                 if (bd->ram[i] != (uint8_t)word[0] || memcmp(bd->ram + i, word, wn)) continue;
                 uint64_t from = i;
                 while (from > 0 && i - from < 200 && bd->ram[from - 1] >= 32 && bd->ram[from - 1] < 127) from--;
@@ -683,6 +697,26 @@ static void *input_thread(void *unused) {
                 i = to;
             }
             fprintf(stderr, "hengevm: grep: %llu lines\n", (unsigned long long)hits);
+        }
+        else if (!strncmp(line, "vdump ", 6)) { /* "vdump VA LEN FILE": guest memory at a VA as CPU 0 maps it now (EL1), up to 64 KB */
+            unsigned long long va = 0, len = 0;
+            char out[400];
+            if (sscanf(line + 6, "%llx %lli %399s", &va, &len, out) == 3 && len > 0 && len <= 65536) {
+                HvVmapple *bd = hv_vm_board();
+                FILE *vf = fopen(out, "wb");
+                unsigned long long done = 0;
+                while (vf && done < len) {
+                    HvWalk wv;
+                    hv_mmu_walk(hv_vm_cpu(0), va + done, HV_ACC_READ, 1, &wv);
+                    uint64_t off = wv.pa - 0x70000000ull, n = 0x4000 - ((va + done) & 0x3fff);
+                    if (n > len - done) n = len - done;
+                    if (wv.fsc || wv.pa < 0x70000000ull || off + n > bd->ram_size) break;
+                    fwrite(bd->ram + off, 1, n, vf);
+                    done += n;
+                }
+                if (vf) fclose(vf);
+                fprintf(stderr, "hengevm: vdump %llx: %llu bytes\n", va, done);
+            }
         }
         else if (!strncmp(line, "page ", 5)) { /* a 16 KB file: is it in guest RAM, and how does the copy there differ? */
             static uint8_t want[0x4000];

@@ -216,6 +216,7 @@ enum { HV_PHASE_RUN, HV_PHASE_TRANSLATE, HV_PHASE_HELPER, HV_PHASE_SYNC, HV_PHAS
 #define HV_REQ_IJC_RESET 2u /* drop the branch cache (code changed) */
 
 typedef struct HvMachine {
+    int locks_initialized;
     HvRam ram[HV_MAX_RAM];
     int nram;
     HvRam *main_ram;     /* the largest region: guest RAM */
@@ -272,7 +273,6 @@ typedef struct HvMachine {
     /* With more than one CPU, only the holder of this runs guest code (a fair
        ticket lock, handed over at every kick and while a CPU sleeps). */
     int big_lock_on;
-    int big_lock_want; /* HV_BIG_LOCK_FILE appeared: the next stop-the-world turns it on */
     /* Devices, the GIC and the ICC registers: one CPU at a time (recursive). */
     pthread_mutex_t dev_mu;
     /* Translating and inserting blocks, the JIT region and the slots. */
@@ -288,6 +288,11 @@ typedef struct HvMachine {
     /* --profile: host PCs of the CPU thread sampled every millisecond, drained by the stats line. */
     uint64_t *prof;
     uint32_t prof_head, prof_tail;
+    /* The host counter when the machine started: every CPU's CNTVOFF, so the guest's virtual counter (its
+       mach_absolute_time) starts near 0 as on a Mac or under Virtualization.framework. With the host's own
+       count (days of uptime) macOS 12 took the user as idle for that long and put itself to sleep while
+       still starting up: its window server never drew. */
+    uint64_t cntvoff;
 } HvMachine;
 
 static inline uint32_t hv_block_hash(uint64_t va, uint64_t pa, uint32_t flags) {
@@ -360,6 +365,9 @@ void hv_big_unlock(HvMachine *m);
 void hv_big_yield(HvMachine *m);
 /* Make every CPU leave its block at the next exit. */
 void hv_machine_kick_all(HvMachine *m);
+/* Publish a terminal reason, then wake all CPUs, including CPU_OFF waits.
+   A later host stop must not overwrite the guest's shutdown/panic reason. */
+void hv_machine_halt(HvMachine *m, enum HvHaltReason reason);
 /* Wake one CPU out of WFI (and make it leave its block). */
 void hv_cpu_wake(HvCpu *cpu);
 /* Make it leave its block at the next checked exit, without waking it from WFI. */

@@ -13,6 +13,7 @@
 
 name: Build Henge IPA
 
+# Manual only (Actions tab > Build Henge IPA > Run workflow): pushes to main don't build an IPA.
 on:
   workflow_dispatch: {}
   push:
@@ -110,9 +111,6 @@ jobs:
       - name: Package Henge.ipa
         working-directory: Henge
         run: zsh ios/scripts/package_ipa.sh
-        # For a TrollStore build instead, use:
-        #   zsh ios/scripts/package_ipa.sh --trollstore
-        # which writes ~/Desktop/Henge.tipa instead.
 
       - name: Upload Henge.ipa
         uses: actions/upload-artifact@v4
@@ -120,3 +118,37 @@ jobs:
           name: Henge-ipa-${{ github.sha }}
           path: /Users/runner/Desktop/Henge.ipa
           if-no-files-found: error
+
+      - name: Package Henge.tipa
+        working-directory: Henge
+        run: zsh ios/scripts/package_ipa.sh --trollstore
+
+      - name: Upload Henge.tipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: Henge-tipa-${{ github.sha }}
+          path: /Users/runner/Desktop/Henge.tipa
+          if-no-files-found: error
+
+  # The engine's own tests, on the same Apple-silicon runner: the translator, memory, exceptions, devices, and
+  # a Mac shutting down, restarting and starting again through the app's native bridge. Independent of the IPA.
+  engine-tests:
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - name: Check out Henge (this fork)
+        uses: actions/checkout@v4
+
+      - name: Engine tests
+        run: |
+          set -euxo pipefail
+          make build/test_classify build/test_jit_region build/test_operands build/test_jit build/test_mem build/test_mmu build/test_exc build/test_devices build/test_shutdown
+          ulimit -s 65520
+          for t in test_classify test_jit_region test_operands test_jit test_mem test_mmu test_exc test_devices test_shutdown; do echo "== $t"; build/$t; done
+
+      - name: Mac lifecycle through the app's bridge
+        run: |
+          set -euxo pipefail
+          brew install libslirp pkg-config
+          ulimit -s 65520
+          make test-vm-lifecycle

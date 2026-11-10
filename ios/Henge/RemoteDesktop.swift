@@ -40,6 +40,7 @@ final class RemoteDesktop: ObservableObject {
     private var lastSeq: Int32 = -2
     private var lastSent = 0.0
     private var forceKey = true
+    private var hadScreen = false
     private var unsent = 0
     private var codeBytes: [UInt8] = []
     private var lockedUntil = 0.0
@@ -309,7 +310,12 @@ final class RemoteDesktop: ObservableObject {
         guard connection != nil, unsent < 1_000_000 else { return } // the client is behind: skip, don't queue
         var w: Int32 = 0, h: Int32 = 0
         let seq = henge_vm_stream_frame(nil, &w, &h)
-        guard seq >= 0, w > 0, h > 0 else { return }
+        guard seq >= 0, w > 0, h > 0 else { hadScreen = false; return }
+        if !hadScreen { // a Mac started (again): its display is a new one, which has not been told
+            hadScreen = true
+            forceKey = true
+            if UserDefaults.standard.bool(forKey: Self.headlessKey) { henge_vm_set_headless(1) }
+        }
         let now = CACurrentMediaTime()
         if seq == lastSeq && !forceKey && now - lastSent < 1 { return } // nothing new; still a frame a second
         if w != screen.w || h != screen.h { makeEncoder(w, h) }
