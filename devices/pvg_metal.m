@@ -17,23 +17,15 @@
 #include <string.h>
 #include <sys/utsname.h>
 
-/* 1080p shrunk onto a phone would make a normal pointer a few dots across; an iPad's screen needs less. */
-static int cursor_scale(void) {
-#if TARGET_OS_IPHONE
-    NSInteger saved = [[NSUserDefaults standardUserDefaults] integerForKey:@"henge.cursor.scale"];
-    if (saved >= 1 && saved <= 3) return (int)saved;
-    static int defaultScale;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        struct utsname u;
-        uname(&u);
-        defaultScale = strncmp(u.machine, "iPad", 4) ? 3 : 1;
-    });
-    return defaultScale;
-#else
-    return 1;
-#endif
-}
+/* How big the pointer is drawn, as a multiple of the glyph macOS sends, worked out by
+   -cursorScale below: (guest pixels per point of the pane it is drawn on) / (the display's
+   native scale). The glyph is drawn into a framebuffer of guest pixels that the layer then
+   maps onto pane points at the display's native scale, so this multiple puts the pointer on
+   the panel at exactly its glyph size in device pixels: its natural point size at any guest
+   size, and exactly 1 (a pixel-for-pixel copy, no upscale to smear) when the guest framebuffer
+   is the display's native pixel size. The old table (3 on iPhone, 2 on iPad) compensated for
+   a 1080p guest shrunk onto a phone; at a native-sized guest it only made the pointer huge
+   and, through the software path's nearest sampling, pixelated. */
 
 #include <mach/mach.h>
 #include <stdatomic.h>
@@ -158,6 +150,7 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     uint32_t cursor_w, cursor_h, cursor_stride;
     int cursor_hot_x, cursor_hot_y;
     BOOL cursor_shown;
+    float cursor_scale_live; /* the presenter's last -cursorScale, for the software path below */
     int drawn_x, drawn_y, drawn_w, drawn_h; /* where it is on the frame now */
     double last_capture;
     /* A frame that came too soon after the last: shown shortly, for it may be the last for a long while. */
@@ -192,6 +185,7 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
 - (void)complain:(NSString *)what;
 - (HvObject *)object:(uint32_t)ref task:(uint32_t)task;
 - (void)drawCursor;
+- (float)cursorScale;
 - (BOOL)hasDisplayLayer;
 - (void)kickPresenter:(BOOL)fresh;
 - (void)present:(uint64_t)mapping;
@@ -2228,6 +2222,24 @@ static const uint8_t *half_to_byte(void) {
     return attached;
 }
 
+/* The pointer's size multiple (see the note where cursor_scale used to be at the top of
+   this file): guest pixels per point of the layer's bounds, over the layer's contents
+   scale (the display's native scale, which the app sets on the layer). 1 when the guest
+   is the display's native size. Without a layer there is nothing to measure: 1. */
+- (float)cursorScale {
+#if TARGET_OS_IPHONE
+    if (layer && screen_w) {
+        CGFloat points = layer.bounds.size.width;
+        CGFloat native = layer.contentsScale;
+        if (points > 0 && native > 0) {
+            double scale = ((double)screen_w / (double)points) / (double)native;
+            if (scale > 0.05 && scale < 20.0) return (float)scale;
+        }
+    }
+#endif
+    return 1.0f;
+}
+
 /* Puts back what the pointer covered, and draws it where the shared page says it is now. */
 - (void)drawCursor {
     if ([self hasDisplayLayer]) {
@@ -2247,10 +2259,11 @@ static const uint8_t *half_to_byte(void) {
         last = where;
     }
     if (where == 0xffffffff) return;
-    /* Bigger than the guest draws it. The hot spot stays where it points. */
-    const int scale = cursor_scale();
-    int x = (int)(where & 0xffff) - cursor_hot_x * scale, y = (int)(where >> 16) - cursor_hot_y * scale;
-    int cw = (int)cursor_w * scale, ch = (int)cursor_h * scale;
+    /* At the size -cursorScale says. The hot spot stays where it points. The presenter
+       keeps cursor_scale_live current; before it has run, -cursorScale itself answers. */
+    const float scale = cursor_scale_live > 0 ? cursor_scale_live : [self cursorScale];
+    int x = (int)(where & 0xffff) - (int)lround(cursor_hot_x * scale), y = (int)(where >> 16) - (int)lround(cursor_hot_y * scale);
+    int cw = (int)lround(cursor_w * scale), ch = (int)lround(cursor_h * scale);
     int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
     int x1 = x + cw > (int)w ? (int)w : x + cw, y1 = y + ch > (int)h ? (int)h : y + ch;
     if (x1 <= x0 || y1 <= y0) return;
@@ -2493,7 +2506,8 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
         const uint8_t *page = hv_pvg_lite_display_page(lite);
         uint32_t where = page ? __atomic_load_n((const uint32_t *)(page + 0xe00), __ATOMIC_ACQUIRE) : 0xffffffff;
         if (ctex && where != 0xffffffff && (shown || page[0xe04])) {
-            const float scale = cursor_scale();
+            const float scale = [self cursorScale];
+            cursor_scale_live = scale;
             float x = (float)(where & 0xffff) - hx * scale, y = (float)(where >> 16) - hy * scale;
             float cw = cw0 * scale, ch = ch0 * scale;
             float r[4] = {x / W * 2 - 1, 1 - (y + ch) / H * 2, cw / W * 2, ch / H * 2};
