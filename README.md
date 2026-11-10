@@ -42,7 +42,7 @@ Sideload `Henge.ipa` from [Releases](https://github.com/Leviidev/Henge/releases)
 - **Storage:** about 43 GB free for macOS Sequoia. That's 17 GB for the download, which you can delete afterwards, and 26 GB for the Mac.
 - **Memory:** a Mac gets 4, 6 or 8 GB. Sign Henge with the increased memory limit entitlement if your certificate has it.
 
-Then open the Install tab, pick macOS Sequoia 15.6.1, and keep Henge open with the device plugged in. Tahoe 26.6.2 and macOS 27.2 are offered too, but they aren't tested yet.
+Then open the Install tab, pick macOS Sequoia 15.6.1, and keep Henge open with the device plugged in. Tahoe 26.6.2 and macOS 27.2 are offered too. Sonoma 14.6.1 and Ventura 13.6 are lighter, for devices with less memory or storage: they install, set up, and run Safari on Henge's iPhone graphics path (tested on a Mac so far). Monterey isn't offered yet: it installs, but its desktop never appears.
 
 ## Sharing with the Mac
 
