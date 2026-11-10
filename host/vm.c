@@ -402,8 +402,10 @@ void hv_vm_key_hid(uint8_t usage, int down) {
 static void move_now(void *ctx) {
     int64_t packed = (int64_t)(intptr_t)ctx;
     int32_t dx = (int32_t)(packed >> 32), dy = (int32_t)packed;
-    if (dx) hv_virtio_input_send(board.mouse, HV_EV_REL, HV_REL_X, dx);
-    if (dy) hv_virtio_input_send(board.mouse, HV_EV_REL, HV_REL_Y, dy);
+    /* Both axes every time, zero or not: macOS's driver keeps the last value of an axis a report leaves out, so a
+       slow move to the right after one with a little dy went on diagonally until the next dy, a zigzag. */
+    hv_virtio_input_send(board.mouse, HV_EV_REL, HV_REL_X, dx);
+    hv_virtio_input_send(board.mouse, HV_EV_REL, HV_REL_Y, dy);
     hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
 }
 
