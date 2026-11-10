@@ -140,6 +140,10 @@ static NSCountedSet<NSNumber *> *wb_unmapping; /* mapping ids unmapped by the gu
     /* A heap's or a private texture's copy in guest memory, and which side has the newest bytes. */
     id<MTLBuffer> guest_copy;
     BOOL host_valid, guest_stale;
+    /* Upload-validity state, see page: and exec prep below. */
+    BOOL upload_deferred; /* an upload was skipped (stale claim or incomplete copy); logged once until it lands */
+    uint64_t upload_hash; /* FNV hash of the guest source at the last content-guard check (large textures) */
+    BOOL upload_hash_set;
     /* What this one is made from, kept for as long as it lives. */
     HvObject *parent;
     /* A multi-plane surface's key in the replay's planar table, while it counts as one of its users. */
@@ -1395,21 +1399,46 @@ static BOOL has_guest_pages(HvObject *o) {
     return NO;
 }
 
-/* Between guest memory and the GPU's own copy, in the layout the guest was told. */
-- (void)page:(HvObject *)o toGuest:(BOOL)down task:(uint32_t)task blit:(id<MTLBlitCommandEncoder> *)blit commandBuffer:(id<MTLCommandBuffer>)cb {
+/* host_valid is the claim "the host copy holds the
+   guest's current bytes", and it was being set with no upload behind it (exec
+   prep marked it YES even when guest_stale skipped the page: call, and page:
+   itself silently copied nothing or skipped oversized mips). Every transition
+   now goes through here and is logged with its mechanism, so an instrumented
+   run can count the flips and check that every NO->YES flip names a real
+   upload or the guest's own invalidate word, never an assumption. */
+static void set_host_valid(HvObject *o, BOOL valid, const char *mech, uint32_t ref) {
+    if (o->host_valid == valid) return;
+    fprintf(stderr, "hengevm: pvg-metal: v1: host_valid %d->%d ref %u: %s\n", (int)o->host_valid, (int)valid, ref, mech);
+    o->host_valid = valid;
+}
+
+/* Between guest memory and the GPU's own copy, in the layout the guest was told.
+   Returns YES only when a copy was actually enqueued and the copy
+   is complete: an upload needs every guest page mapped (a hole would land as
+   zeros through the mapping) and every mip present (a mip whose extent exceeds
+   the object used to be skipped silently, leaving a partial upload the caller
+   still marked valid). Callers set host_valid / clear guest_stale only on a
+   YES return, so a NO leaves the object honestly invalid for the next exec. */
+- (BOOL)page:(HvObject *)o toGuest:(BOOL)down task:(uint32_t)task blit:(id<MTLBlitCommandEncoder> *)blit commandBuffer:(id<MTLCommandBuffer>)cb {
     id<MTLBuffer> copy = guest_copy(self, task, o);
-    if (!copy || !has_guest_pages(o)) return;
+    if (!copy || !has_guest_pages(o)) return NO;
+    if (!down) { /* an upload needs every page: a hole would land as zeros */
+        uint64_t n = (o->length + 0x3fff) >> 14;
+        for (uint64_t i = 0; i < n; i++)
+            if (!o->pages || !o->pages[i]) return NO;
+    }
     if (o->heap_whole) {
-        if (!*blit) *blit = [cb blitCommandEncoder];
         NSUInteger bytes = MIN(copy.length, o->heap_whole.length);
+        if (!bytes) return NO;
+        if (!*blit) *blit = [cb blitCommandEncoder];
         if (down) [*blit copyFromBuffer:o->heap_whole sourceOffset:0 toBuffer:copy destinationOffset:0 size:bytes];
         else [*blit copyFromBuffer:copy sourceOffset:0 toBuffer:o->heap_whole destinationOffset:0 size:bytes];
-        return;
+        return YES;
     }
     id<MTLTexture> tex = o->object;
-    if (!tex || !o->tex_layout || tex.sampleCount > 1 || tex.isFramebufferOnly) return;
+    if (!tex || !o->tex_layout || tex.sampleCount > 1 || tex.isFramebufferOnly) return NO;
     NSUInteger faces = tex.textureType == MTLTextureTypeCube || tex.textureType == MTLTextureTypeCubeArray ? 6 : 1;
-    if (!*blit) *blit = [cb blitCommandEncoder];
+    BOOL copied = NO, complete = YES;
     for (uint32_t s = 0; s < o->tex_slices * faces; s++)
         for (uint32_t m = 0; m < o->tex_mips; m++) {
             const uint8_t *mip = o->tex_layout + m * 36;
@@ -1419,7 +1448,9 @@ static BOOL has_guest_pages(HvObject *o) {
             uint32_t bh = o->tex_block_h ? o->tex_block_h : 1;
             uint64_t from = o->tex_base + o->tex_stride * s + off;
             uint64_t image = row * ((h + bh - 1) / bh);
-            if (from + image * d > o->length) continue;
+            if (from + image * d > o->length) { complete = NO; continue; }
+            if (!*blit) *blit = [cb blitCommandEncoder];
+            copied = YES;
             if (down)
                 [*blit copyFromTexture:tex sourceSlice:s sourceLevel:m sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, d)
                               toBuffer:copy destinationOffset:from destinationBytesPerRow:row destinationBytesPerImage:image];
@@ -1427,6 +1458,7 @@ static BOOL has_guest_pages(HvObject *o) {
                 [*blit copyFromBuffer:copy sourceOffset:from sourceBytesPerRow:row sourceBytesPerImage:image
                            sourceSize:MTLSizeMake(w, h, d) toTexture:tex destinationSlice:s destinationLevel:m destinationOrigin:MTLOriginMake(0, 0, 0)];
         }
+    return copied && complete;
 }
 
 /* The guest asks to see what the GPU made: {task, count, refs}. */
@@ -1441,8 +1473,10 @@ static BOOL has_guest_pages(HvObject *o) {
         HvObject *o = objs[@(a[2 + i])];
         if (!o || !o->guest_backed || !o->host_valid) continue;
         if (!cb) cb = [queue commandBuffer];
-        [self page:o toGuest:YES task:task blit:&blit commandBuffer:cb];
-        o->guest_stale = NO;
+        /* The guest copy is current only if the download
+           was actually enqueued; on a NO it stays stale, honestly. */
+        if ([self page:o toGuest:YES task:task blit:&blit commandBuffer:cb])
+            o->guest_stale = NO;
     }
     [blit endEncoding];
     if (cb) {
@@ -1461,8 +1495,8 @@ static BOOL has_guest_pages(HvObject *o) {
         if (!o) continue;
         if (e[6]) o->guest_stale = YES;
         if (e[7]) o->guest_stale = NO;
-        if (e[4]) o->host_valid = NO;
-        if (e[5]) o->host_valid = YES;
+        if (e[4]) set_host_valid(o, NO, "invalidate: guest says host invalid", *(const uint32_t *)e);
+        if (e[5]) set_host_valid(o, YES, "invalidate: guest says host valid", *(const uint32_t *)e);
     }
 }
 
@@ -2465,6 +2499,36 @@ static NSData *insp_slice(id<MTLBuffer> b, NSUInteger from, NSUInteger length) {
         if (!o) continue;
         if (o->mapped) refresh_pages(self, task, o);
         if (o->surface) sync_iosurface(o->surface);
+        /* Content-hash re-upload guard for large
+           guest-backed textures. CPU-written content that arrives after the
+           first upload (a decoded photo is exactly that) changes no page table
+           and may carry no invalidation, so without this watch the host copy
+           went stale at its first upload and stayed that way. An earlier
+           nonzero-count version of this guard was proven blind (an opaque
+           black fill and a photograph both read 512/512 nonzero), so this is
+           the hash version: a 64-bit FNV hash over the
+           guard's strided sample (512 samples of 8 bytes over at most 16 MB);
+           any sampled content change invalidates, and the upload below runs
+           again in this same pass. The stored hash is refreshed on every
+           check, so it always describes the last-seen (or just-uploaded)
+           source. */
+        if (o->guest_backed && o->tex_layout && o->length >= (8ull << 20) && !o->guest_stale) {
+            if (!o->mapped) guest_copy(self, task, o);
+            if (o->mapped) {
+                uint64_t region = o->length > o->tex_base ? o->length - o->tex_base : 0;
+                if (region > (16ull << 20)) region = 16ull << 20;
+                if (region >= 4096) {
+                    const uint8_t *src = o->mapped + o->tex_base;
+                    uint64_t stride = region / 512, hh = 0xcbf29ce484222325ull;
+                    for (uint64_t si = 0; si < 512; si++) { uint64_t v; memcpy(&v, src + si * stride, 8); hh = (hh ^ v) * 0x100000001b3ull; }
+                    if (o->upload_hash_set && hh != o->upload_hash) {
+                        fprintf(stderr, "hengevm: pvg-metal: v1: source of ref %u changed: hash %llx -> %llx, host_valid %d\n", res[i * 2], (unsigned long long)o->upload_hash, (unsigned long long)hh, (int)o->host_valid);
+                        set_host_valid(o, NO, "content-hash guard: guest source changed", res[i * 2]);
+                    }
+                    o->upload_hash = hh, o->upload_hash_set = YES;
+                }
+            }
+        }
         if (getenv("HV_PVG_TALLY") && (o->entry[0] & 0xff) == OBJ_MAPPED_TEXTURE) {
             static uint32_t seen[256];
             uint32_t f = res[i * 2 + 1] & 0xff, key = res[i * 2] & 0xff;
@@ -2473,10 +2537,34 @@ static NSData *insp_slice(id<MTLBuffer> b, NSUInteger from, NSUInteger length) {
                 fprintf(stderr, "pvgres task %u ref %u mapped flags %x\n", task, res[i * 2], res[i * 2 + 1]);
             }
         }
-        if (res[i * 2 + 1] & 1) o->guest_stale = NO, o->host_valid = NO; /* the guest wrote it */
+        if (res[i * 2 + 1] & 1) { /* the guest wrote it */
+            o->guest_stale = NO;
+            set_host_valid(o, NO, "exec flag 1: guest wrote it", res[i * 2]);
+        }
         if (o->guest_backed && !o->host_valid) {
-            if (!o->guest_stale) [self page:o toGuest:NO task:task blit:&blit commandBuffer:cb];
-            o->host_valid = YES;
+            /* host_valid is set ONLY on a true page: return. The
+               old code set it unconditionally, including when guest_stale
+               skipped the upload entirely (a GPU-write claim on this object,
+               or on a child of it via the parent-chain marking below, is not
+               an upload of this object's guest bytes) and when page: copied
+               nothing or skipped an oversized mip. A skipped or incomplete
+               upload now leaves the object invalid, logged once per deferral
+               until the upload lands. */
+            if (o->guest_stale) {
+                if (!o->upload_deferred) {
+                    o->upload_deferred = YES;
+                    fprintf(stderr, "hengevm: pvg-metal: v1: upload deferred for ref %u (%llu KB): guest_stale, no upload run; host_valid left NO\n", res[i * 2], (unsigned long long)(o->length >> 10));
+                }
+            } else if ([self page:o toGuest:NO task:task blit:&blit commandBuffer:cb]) {
+                if (o->upload_deferred) {
+                    o->upload_deferred = NO;
+                    fprintf(stderr, "hengevm: pvg-metal: v1: deferred upload arrived for ref %u (%llu KB)\n", res[i * 2], (unsigned long long)(o->length >> 10));
+                }
+                set_host_valid(o, YES, "page: upload enqueued, all pages and mips present", res[i * 2]);
+            } else if (!o->upload_deferred) {
+                o->upload_deferred = YES;
+                fprintf(stderr, "hengevm: pvg-metal: v1: upload deferred for ref %u (%llu KB): no complete copy enqueued (pages or mips incomplete)\n", res[i * 2], (unsigned long long)(o->length >> 10));
+            }
         }
         if (res[i * 2 + 1] & 4) sync_after = YES;
     }
@@ -2570,8 +2658,9 @@ static NSData *insp_slice(id<MTLBuffer> b, NSUInteger from, NSUInteger length) {
             if (!(res[i * 2 + 1] & 4)) continue;
             HvObject *o = [self object:res[i * 2] task:task];
             if (!o || !o->guest_backed) continue;
-            [self page:o toGuest:YES task:task blit:&back commandBuffer:cb];
-            o->guest_stale = NO;
+            /* guest_stale clears only on a real download. */
+            if ([self page:o toGuest:YES task:task blit:&back commandBuffer:cb])
+                o->guest_stale = NO;
         }
         [back endEncoding];
     }
