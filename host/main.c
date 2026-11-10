@@ -696,6 +696,26 @@ static void *input_thread(void *unused) {
             }
             fprintf(stderr, "hengevm: grep: %llu lines\n", (unsigned long long)hits);
         }
+        else if (!strncmp(line, "vdump ", 6)) { /* "vdump VA LEN FILE": guest memory at a VA as CPU 0 maps it now (EL1), up to 64 KB */
+            unsigned long long va = 0, len = 0;
+            char out[400];
+            if (sscanf(line + 6, "%llx %lli %399s", &va, &len, out) == 3 && len > 0 && len <= 65536) {
+                HvVmapple *bd = hv_vm_board();
+                FILE *vf = fopen(out, "wb");
+                unsigned long long done = 0;
+                while (vf && done < len) {
+                    HvWalk wv;
+                    hv_mmu_walk(hv_vm_cpu(0), va + done, HV_ACC_READ, 1, &wv);
+                    uint64_t off = wv.pa - 0x70000000ull, n = 0x4000 - ((va + done) & 0x3fff);
+                    if (n > len - done) n = len - done;
+                    if (wv.fsc || wv.pa < 0x70000000ull || off + n > bd->ram_size) break;
+                    fwrite(bd->ram + off, 1, n, vf);
+                    done += n;
+                }
+                if (vf) fclose(vf);
+                fprintf(stderr, "hengevm: vdump %llx: %llu bytes\n", va, done);
+            }
+        }
         else if (!strncmp(line, "page ", 5)) { /* a 16 KB file: is it in guest RAM, and how does the copy there differ? */
             static uint8_t want[0x4000];
             FILE *pf = fopen(line + 5, "rb");
