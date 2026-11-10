@@ -8,7 +8,8 @@ struct MacOSRelease: Identifiable, Hashable {
     let url: URL
     let bytes: Int64
     let note: String
-    /// Room the new Mac takes once installed and set up, with a margin for its first updates and caches.
+    /// Room the new Mac takes once installed and set up, with a margin for its first updates and caches
+    /// (installed and set up on the Mac in phone mode: Sonoma 21 GB, Ventura 19 GB).
     var macBytes: Int64 = 24 << 30
 
     /// The builds offered, oldest first. Apple's catalog (mesu.apple.com) only lists the newest;
@@ -19,10 +20,10 @@ struct MacOSRelease: Identifiable, Hashable {
                      bytes: 13_430 << 20, note: "The lightest: for devices with less memory or storage."),
         MacOSRelease(id: "22G120", name: "macOS Ventura 13.6",
                      url: URL(string: "https://updates.cdn-apple.com/2023FallFCS/fullrestores/042-55833/C0830847-A2F8-458F-B680-967991820931/UniversalMac_13.6_22G120_Restore.ipsw")!,
-                     bytes: 12_297 << 20, note: "Lighter than Sequoia."),
+                     bytes: 12_297 << 20, note: "Lighter than Sequoia.", macBytes: 23 << 30),
         MacOSRelease(id: "23G93", name: "macOS Sonoma 14.6.1",
                      url: URL(string: "https://updates.cdn-apple.com/2024SummerFCS/fullrestores/062-52859/932E0A8F-6644-4759-82DA-F8FA8DEA806A/UniversalMac_14.6.1_23G93_Restore.ipsw")!,
-                     bytes: 14_106 << 20, note: "Lighter than Sequoia, and still supported by most apps."),
+                     bytes: 14_106 << 20, note: "Lighter than Sequoia, and still supported by most apps.", macBytes: 26 << 30),
         MacOSRelease(id: "24G90", name: "macOS Sequoia 15.6.1",
                      url: URL(string: "https://updates.cdn-apple.com/2025SummerFCS/fullrestores/093-10809/CFD6DD38-DAF0-40DA-854F-31AAD1294C6F/UniversalMac_15.6.1_24G90_Restore.ipsw")!,
                      bytes: 16_035 << 20, note: "Recommended: the version Henge is tested with."),
