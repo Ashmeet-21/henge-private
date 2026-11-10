@@ -7,7 +7,11 @@
    /.henge/ is not part of the folder. It has the clipboard, where the helper inside macOS (tools/henge-agent.m)
    waits for the device's clipboard and sends the guest's, and what it takes to install that helper.
 
-   Locks are accepted but not enforced: macOS only writes to a server that offers them, and there is one client. */
+   Locks are offered because macOS only writes to a server that offers them (and there is one
+   client) — but they are also ENFORCED: a LOCK registers its token
+   against the path, writes by anyone not presenting that token get 423, and UNLOCK releases it.
+   An earlier version accepted locks and enforced nothing; a guest application that believed it
+   held an exclusive lock did not. */
 #include "share.h"
 
 #include <copyfile.h>
@@ -85,6 +89,7 @@ typedef struct Request {
     char query[128];
     char destination[PATH_MAX]; /* decoded path */
     char if_header[256];
+    char lock_token[160];
     long long length;
     int chunked, expect_continue, close, overwrite, depth;
     long long range_from, range_to; /* -1: none */
@@ -264,6 +269,10 @@ static int respond_empty(Conn *c, Request *r, int status, const char *reason) {
     return respond(c, r, status, reason, NULL, NULL, 0);
 }
 
+/* Lock helpers live with do_lock, further down; the folder code calls both. */
+static int refuse_if_locked(Conn *c, Request *r, const char *path);
+static void add_lock_discovery(Text *t, const char *path);
+
 /* ---- paths ---- */
 
 static int hex(int c) {
@@ -328,8 +337,8 @@ static void add_entry(Text *t, const char *url_path, const char *name, const str
                 "<D:getetag>\"%llx-%llx\"</D:getetag>",
              (long long)st->st_size, (unsigned long long)st->st_size, (unsigned long long)st->st_mtimespec.tv_sec);
     }
-    adds(t, "<D:supportedlock><D:lockentry><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockentry></D:supportedlock>"
-            "<D:lockdiscovery/>");
+    adds(t, "<D:supportedlock><D:lockentry><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockentry></D:supportedlock>");
+    add_lock_discovery(t, url_path);
     if (is_root) {
         struct statfs fs;
         if (statfs(root, &fs) == 0) {
@@ -446,6 +455,8 @@ static int do_get(Conn *c, Request *r) {
 
 /* Into a temporary file beside it, then renamed, so a transfer cut short leaves the old file alone. */
 static int do_put(Conn *c, Request *r) {
+    int lk = refuse_if_locked(c, r, r->path);
+    if (lk) return lk < 0 ? -1 : 0;
     char local[PATH_MAX], temp[PATH_MAX];
     struct stat st;
     if (local_path(r->path, local, sizeof local) != 0) {
@@ -512,6 +523,8 @@ static int remove_path(const char *local) {
 }
 
 static int do_delete(Conn *c, Request *r) {
+    int lk = refuse_if_locked(c, r, r->path);
+    if (lk) return lk < 0 ? -1 : 0;
     if (body_discard(c, r) != 0) return -1;
     char local[PATH_MAX];
     if (strcmp(r->path, "/") == 0 || local_path(r->path, local, sizeof local) != 0) return respond_empty(c, r, 403, "Forbidden");
@@ -520,6 +533,8 @@ static int do_delete(Conn *c, Request *r) {
 }
 
 static int do_mkcol(Conn *c, Request *r) {
+    int lk = refuse_if_locked(c, r, r->path);
+    if (lk) return lk < 0 ? -1 : 0;
     if (body_discard(c, r) != 0) return -1;
     char local[PATH_MAX];
     if (local_path(r->path, local, sizeof local) != 0) return respond_empty(c, r, 403, "Forbidden");
@@ -530,6 +545,9 @@ static int do_mkcol(Conn *c, Request *r) {
 }
 
 static int do_move_copy(Conn *c, Request *r, int move) {
+    int lk = refuse_if_locked(c, r, r->path);
+    if (lk) return lk < 0 ? -1 : 0;
+    if (r->destination[0]) { lk = refuse_if_locked(c, r, r->destination); if (lk) return lk < 0 ? -1 : 0; }
     if (body_discard(c, r) != 0) return -1;
     char from[PATH_MAX], to[PATH_MAX];
     struct stat st;
@@ -545,6 +563,85 @@ static int do_move_copy(Conn *c, Request *r, int move) {
     return existed ? respond_empty(c, r, 204, "No Content") : respond_empty(c, r, 201, "Created");
 }
 
+/* ---- write locks, enforced ---- */
+
+typedef struct LockEnt {
+    char path[PATH_MAX]; /* URL path as locked */
+    char token[160];
+    int depth_inf;
+    time_t expires;
+    struct LockEnt *next;
+} LockEnt;
+static LockEnt *lock_list;
+static pthread_mutex_t lock_mu = PTHREAD_MUTEX_INITIALIZER;
+#define LOCK_SECONDS 3600
+
+static void locks_sweep(void) { /* caller holds lock_mu */
+    time_t now = time(NULL);
+    LockEnt **pp = &lock_list;
+    while (*pp) {
+        if ((*pp)->expires <= now) { LockEnt *dead = *pp; *pp = dead->next; free(dead); }
+        else pp = &(*pp)->next;
+    }
+}
+
+/* The token a request presents, if any: Lock-Token header, else the first <...> in If. */
+static void presented_token(Request *r, char *out, size_t cap) {
+    const char *src = r->lock_token[0] ? r->lock_token : r->if_header;
+    const char *a = strchr(src, '<'), *b = a ? strchr(a, '>') : NULL;
+    if (a && b) snprintf(out, cap, "%.*s", (int)(b - a - 1), a + 1);
+    else snprintf(out, cap, "%s", r->lock_token);
+}
+
+/* 1 when path (URL form) is write-locked by a token other than the presented one. A lock on
+   an ancestor collection with depth infinity covers descendants; a lock on the path itself
+   always covers it. */
+static int locked_by_other(const char *path, const char *token) {
+    pthread_mutex_lock(&lock_mu);
+    locks_sweep();
+    int held = 0;
+    for (LockEnt *e = lock_list; e && !held; e = e->next) {
+        int covers = !strcmp(e->path, path);
+        if (!covers && e->depth_inf) {
+            size_t n = strlen(e->path);
+            covers = !strncmp(path, e->path, n) && (e->path[n - 1] == '/' || path[n] == '/');
+        }
+        if (covers && strcmp(e->token, token)) held = 1;
+    }
+    pthread_mutex_unlock(&lock_mu);
+    return held;
+}
+
+/* 1 (and the 423 already sent) when the path is locked by someone else; 0 when the write may
+   proceed; -1 when the connection broke. Callers must not proceed on 1: the refusal is the
+   whole answer. (An earlier draft returned respond_empty's 0 here and the write went ahead
+   behind its own 423; the wire test caught it because a refused DELETE deleted the file.) */
+static int refuse_if_locked(Conn *c, Request *r, const char *path) {
+    char token[160];
+    presented_token(r, token, sizeof token);
+    if (!locked_by_other(path, token)) return 0;
+    if (body_discard(c, r) != 0) return -1;
+    if (respond_empty(c, r, 423, "Locked") != 0) return -1;
+    return 1;
+}
+
+/* Active locks on a path, for PROPFIND's lockdiscovery. */
+static void add_lock_discovery(Text *t, const char *path) {
+    pthread_mutex_lock(&lock_mu);
+    locks_sweep();
+    int any = 0;
+    for (LockEnt *e = lock_list; e; e = e->next) {
+        if (strcmp(e->path, path)) continue;
+        if (!any) { adds(t, "<D:lockdiscovery>"); any = 1; }
+        addf(t, "<D:activelock><D:locktype><D:write/></D:locktype><D:lockscope><D:exclusive/></D:lockscope>"
+                "<D:depth>%s</D:depth><D:timeout>Second-%ld</D:timeout><D:locktoken><D:href>%s</D:href></D:locktoken></D:activelock>",
+             e->depth_inf ? "infinity" : "0", (long)(e->expires - time(NULL)), e->token);
+    }
+    if (any) adds(t, "</D:lockdiscovery>");
+    pthread_mutex_unlock(&lock_mu);
+    if (!any) adds(t, "<D:lockdiscovery/>");
+}
+
 static int do_lock(Conn *c, Request *r) {
     if (body_discard(c, r) != 0) return -1;
     static unsigned long counter;
@@ -554,6 +651,22 @@ static int do_lock(Conn *c, Request *r) {
         snprintf(token, sizeof token, "%.*s", (int)(end - open_ - 1), open_ + 1);
     } else {
         snprintf(token, sizeof token, "opaquelocktoken:henge-%lx-%lx", (unsigned long)time(NULL), __atomic_add_fetch(&counter, 1, __ATOMIC_RELAXED));
+    }
+    { /* register or refresh the lock this token names */
+        pthread_mutex_lock(&lock_mu);
+        locks_sweep();
+        LockEnt *e;
+        for (e = lock_list; e; e = e->next) if (!strcmp(e->token, token)) break;
+        if (!e) {
+            e = calloc(1, sizeof *e);
+            e->next = lock_list;
+            lock_list = e;
+        }
+        snprintf(e->path, sizeof e->path, "%s", r->path);
+        snprintf(e->token, sizeof e->token, "%s", token);
+        e->depth_inf = r->depth != 0;
+        e->expires = time(NULL) + LOCK_SECONDS;
+        pthread_mutex_unlock(&lock_mu);
     }
     int status = 200;
     char local[PATH_MAX];
@@ -782,6 +895,7 @@ static int read_request(Conn *c, Request *r) {
         else if (header_is(line, "Depth", &v)) r->depth = v[0] == '0' ? 0 : 1;
         else if (header_is(line, "Overwrite", &v)) r->overwrite = v[0] != 'F' && v[0] != 'f';
         else if (header_is(line, "If", &v)) snprintf(r->if_header, sizeof r->if_header, "%s", v);
+        else if (header_is(line, "Lock-Token", &v)) snprintf(r->lock_token, sizeof r->lock_token, "%s", v);
         else if (header_is(line, "Destination", &v)) {
             const char *p = v;
             if (!strncasecmp(p, "http://", 7) || !strncasecmp(p, "https://", 8)) {
@@ -823,7 +937,22 @@ static int handle(Conn *c, Request *r) {
     if (!strcmp(m, "LOCK")) return do_lock(c, r);
     if (!strcmp(m, "UNLOCK")) {
         if (body_discard(c, r) != 0) return -1;
-        return respond_empty(c, r, 204, "No Content");
+        char token[160];
+        presented_token(r, token, sizeof token);
+        pthread_mutex_lock(&lock_mu);
+        locks_sweep();
+        LockEnt **pp = &lock_list;
+        int found = 0, wrong = 0;
+        while (*pp) {
+            if (!strcmp((*pp)->path, r->path)) {
+                if (!strcmp((*pp)->token, token)) { LockEnt *dead = *pp; *pp = dead->next; free(dead); found = 1; break; }
+                wrong = 1;
+            }
+            pp = &(*pp)->next;
+        }
+        pthread_mutex_unlock(&lock_mu);
+        if (found) return respond_empty(c, r, 204, "No Content");
+        return respond_empty(c, r, wrong ? 403 : 400, wrong ? "Forbidden" : "Bad Request");
     }
     if (body_discard(c, r) != 0) return -1;
     return respond_empty(c, r, 405, "Method Not Allowed");
