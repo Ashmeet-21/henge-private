@@ -11,7 +11,6 @@ Click the window to capture the mouse; Left Ctrl + Left Alt lets it go. The prot
 H.264 Annex-B one way, 6-byte input messages [type][a][x int16 LE][y int16 LE] the other.
 """
 import os, socket, struct, sys, threading
-os.environ.setdefault("SDL_RENDER_SCALE_QUALITY", "linear")  # a resized window is filtered, not pixel-doubled unevenly
 # While the mouse is captured, the keyboard is too: on Wayland that asks the compositor (KWin, GNOME) to stop its own
 # shortcuts, so Super+Q reaches the Mac as Command-Q instead of the desktop.
 os.environ.setdefault("SDL_GRAB_KEYBOARD", "1")
@@ -122,10 +121,19 @@ while running:
             if frame is None:
                 continue
             pixels, w, h, pitch = frame
-            if size != (w, h):
+            if size != (w, h):  # a new stream size: start the window at it, then it is the user's to resize
                 size = (w, h)
-                screen = pygame.display.set_mode(size, pygame.RESIZABLE | pygame.SCALED)
-            screen.blit(pygame.image.frombuffer(pixels, size, "RGB", pitch), (0, 0))
+                screen = pygame.display.set_mode(size, pygame.RESIZABLE)
+            picture = pygame.image.frombuffer(pixels, size, "RGB", pitch)
+            screen = pygame.display.get_surface()  # resizing the window gives it a new one
+            win = screen.get_size()
+            if win == size:
+                screen.blit(picture, (0, 0))
+            else:  # fit the window, keeping the Mac's shape: black bars where the shapes differ
+                k = min(win[0] / w, win[1] / h)
+                fit = (max(1, round(w * k)), max(1, round(h * k)))
+                screen.fill((0, 0, 0))
+                screen.blit(pygame.transform.smoothscale(picture, fit), ((win[0] - fit[0]) // 2, (win[1] - fit[1]) // 2))
             pygame.display.flip()
         elif e.type == pygame.MOUSEBUTTONDOWN and not captured:
             if e.button in BUTTONS:
