@@ -4,7 +4,7 @@ name: Build IPA
 on:
   workflow_dispatch:
   push:
-    branches: [ipad-a16-lowmem, a16-polish, ipad-stock]
+    branches: [ipad-stock]
 
 jobs:
   ipa:
