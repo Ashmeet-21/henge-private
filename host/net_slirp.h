@@ -6,6 +6,10 @@
 
 /* Before hv_net_attach: the Unix socket behind the guest's 10.0.2.4:80 (share.c). */
 void hv_net_set_share_socket(const char *path);
+/* App layer: DNS search domains (comma-separated) + domain name to
+   propagate into the guest via slirp DHCP. Call before hv_net_attach.
+   Host-build defaults: env HV_NET_SEARCH / HV_NET_DOMAIN. */
+void hv_net_set_search_domains(const char *comma_list, const char *domain);
 /* User-mode NAT for the guest's virtio-net (see net_slirp.c). Returns 0 on success. */
 int hv_net_attach(HvMachine *m, HvVirtioNet *n);
 /* CPUs must be stopped. Joins the network worker before its machine is freed. */
