@@ -14,6 +14,7 @@
 #include "net_slirp.h"
 #include "dns_proxy.h"
 #include "vm.h"
+#include "audio_mac.h"
 #include "install.h"
 
 #include <fcntl.h>
@@ -167,6 +168,10 @@ int henge_vm_pointer(int *x, int *y) { return state == 1 ? hv_vm_pointer(x, y) :
 int henge_vm_snapshot(uint8_t *bgra, int width, int height) { return state == 1 ? hv_vm_snapshot(bgra, width, height) : -1; }
 int henge_vm_stream_frame(void *pixel_buffer, int *w, int *h) { return state == 1 ? hv_vm_stream_frame(pixel_buffer, w, h) : -1; }
 void henge_vm_set_headless(int on) { hv_vm_set_headless(on); }
+void henge_audio_tap(int on, int mute_here) { hv_audio_tap(on, mute_here); }
+int henge_audio_tap_read(uint8_t *out, int max, unsigned *channels, unsigned *format, unsigned *rate_hz) {
+    return hv_audio_tap_read(out, max, channels, format, rate_hz);
+}
 
 void henge_vm_set_display_layer(void *layer) {
     hv_vm_set_display_layer(layer);

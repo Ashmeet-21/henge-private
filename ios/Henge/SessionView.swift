@@ -29,6 +29,7 @@ struct SessionView: View {
     @AppStorage(RemoteDesktop.enabledKey) private var remoteEnabled = false
     @AppStorage(RemoteDesktop.headlessKey) private var remoteHeadless = true
     @AppStorage(RemoteDesktop.wifiKey) private var remoteWifi = false
+    @AppStorage(RemoteDesktop.muteHereKey) private var remoteMuteHere = true
 
     @State private var typing = false
     @State private var zoomed = false
@@ -515,6 +516,7 @@ struct SessionView: View {
                     Toggle("Stream to a computer", isOn: $remoteEnabled)
                     Toggle("Hide the Mac here while streaming", isOn: $remoteHeadless)
                     Toggle("Allow over Wi-Fi with a code", isOn: $remoteWifi)
+                    Toggle("Silent here while the computer plays the sound", isOn: $remoteMuteHere)
                     if remoteEnabled {
                         LabeledContent("Status", value: remote.connected ? "Streaming to \(remote.client)" : "Waiting on port \(RemoteDesktop.port)")
                         if remoteWifi {

@@ -7,6 +7,8 @@
                                                                 # --alt-cmd makes Alt Command (if the desktop keeps Super)
     python3 tools/henge-remote.py 192.168.1.20:5901 --code 123456   # Wi-Fi: allow it in Henge, use the code it shows
 
+The Mac's sound comes on the video port + 2 (iproxy 15903:5903 over USB); --no-audio leaves it on the phone.
+
 Click the window to capture the mouse; Left Ctrl + Left Alt lets it go. The protocol is in ios/Henge/RemoteDesktop.swift:
 H.264 Annex-B one way, 6-byte input messages [type][a][x int16 LE][y int16 LE] the other.
 """
@@ -19,7 +21,10 @@ import av
 import pygame
 
 args = sys.argv[1:]
-code, speed, alt_cmd = None, 2.0, False
+code, speed, alt_cmd, audio = None, 2.0, False, True
+if "--no-audio" in args:
+    audio = False
+    args.remove("--no-audio")
 if "--alt-cmd" in args:  # Alt is Command and Super is Option, as a Mac keyboard has them laid out
     alt_cmd = True
     args.remove("--alt-cmd")
@@ -77,10 +82,68 @@ def reader():
     pygame.event.post(pygame.event.Event(pygame.QUIT))
 
 
+class Sound:
+    """The Mac's sound from the phone: packets of [length u32][rate u32][channels u16][format u16] + PCM, played through
+    SDL with a short buffer. More than a quarter second behind and it skips ahead, so the sound stays with the picture."""
+    FORMATS = {5: ("AUDIO_S16", 2), 17: ("AUDIO_S32", 4), 19: ("AUDIO_F32", 4)}
+
+    def __init__(self):
+        self.buf, self.lock, self.device, self.shape = bytearray(), threading.Lock(), None, None
+
+    def fill(self, device, out):
+        with self.lock:
+            n = min(len(out), len(self.buf))
+            out[:n] = self.buf[:n]
+            del self.buf[:n]
+        out[n:] = bytes(len(out) - n)  # nothing yet: silence
+
+    def open(self, rate, channels, fmt):
+        from pygame._sdl2 import audio as sdl
+        if self.device:
+            self.device.close()
+        name, size = self.FORMATS[fmt]
+        self.bytes_per_second = rate * channels * size
+        from pygame._sdl2 import sdl2
+        pygame.mixer.quit()  # pygame.init() opened the default output for a mixer this never uses; that also stops
+        sdl2.init_subsystem(sdl2.INIT_AUDIO)  # SDL's sound, so start it again for a device of our own
+        self.device = sdl.AudioDevice(None, False, rate, getattr(sdl, name), channels, 512, 0, self.fill)
+        self.device.pause(0)
+        self.shape = (rate, channels, fmt)
+
+    def run(self, host, port, code):
+        try:
+            a = socket.create_connection((host, port), timeout=5)
+        except OSError as e:
+            print(f"no sound: {host}:{port}: {e} (over USB: iproxy 15903:5903)", flush=True)
+            return
+        a.settimeout(None)
+        if code:
+            a.sendall(code.encode()[:6].rjust(6, b"0"))
+        f = a.makefile("rb")
+        while running:
+            head = f.read(12)
+            if len(head) < 12:
+                break
+            n, rate, channels, fmt = struct.unpack("<IIHH", head)
+            data = f.read(n)
+            if len(data) < n or fmt not in self.FORMATS:
+                continue
+            if self.shape != (rate, channels, fmt):
+                self.open(rate, channels, fmt)
+            with self.lock:
+                self.buf += data
+                frame = channels * self.FORMATS[fmt][1]
+                if len(self.buf) > self.bytes_per_second // 4:  # behind: keep the newest tenth of a second
+                    keep = (self.bytes_per_second // 10) // frame * frame
+                    del self.buf[:len(self.buf) - keep]
+
+
 pygame.init()
 pygame.display.set_caption(f"Henge - {host}")
 screen = pygame.display.set_mode((1280, 720), pygame.RESIZABLE)
 threading.Thread(target=reader, daemon=True).start()
+if audio:
+    threading.Thread(target=Sound().run, args=(host, int(port or 15901) + 2, code), daemon=True).start()
 
 captured = False
 size = None

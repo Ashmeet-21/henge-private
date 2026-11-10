@@ -15,7 +15,11 @@ final class RemoteDesktop: ObservableObject {
     static let enabledKey = "henge.remote.enabled"
     static let headlessKey = "henge.remote.headless"
     static let wifiKey = "henge.remote.wifi"
+    static let muteHereKey = "henge.remote.muteHere"
     static let port: UInt16 = 5901
+    /// The Mac's sound, for the same client: packets of [length: UInt32][rate: UInt32][channels: UInt16][format: UInt16]
+    /// (5 s16, 17 s32, 19 float), little-endian, then that many bytes of interleaved PCM.
+    static let audioPort: UInt16 = 5903
 
     @Published private(set) var connected = false
     @Published private(set) var client = ""
@@ -38,6 +42,15 @@ final class RemoteDesktop: ObservableObject {
     private var unsent = 0
     private var codeBytes: [UInt8] = []
     private var lockedUntil = 0.0
+    // audioQueue only: sound has a queue of its own, as `queue` waits on the GPU and would make it stutter
+    private let audioQueue = DispatchQueue(label: "henge.remote.audio", qos: .userInteractive)
+    private var audioListener: NWListener?
+    private var audioConn: NWConnection?
+    private var audioTimer: DispatchSourceTimer?
+    private var audioCode: [UInt8] = []
+    private var audioLockedUntil = 0.0
+    private var audioUnsent = 0
+    private var audioBuf = [UInt8](repeating: 0, count: 65536)
     // inputQueue only
     private var inbox: [UInt8] = []
     private var heldKeys = Set<UInt8>()
@@ -58,6 +71,8 @@ final class RemoteDesktop: ObservableObject {
             } catch {
                 HengeLog.log("remote", "can't listen on \(Self.port): \(error)")
             }
+            let codeNow = codeBytes
+            audioQueue.async { [self] in startAudio(code: codeNow) }
         }
     }
 
@@ -67,6 +82,108 @@ final class RemoteDesktop: ObservableObject {
             listener = nil
             drop()
         }
+        audioQueue.async { [self] in
+            audioListener?.cancel()
+            audioListener = nil
+            dropAudio()
+        }
+    }
+
+    // MARK: - Sound (audioQueue)
+
+    private func startAudio(code: [UInt8]) {
+        audioCode = code
+        guard audioListener == nil else { return }
+        do {
+            let l = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: Self.audioPort)!)
+            l.newConnectionHandler = { [weak self] c in self?.acceptAudio(c) }
+            l.start(queue: audioQueue)
+            audioListener = l
+        } catch {
+            HengeLog.log("remote", "can't listen on \(Self.audioPort): \(error)")
+        }
+    }
+
+    /// The same rule as the picture's: USB, or Wi-Fi when allowed and with the code first.
+    private func acceptAudio(_ c: NWConnection) {
+        let usb = Self.isLoopback(c.endpoint)
+        if !usb && (!UserDefaults.standard.bool(forKey: Self.wifiKey) || CACurrentMediaTime() < audioLockedUntil) {
+            c.cancel()
+            return
+        }
+        c.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            switch state {
+            case .failed, .cancelled: self.audioQueue.async { if c === self.audioConn { self.dropAudio() } }
+            default: break
+            }
+        }
+        c.start(queue: audioQueue)
+        if usb { promoteAudio(c); return }
+        c.receive(minimumIncompleteLength: 6, maximumLength: 6) { [weak self] data, _, _, _ in
+            guard let self else { return }
+            if let data, [UInt8](data) == self.audioCode, !self.audioCode.isEmpty {
+                self.promoteAudio(c)
+            } else {
+                self.audioLockedUntil = CACurrentMediaTime() + 2
+                c.cancel()
+            }
+        }
+        audioQueue.asyncAfter(deadline: .now() + 10) { [weak self] in
+            if let self, c !== self.audioConn { c.cancel() }
+        }
+    }
+
+    private func promoteAudio(_ c: NWConnection) {
+        dropAudio()
+        audioConn = c
+        audioUnsent = 0
+        let muteHere = UserDefaults.standard.object(forKey: Self.muteHereKey) as? Bool ?? true
+        henge_audio_tap(1, muteHere ? 1 : 0)
+        HengeLog.log("remote", "sound to \(c.endpoint)\(muteHere ? ", silent here" : "")")
+        let t = DispatchSource.makeTimerSource(queue: audioQueue)
+        t.schedule(deadline: .now(), repeating: .milliseconds(10), leeway: .milliseconds(1))
+        t.setEventHandler { [weak self] in self?.sendAudio() }
+        t.resume()
+        audioTimer = t
+        watchAudio(c)
+    }
+
+    /// Nothing comes back on this connection; reading only notices it closing.
+    private func watchAudio(_ c: NWConnection) {
+        c.receive(minimumIncompleteLength: 1, maximumLength: 64) { [weak self] _, _, done, error in
+            guard let self else { return }
+            if done || error != nil { if c === self.audioConn { self.dropAudio() }; return }
+            self.watchAudio(c)
+        }
+    }
+
+    private func sendAudio() {
+        guard let c = audioConn else { return }
+        var channels: UInt32 = 0, format: UInt32 = 0, rate: UInt32 = 0
+        let n = Int(henge_audio_tap_read(&audioBuf, Int32(audioBuf.count), &channels, &format, &rate))
+        guard n > 0, channels > 0, rate > 0 else { return }
+        if audioUnsent > 256 * 1024 { return } // the computer is behind: drop this bit rather than fall behind further
+        var packet = Data(capacity: 12 + n)
+        withUnsafeBytes(of: UInt32(n).littleEndian) { packet.append(contentsOf: $0) }
+        withUnsafeBytes(of: rate.littleEndian) { packet.append(contentsOf: $0) }
+        withUnsafeBytes(of: UInt16(channels).littleEndian) { packet.append(contentsOf: $0) }
+        withUnsafeBytes(of: UInt16(format).littleEndian) { packet.append(contentsOf: $0) }
+        packet.append(contentsOf: audioBuf[0..<n])
+        audioUnsent += packet.count
+        let size = packet.count
+        c.send(content: packet, completion: .contentProcessed { [weak self] _ in
+            self?.audioQueue.async { if c === self?.audioConn { self?.audioUnsent = max(0, (self?.audioUnsent ?? 0) - size) } }
+        })
+    }
+
+    private func dropAudio() {
+        audioTimer?.cancel()
+        audioTimer = nil
+        guard let c = audioConn else { return }
+        audioConn = nil
+        c.cancel()
+        henge_audio_tap(0, 0)
     }
 
     /// The "hide on phone" setting changed while a client may be watching.
