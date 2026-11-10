@@ -302,6 +302,23 @@ int henge_vm_snapshot(uint8_t *bgra, int width, int height) {
     pthread_rwlock_unlock(&api_lock);
     return result;
 }
+
+/* Touch reports go through the same running-state lock as the other input calls. */
+void henge_vm_touch(int finger, int phase, int x, int y, uint32_t ts_ms) {
+    if (!lock_running()) return;
+    hv_vm_touch(finger, phase, x, y, ts_ms);
+    pthread_rwlock_unlock(&api_lock);
+}
+void henge_vm_touch_frame(uint32_t ts_ms) {
+    if (!lock_running()) return;
+    hv_vm_touch_frame(ts_ms);
+    pthread_rwlock_unlock(&api_lock);
+}
+void henge_vm_touch_button(int down) {
+    if (!lock_running()) return;
+    hv_vm_touch_button(down);
+    pthread_rwlock_unlock(&api_lock);
+}
 void henge_vm_set_display_layer(void *layer) {
     /* vm.c serializes this with unpublishing the old display before free.
        Main-thread layer detachment need not wait for disk/GPU teardown. */
