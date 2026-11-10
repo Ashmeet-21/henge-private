@@ -100,13 +100,21 @@ jobs:
       - name: Package Henge.ipa
         working-directory: Henge
         run: zsh ios/scripts/package_ipa.sh
-        # For a TrollStore build instead, use:
-        #   zsh ios/scripts/package_ipa.sh --trollstore
-        # which writes ~/Desktop/Henge.tipa instead.
 
       - name: Upload Henge.ipa
         uses: actions/upload-artifact@v4
         with:
           name: Henge-ipa-${{ github.sha }}
           path: /Users/runner/Desktop/Henge.ipa
+          if-no-files-found: error
+
+      - name: Package Henge.tipa
+        working-directory: Henge
+        run: zsh ios/scripts/package_ipa.sh --trollstore
+
+      - name: Upload Henge.tipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: Henge-tipa-${{ github.sha }}
+          path: /Users/runner/Desktop/Henge.tipa
           if-no-files-found: error
