@@ -15,12 +15,11 @@ struct MacOSRelease: Identifiable, Hashable {
     /// The builds offered, oldest first. Apple's catalog (mesu.apple.com) only lists the newest;
     /// these are the same images from Apple's CDN, and Apple still signs them for virtual Macs.
     static let all: [MacOSRelease] = [
-        MacOSRelease(id: "21G115", name: "macOS Monterey 12.6",
-                     url: URL(string: "https://updates.cdn-apple.com/2022FallFCS/fullrestores/012-40537/0EC7C669-13E9-49FB-BD64-9EECC1D174B2/UniversalMac_12.6_21G115_Restore.ipsw")!,
-                     bytes: 13_430 << 20, note: "The lightest: for devices with less memory or storage."),
+        /* macOS Monterey 12.6 (21G115, 2022FallFCS/fullrestores/012-40537/0EC7C669-13E9-49FB-BD64-9EECC1D174B2) installs and boots,
+           but its GPU driver (protocol 0x1f) never starts WindowServer's GPU work under Henge yet: not offered until it does. */
         MacOSRelease(id: "22G120", name: "macOS Ventura 13.6",
                      url: URL(string: "https://updates.cdn-apple.com/2023FallFCS/fullrestores/042-55833/C0830847-A2F8-458F-B680-967991820931/UniversalMac_13.6_22G120_Restore.ipsw")!,
-                     bytes: 12_297 << 20, note: "Lighter than Sequoia.", macBytes: 23 << 30),
+                     bytes: 12_297 << 20, note: "The lightest: for devices with less memory or storage.", macBytes: 23 << 30),
         MacOSRelease(id: "23G93", name: "macOS Sonoma 14.6.1",
                      url: URL(string: "https://updates.cdn-apple.com/2024SummerFCS/fullrestores/062-52859/932E0A8F-6644-4759-82DA-F8FA8DEA806A/UniversalMac_14.6.1_23G93_Restore.ipsw")!,
                      bytes: 14_106 << 20, note: "Lighter than Sequoia, and still supported by most apps.", macBytes: 26 << 30),
