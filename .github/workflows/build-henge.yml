@@ -18,6 +18,13 @@ on:
   push:
     branches:
       - '**'
+    # Nothing in the app comes from these: a push that only touches them builds nothing.
+    # (Run it by hand from the Actions tab if an IPA is wanted anyway.)
+    paths-ignore:
+      - 'tools/henge-remote.py'
+      - 'docs/**'
+      - '**.md'
+      - '.gitignore'
 
 env:
   HUSK: ${{ github.workspace }}/Husk
