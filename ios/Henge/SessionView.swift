@@ -165,7 +165,6 @@ struct SessionView: View {
         }
         .statusBarHidden(zoomed || Device.isPad)
         .persistentSystemOverlays(.hidden)
-        .preferredColorScheme(.dark)
         .sheet(isPresented: $showDetails) { details }
         .alert("Couldn’t Paste", isPresented: $showPasteUnavailable) {
             Button("OK", role: .cancel) {}
@@ -562,7 +561,6 @@ struct SessionView: View {
             .navigationTitle("Details")
             .navigationBarTitleDisplayMode(.inline)
         }
-        .preferredColorScheme(.dark)
     }
 
     // MARK: Running
