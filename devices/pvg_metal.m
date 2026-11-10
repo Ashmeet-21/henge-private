@@ -546,6 +546,7 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
         NSError *err = nil;
         id state = [device newComputePipelineStateWithDescriptor:descriptor options:MTLPipelineOptionNone reflection:nil error:&err];
         if (!state) [self complain:[NSString stringWithFormat:@"compute pipeline: %@", err.localizedDescription]];
+        else objc_setAssociatedObject(state, "hvname", [NSString stringWithFormat:@"compute %@", [[descriptor computeFunction] name]], OBJC_ASSOCIATION_RETAIN);
         return state;
     }
     if (tag == 3) { /* sampler: {tag, size, ref, bits, lod min, lod max, ...} */
@@ -1792,6 +1793,7 @@ typedef struct {
         id state = [self get:U32(0) task:task];
         if (state) [e setComputePipelineState:state];
         pipeline_set = state != nil;
+        if (tracing) fprintf(stderr, "trace:  pipeline %u %s\n", U32(0), [objc_getAssociatedObject(state, "hvname") UTF8String]);
         break;
     }
     case 203: {
@@ -1818,6 +1820,12 @@ typedef struct {
             strong[i] = [self get:U32(8 + i * 4) task:task];
             items[i] = strong[i];
         }
+        if (tracing) for (uint32_t i = 0; i < count; i++) {
+            id<MTLTexture> x = strong[i];
+            HvObject *xo = [self object:U32(8 + i * 4) task:task];
+            fprintf(stderr, "trace:  ctex %u ref %u %lux%lu fmt %lu type %u surface %s\n", index + i, U32(8 + i * 4), (unsigned long)x.width,
+                    (unsigned long)x.height, (unsigned long)x.pixelFormat, xo ? xo->entry[0] & 0xff : 0, xo && xo->surface ? "yes" : "no");
+        }
         [e setTextures:items withRange:NSMakeRange(index, count)];
         break;
     }
@@ -1837,6 +1845,8 @@ typedef struct {
     case 200: case 202: {
         MTLSize a, b;
         memcpy(&a, r.p, sizeof a), memcpy(&b, r.p + sizeof a, sizeof b);
+        if (tracing) fprintf(stderr, "trace:  dispatch %u %lux%lux%lu by %lux%lux%lu\n", tag, (unsigned long)a.width, (unsigned long)a.height,
+                             (unsigned long)a.depth, (unsigned long)b.width, (unsigned long)b.height, (unsigned long)b.depth);
         if (tag == 200) [e dispatchThreadgroups:a threadsPerThreadgroup:b];
         else [e dispatchThreads:a threadsPerThreadgroup:b];
         break;
