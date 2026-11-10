@@ -14,6 +14,7 @@
 #import <objc/message.h>
 #import <TargetConditionals.h>
 #import <IOSurface/IOSurfaceRef.h>
+#import <CoreVideo/CoreVideo.h>
 #include <string.h>
 #include <sys/utsname.h>
 
@@ -147,6 +148,7 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     id<MTLBuffer> trace_vb[32]; /* while tracing: the vertex buffers bound, with offset and stride */
     NSUInteger trace_vo[32], trace_vs[32];
     NSMutableSet<NSValue *> *trace_dumped; /* buffers already written to gpu-dump/ this trace */
+    unsigned trace_draws, trace_sliced; /* indexed draws traced, and those whose constants were kept, this trace */
     /* The newest frame, BGRA, for hv_pvg_metal_frame, and the same without the pointer on it. */
     uint8_t *frame, *base;
     uint32_t frame_w, frame_h;
@@ -180,6 +182,9 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     uint64_t screen_requests; /* fresh frames/cursor changes, not automatic retries */
     double drawable_retry_deadline; /* at most two seconds of retrying an unavailable target */
     uint32_t screen_w, screen_h;
+    uint64_t screen_seq; /* screen_lock: bumped on every new frame or pointer change, for the remote stream */
+    BOOL headless; /* screen_lock: remote desktop asked the phone to stop drawing */
+    CVMetalTextureCacheRef stream_cache;
     id<MTLBuffer> test_readback; /* HV_PVG_GPU_TEST: the drawable's pixels for screenshots */
     id<MTLBuffer> readback;
     const char *shot;
@@ -473,8 +478,16 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
             return nil;
         }
         NSError *err = nil;
-        id state = tag == 0xe ? [device newRenderPipelineStateWithDescriptor:descriptor error:&err]
+        BOOL reflect = tag == 0xe && getenv("HV_SHADER_DUMP") && atoi(getenv("HV_SHADER_DUMP"));
+        MTLRenderPipelineReflection *refl = nil;
+        id state = reflect ? [device newRenderPipelineStateWithDescriptor:descriptor options:MTLPipelineOptionBindingInfo reflection:&refl error:&err]
+                 : tag == 0xe ? [device newRenderPipelineStateWithDescriptor:descriptor error:&err]
                               : [device newRenderPipelineStateWithTileDescriptor:descriptor options:MTLPipelineOptionNone reflection:nil error:&err];
+        NSMutableString *vbind = [NSMutableString string]; /* debugging: which vertex slot holds what, to find the bone palette */
+        if (refl) for (id<MTLBinding> b in refl.vertexBindings) {
+            if (b.type != MTLBindingTypeBuffer) continue;
+            [vbind appendFormat:@" vb%lu:%@:%lu", (unsigned long)b.index, b.name, (unsigned long)((id<MTLBufferBinding>)b).bufferDataSize];
+        }
         if (!state) [self complain:[NSString stringWithFormat:@"pipeline %u: %@", tag, err.localizedDescription]];
         if (tag == 0xe && getenv("HV_SHADER_DUMP") && atoi(getenv("HV_SHADER_DUMP"))) { /* m4 fork: blend state as this iOS read it */
             MTLRenderPipelineDescriptor *rp = descriptor;
@@ -490,7 +503,7 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
         }
         if (state && tag == 0xe && getenv("HV_PVG_TRACE_FILE")) {
             MTLRenderPipelineDescriptor *rp = descriptor;
-            objc_setAssociatedObject(state, "hvname", [NSString stringWithFormat:@"%@ / %@ -> fmt %lu blend %d", rp.vertexFunction.name, rp.fragmentFunction.name, (unsigned long)rp.colorAttachments[0].pixelFormat, (int)rp.colorAttachments[0].blendingEnabled], OBJC_ASSOCIATION_RETAIN);
+            objc_setAssociatedObject(state, "hvname", [NSString stringWithFormat:@"%@ / %@ -> fmt %lu blend %d%@", rp.vertexFunction.name, rp.fragmentFunction.name, (unsigned long)rp.colorAttachments[0].pixelFormat, (int)rp.colorAttachments[0].blendingEnabled, vbind], OBJC_ASSOCIATION_RETAIN);
         }
         return state;
     }
@@ -1234,7 +1247,8 @@ typedef struct {
     NSUInteger size = type == MTLIndexTypeUInt32 ? 4 : 2;
     [self traceDump:b];
     for (uint32_t s = 0; s < 32; s++) if (trace_vb[s]) [self traceDump:trace_vb[s]];
-    fprintf(stderr, "trace:  indexed prim %lu idxtype %lu count %lu inst %lu base %ld idxoff %lu idxlen %lu ibuf %p", (unsigned long)primitive, (unsigned long)type,
+    unsigned serial = trace_draws++;
+    fprintf(stderr, "trace:  indexed d%u prim %lu idxtype %lu count %lu inst %lu base %ld idxoff %lu idxlen %lu ibuf %p", serial, (unsigned long)primitive, (unsigned long)type,
             (unsigned long)count, (unsigned long)instances, (long)base, (unsigned long)off, (unsigned long)b.length, (__bridge void *)b);
     if (b.storageMode != MTLStorageModePrivate && count && off <= b.length && count <= (b.length - off) / size) {
         const uint8_t *p = (const uint8_t *)b.contents + off;
@@ -1248,6 +1262,19 @@ typedef struct {
         fprintf(stderr, " min %u max %u", lo, hi);
     }
     fprintf(stderr, "\n");
+    /* The low slots hold constants such as bone matrices, rewritten every frame: keep this draw's slice of each
+       as gpu-dump/d<serial>-s<slot>.bin, for the first big draws of a trace. */
+    BOOL slices = count >= 300 && trace_sliced < 400;
+    if (slices) trace_sliced++;
+    NSString *dir = [[@(getenv("HV_PVG_TRACE_FILE") ?: "/tmp/x") stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"gpu-dump"];
+    for (uint32_t s = 0; s < 16; s++) {
+        id<MTLBuffer> v = trace_vb[s];
+        if (!v) continue;
+        fprintf(stderr, "trace:   const %u off %lu len %lu buf %p\n", s, (unsigned long)trace_vo[s], (unsigned long)v.length, (__bridge void *)v);
+        if (slices && v.storageMode != MTLStorageModePrivate && trace_vo[s] < v.length)
+            [[NSData dataWithBytes:(const uint8_t *)v.contents + trace_vo[s] length:MIN(v.length - trace_vo[s], (NSUInteger)16384)]
+                writeToFile:[dir stringByAppendingPathComponent:[NSString stringWithFormat:@"d%u-s%u.bin", serial, s]] atomically:NO];
+    }
     for (uint32_t s = 16; s < 32; s++) {
         id<MTLBuffer> v = trace_vb[s];
         if (!v) continue;
@@ -1933,7 +1960,7 @@ typedef struct {
     const uint32_t *res = a + 3;
     const uint8_t *bufs = (const uint8_t *)(res + nres * 2);
     tracing = hv_pvg_trace_on() != 0;
-    if (!tracing) trace_dumped = nil;
+    if (!tracing) trace_dumped = nil, trace_draws = trace_sliced = 0;
     if (tracing) fprintf(stderr, "trace: exec task %u, %u resources, %u buffers\n", task, nres, nbuf);
     double t_begin = now_seconds();
     id<MTLCommandBuffer> cb = [queue commandBuffer];
@@ -2166,6 +2193,27 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
     "  return t.sample(s, v.uv); }\n";
 
 - (BOOL)prepareScreenForLayer:(CAMetalLayer *)target {
+    if (![self preparePipelines]) return NO;
+    // Pipelines are shared, but a newly connected monitor has a fresh layer.
+    if (prepared_layer != target) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        target.device = device;
+        target.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        target.framebufferOnly = !(getenv("HV_PVG_GPU_TEST") || getenv("HV_COLOR_PROBE")); /* the probe copies the drawable out */
+        target.allowsNextDrawableTimeout = YES;
+        target.maximumDrawableCount = 3;
+        [CATransaction commit];
+        prepared_layer = target;
+        fprintf(stderr, "hengevm: pvg-metal: half-float display surfaces are shown %s (HV_PVG_HALF=%s)\n",
+                hv_half_mode_get() == 1 ? "as LINEAR light with an sRGB encode" : "as display-encoded values, passed through", hv_half_mode_get() == 1 ? "linear" : "encoded/default");
+        if (cp.on) cp_log_layer(self, target);
+    }
+    return YES;
+}
+
+/* The pipelines that draw the screen and pointer: the phone's layer and the remote stream both use them. */
+- (BOOL)preparePipelines {
     if (!screen_pipe || !linear_pipe || !cursor_pipe) {
         NSError *err = nil;
         id<MTLLibrary> lib = [device newLibraryWithSource:screen_shaders options:nil error:&err];
@@ -2191,22 +2239,76 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
         cursor_sampler = [device newSamplerStateWithDescriptor:sd];
         if (!screen_pipe || !linear_pipe || !cursor_pipe || !screen_sampler || !cursor_sampler) { [self complain:[NSString stringWithFormat:@"screen pipelines: %@", err.localizedDescription]]; return NO; }
     }
-    // Pipelines are shared, but a newly connected monitor has a fresh layer.
-    if (prepared_layer != target) {
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        target.device = device;
-        target.pixelFormat = MTLPixelFormatBGRA8Unorm;
-        target.framebufferOnly = !(getenv("HV_PVG_GPU_TEST") || getenv("HV_COLOR_PROBE")); /* the probe copies the drawable out */
-        target.allowsNextDrawableTimeout = YES;
-        target.maximumDrawableCount = 3;
-        [CATransaction commit];
-        prepared_layer = target;
-        fprintf(stderr, "hengevm: pvg-metal: half-float display surfaces are shown %s (HV_PVG_HALF=%s)\n",
-                hv_half_mode_get() == 1 ? "as LINEAR light with an sRGB encode" : "as display-encoded values, passed through", hv_half_mode_get() == 1 ? "linear" : "encoded/default");
-        if (cp.on) cp_log_layer(self, target);
-    }
     return YES;
+}
+
+/* The screen, then the pointer over it, into whatever target the encoder has (W x H: the screen's size). */
+- (void)drawScreen:(id<MTLRenderCommandEncoder>)e tex:(id<MTLTexture>)tex half:(BOOL)half cursor:(id<MTLTexture>)ctex shown:(BOOL)shown
+                 w:(uint32_t)W h:(uint32_t)H cw:(uint32_t)cw0 ch:(uint32_t)ch0 hx:(int)hx hy:(int)hy {
+    [e setRenderPipelineState:half ? linear_pipe : screen_pipe];
+    float rect[4] = {-1, -1, 2, 2};
+    [e setVertexBytes:rect length:sizeof rect atIndex:0];
+    [e setFragmentTexture:tex atIndex:0];
+    [e setFragmentSamplerState:screen_sampler atIndex:0];
+    if (half) {
+        uint32_t half_mode = (uint32_t)hv_half_mode_get();
+        [e setFragmentBytes:&half_mode length:sizeof half_mode atIndex:0];
+    }
+    [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+    const uint8_t *page = hv_pvg_lite_display_page(lite);
+    uint32_t where = page ? __atomic_load_n((const uint32_t *)(page + 0xe00), __ATOMIC_ACQUIRE) : 0xffffffff;
+    if (ctex && where != 0xffffffff && (shown || page[0xe04])) {
+        const float scale = cursor_scale();
+        float x = (float)(where & 0xffff) - hx * scale, y = (float)(where >> 16) - hy * scale;
+        float cw = cw0 * scale, ch = ch0 * scale;
+        float r[4] = {x / W * 2 - 1, 1 - (y + ch) / H * 2, cw / W * 2, ch / H * 2};
+        [e setRenderPipelineState:cursor_pipe];
+        [e setVertexBytes:r length:sizeof r atIndex:0];
+        [e setFragmentTexture:ctex atIndex:0];
+        NSNumber *sharpSetting = [[NSUserDefaults standardUserDefaults] objectForKey:@"henge.cursor.sharp"];
+        [e setFragmentSamplerState:sharpSetting && !sharpSetting.boolValue ? screen_sampler : cursor_sampler atIndex:0];
+        [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+    }
+}
+
+/* Remote desktop: the screen and pointer drawn into a pixel buffer for the video encoder, scaled to its size.
+   Returns a count that changes whenever the screen or pointer did, or -1 before there is a screen. */
+- (int)streamInto:(CVPixelBufferRef)pb w:(int *)w h:(int *)h {
+    os_unfair_lock_lock(&screen_lock);
+    id<MTLTexture> tex = screen_tex, ctex = cursor_tex;
+    BOOL half = screen_half, shown = cursor_shown;
+    uint32_t W = screen_w, H = screen_h, cw0 = cursor_w, ch0 = cursor_h;
+    int hx = cursor_hot_x, hy = cursor_hot_y, seq = (int)(screen_seq & 0x7fffffff);
+    os_unfair_lock_unlock(&screen_lock);
+    if (w) *w = (int)W;
+    if (h) *h = (int)H;
+    if (!tex) return -1;
+    if (!pb) return seq;
+    if (![self preparePipelines]) return -1;
+    if (!stream_cache && CVMetalTextureCacheCreate(NULL, NULL, device, NULL, &stream_cache) != kCVReturnSuccess) return -1;
+    CVMetalTextureRef ref = NULL;
+    if (CVMetalTextureCacheCreateTextureFromImage(NULL, stream_cache, pb, NULL, MTLPixelFormatBGRA8Unorm,
+                                                  CVPixelBufferGetWidth(pb), CVPixelBufferGetHeight(pb), 0, &ref) != kCVReturnSuccess) return -1;
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = CVMetalTextureGetTexture(ref);
+    pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:pass];
+    [self drawScreen:e tex:tex half:half cursor:ctex shown:shown w:W h:H cw:cw0 ch:ch0 hx:hx hy:hy];
+    [e endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    CFRelease(ref);
+    return seq;
+}
+
+/* Remote desktop: stop drawing on the phone (the stream goes on), or start again. */
+- (void)setHeadless:(BOOL)on {
+    os_unfair_lock_lock(&screen_lock);
+    headless = on;
+    os_unfair_lock_unlock(&screen_lock);
+    if (!on) [self screenChanged];
 }
 
 /* The display, drawn by the GPU. Waiting for a drawable can take until the screen's next
@@ -2215,7 +2317,8 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
 - (void)kickPresenter:(BOOL)fresh {
     /* screen_lock held */
     if (fresh) screen_requests++;
-    if (presenter_running || !layer || !screen_tex || drawable_retry_pending) return;
+    screen_seq++;
+    if (presenter_running || !layer || !screen_tex || drawable_retry_pending || headless) return;
     if (drawable_retry_cooldown) {
         double delay = drawable_retry_cooldown - now_seconds();
         if (delay > 0) {
@@ -2360,30 +2463,7 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
         pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:pass];
-        [e setRenderPipelineState:half ? linear_pipe : screen_pipe];
-        float rect[4] = {-1, -1, 2, 2};
-        [e setVertexBytes:rect length:sizeof rect atIndex:0];
-        [e setFragmentTexture:tex atIndex:0];
-        [e setFragmentSamplerState:screen_sampler atIndex:0];
-        if (half) {
-            uint32_t half_mode = (uint32_t)hv_half_mode_get();
-            [e setFragmentBytes:&half_mode length:sizeof half_mode atIndex:0];
-        }
-        [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
-        const uint8_t *page = hv_pvg_lite_display_page(lite);
-        uint32_t where = page ? __atomic_load_n((const uint32_t *)(page + 0xe00), __ATOMIC_ACQUIRE) : 0xffffffff;
-        if (ctex && where != 0xffffffff && (shown || page[0xe04])) {
-            const float scale = cursor_scale();
-            float x = (float)(where & 0xffff) - hx * scale, y = (float)(where >> 16) - hy * scale;
-            float cw = cw0 * scale, ch = ch0 * scale;
-            float r[4] = {x / W * 2 - 1, 1 - (y + ch) / H * 2, cw / W * 2, ch / H * 2};
-            [e setRenderPipelineState:cursor_pipe];
-            [e setVertexBytes:r length:sizeof r atIndex:0];
-            [e setFragmentTexture:ctex atIndex:0];
-            NSNumber *sharpSetting = [[NSUserDefaults standardUserDefaults] objectForKey:@"henge.cursor.sharp"];
-            [e setFragmentSamplerState:sharpSetting && !sharpSetting.boolValue ? screen_sampler : cursor_sampler atIndex:0];
-            [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
-        }
+        [self drawScreen:e tex:tex half:half cursor:ctex shown:shown w:W h:H cw:cw0 ch:ch0 hx:hx hy:hy];
         [e endEncoding];
         if (cp.on) cp_capture_post(self, drawable.texture, W, H, cb);
 #if !TARGET_OS_IPHONE
@@ -2650,6 +2730,16 @@ void hv_pvg_metal_unmap(HvPvgMetal *m, uint32_t mapping) {
         [r->surfaces removeObjectForKey:@(mapping)];
         [r->mapped_textures removeObjectForKey:@(mapping)];
     });
+}
+
+int hv_pvg_metal_stream_frame(HvPvgMetal *m, void *pixel_buffer, int *w, int *h) {
+    if (!m) return -1;
+    HvReplay *r = (__bridge HvReplay *)m;
+    @autoreleasepool { return [r streamInto:(CVPixelBufferRef)pixel_buffer w:w h:h]; }
+}
+
+void hv_pvg_metal_set_headless(HvPvgMetal *m, int on) {
+    if (m) [(__bridge HvReplay *)m setHeadless:on != 0];
 }
 
 /* A small picture of what the display shows, BGRA with no padding, for the app's home screen.

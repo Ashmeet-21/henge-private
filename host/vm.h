@@ -76,5 +76,9 @@ void hv_vm_mouse_hwheel(int dx);
 int hv_vm_pointer(int *x, int *y);
 /* A small picture of the display, BGRA, width * height * 4 bytes. 0, or -1 before anything shows. */
 int hv_vm_snapshot(uint8_t *bgra, int width, int height);
+/* Remote desktop: the screen drawn into a CVPixelBufferRef (NULL: only its size). A count that changes with the screen, or -1. */
+int hv_vm_stream_frame(void *pixel_buffer, int *w, int *h);
+/* Remote desktop: stop drawing on the device's own display (1) or start again (0). */
+void hv_vm_set_headless(int on);
 
 #endif

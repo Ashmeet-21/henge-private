@@ -476,3 +476,13 @@ int hv_vm_snapshot(uint8_t *bgra, int width, int height) {
     if (!pvg || width <= 0 || height <= 0) return -1;
     return hv_pvg_lite_snapshot(pvg, bgra, (uint32_t)width, (uint32_t)height);
 }
+
+int hv_vm_stream_frame(void *pixel_buffer, int *w, int *h) {
+    HvPvgLite *pvg = atomic_load_explicit(&display_pvg, memory_order_acquire);
+    return pvg ? hv_pvg_lite_stream_frame(pvg, pixel_buffer, w, h) : -1;
+}
+
+void hv_vm_set_headless(int on) {
+    HvPvgLite *pvg = atomic_load_explicit(&display_pvg, memory_order_acquire);
+    if (pvg) hv_pvg_lite_set_headless(pvg, on);
+}

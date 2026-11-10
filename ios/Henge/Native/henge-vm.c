@@ -165,6 +165,8 @@ void henge_vm_mouse_scroll(int dx, int dy) {
 }
 int henge_vm_pointer(int *x, int *y) { return state == 1 ? hv_vm_pointer(x, y) : -1; }
 int henge_vm_snapshot(uint8_t *bgra, int width, int height) { return state == 1 ? hv_vm_snapshot(bgra, width, height) : -1; }
+int henge_vm_stream_frame(void *pixel_buffer, int *w, int *h) { return state == 1 ? hv_vm_stream_frame(pixel_buffer, w, h) : -1; }
+void henge_vm_set_headless(int on) { hv_vm_set_headless(on); }
 
 void henge_vm_set_display_layer(void *layer) {
     hv_vm_set_display_layer(layer);

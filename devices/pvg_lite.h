@@ -23,6 +23,12 @@ HvPvgMetal *hv_pvg_metal_create(HvPvgLite *lite);
 void hv_pvg_metal_submit(HvPvgMetal *m, HvPvgLite *lite, uint32_t channel, uint32_t *command, uint32_t length);
 int hv_pvg_metal_snapshot(HvPvgMetal *m, uint8_t *bgra, uint32_t width, uint32_t height);
 int hv_pvg_lite_snapshot(HvPvgLite *p, uint8_t *bgra, uint32_t width, uint32_t height);
+/* Remote desktop: the screen drawn into a CVPixelBufferRef (BGRA, any size), or only its size with NULL.
+   Returns a count that changes with the screen, -1 before there is one. Blocks until drawn. */
+int hv_pvg_metal_stream_frame(HvPvgMetal *m, void *pixel_buffer, int *w, int *h);
+int hv_pvg_lite_stream_frame(HvPvgLite *p, void *pixel_buffer, int *w, int *h);
+void hv_pvg_metal_set_headless(HvPvgMetal *m, int on);
+void hv_pvg_lite_set_headless(HvPvgLite *p, int on);
 int hv_pvg_metal_frame(HvPvgMetal *m, const uint8_t **pixels, uint32_t *width, uint32_t *height);
 int hv_pvg_lite_task_read(HvPvgLite *p, uint32_t task, uint64_t offset, void *to, uint32_t length);
 uint32_t hv_pvg_lite_task_page(HvPvgLite *p, uint32_t task, uint64_t offset);

@@ -62,6 +62,11 @@ void henge_vm_mouse_scroll(int dx, int dy);
 int henge_vm_pointer(int *x, int *y);
 /* A small picture of the display, BGRA, width * height * 4 bytes. 0, or -1 before anything shows. */
 int henge_vm_snapshot(uint8_t *bgra, int width, int height);
+/* Remote desktop: the screen and pointer drawn into a CVPixelBufferRef (BGRA, scaled to its size), or only
+   the screen's size with NULL. A count that changes whenever the screen does, or -1 before there is one. */
+int henge_vm_stream_frame(void *pixel_buffer, int *w, int *h);
+/* Remote desktop: 1 stops drawing on the phone (the stream goes on), 0 starts again. */
+void henge_vm_set_headless(int on);
 
 /* The boot framebuffer (Apple logo and progress bar), 32-bit BGRA, or -1 if
    the kernel has not got that far. The pixels are the guest's live memory. */

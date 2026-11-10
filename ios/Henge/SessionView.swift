@@ -25,6 +25,10 @@ struct SessionView: View {
     @AppStorage("henge.cursor.scale") private var cursorScale = Device.isPad ? 1 : 3
     @AppStorage("henge.cursor.sharp") private var sharpCursor = true
     @AppStorage(HardwareMouse.scrollSpeedKey) private var scrollSpeed = 0.3
+    @ObservedObject private var remote = RemoteDesktop.shared
+    @AppStorage(RemoteDesktop.enabledKey) private var remoteEnabled = false
+    @AppStorage(RemoteDesktop.headlessKey) private var remoteHeadless = true
+    @AppStorage(RemoteDesktop.wifiKey) private var remoteWifi = false
 
     @State private var typing = false
     @State private var zoomed = false
@@ -69,6 +73,23 @@ struct SessionView: View {
                             .foregroundStyle(.white)
                             .multilineTextAlignment(.center)
                             .padding()
+                            .accessibilityElement(children: .combine)
+                        }
+                    }
+                    .overlay {
+                        if remote.connected && remoteHeadless {
+                            ZStack {
+                                Color.black
+                                VStack(spacing: 8) {
+                                    Image(systemName: "desktopcomputer").font(.largeTitle)
+                                    Text("Streaming to \(remote.client)").font(.headline)
+                                    Text("The Mac is shown on the computer. The trackpad still works here.")
+                                        .font(.subheadline)
+                                }
+                                .foregroundStyle(.white)
+                                .multilineTextAlignment(.center)
+                                .padding()
+                            }
                             .accessibilityElement(children: .combine)
                         }
                     }
@@ -171,11 +192,17 @@ struct SessionView: View {
         .onChange(of: confirmStop) { showing in
             if showing { HardwareKeys.releaseAll(); StickyKeys.shared.releaseAll() }
         }
+        .onChange(of: remoteEnabled) { on in
+            if on { RemoteDesktop.shared.start() } else { RemoteDesktop.shared.stop() }
+        }
+        .onChange(of: remoteHeadless) { _ in RemoteDesktop.shared.applyHeadless() }
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true
             HardwareMouse.shared.start()
+            if remoteEnabled { RemoteDesktop.shared.start() }
         }
         .onDisappear {
+            RemoteDesktop.shared.stop()
             UIApplication.shared.isIdleTimerDisabled = false
             zoomFollowing?.cancel()
             StickyKeys.shared.releaseAll()
@@ -482,6 +509,20 @@ struct SessionView: View {
                     LabeledContent("Scroll speed", value: String(format: "%.1f×", scrollSpeed))
                     Slider(value: $scrollSpeed, in: 0.1...1.5)
                     Text("The Mac supplies a small pointer image. Enlarging it can look blurry; 1× is the sharpest on an iPad. Scroll speed changes apply immediately.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                Section("Remote desktop") {
+                    Toggle("Stream to a computer", isOn: $remoteEnabled)
+                    Toggle("Hide the Mac here while streaming", isOn: $remoteHeadless)
+                    Toggle("Allow over Wi-Fi with a code", isOn: $remoteWifi)
+                    if remoteEnabled {
+                        LabeledContent("Status", value: remote.connected ? "Streaming to \(remote.client)" : "Waiting on port \(RemoteDesktop.port)")
+                        if remoteWifi {
+                            if let ip = RemoteDesktop.wifiAddress() { LabeledContent("Wi-Fi address", value: "\(ip):\(RemoteDesktop.port)") }
+                            LabeledContent("Code", value: remote.code)
+                        }
+                    }
+                    Text("Run tools/henge-remote.py on the computer. Over USB, start iproxy 15901:5901 there first and connect to 127.0.0.1:15901. Over Wi-Fi, give it the address and --code. Keep Henge open: iOS pauses it in the background.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("Sharing") {
