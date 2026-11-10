@@ -10,6 +10,10 @@ void hv_net_set_share_socket(const char *path);
    propagate into the guest via slirp DHCP. Call before hv_net_attach.
    Host-build defaults: env HV_NET_SEARCH / HV_NET_DOMAIN. */
 void hv_net_set_search_domains(const char *comma_list, const char *domain);
+/* Install the deliberate hostfwd set (SSH 127.0.0.1:2222 -> guest :22,
+   Screen Sharing 127.0.0.1:5900 -> guest :5900). Safe before or after attach.
+   Host build also installs it when HV_NET_FWD_SET=on. */
+void hv_net_install_default_fwds(void);
 /* User-mode NAT for the guest's virtio-net (see net_slirp.c). Returns 0 on success. */
 int hv_net_attach(HvMachine *m, HvVirtioNet *n);
 /* CPUs must be stopped. Joins the network worker before its machine is freed. */

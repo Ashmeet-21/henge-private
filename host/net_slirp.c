@@ -66,7 +66,7 @@ void hv_net_set_share_socket(const char *path) {
     snprintf(share_socket, sizeof share_socket, "%s", path ? path : "");
 }
 
-/* ---- Wi-Fi posture: DNS search domains ----
+/* ---- Wi-Fi posture: DNS search domains + hostfwds ----
  * hv_net_set_search_domains() is the app layer's entry point: the app passes
  * the host resolver's search domains (comma-separated) and domain name, from
  * Network.framework / resolver state. In the host build the defaults come
@@ -98,6 +98,23 @@ static void load_search_from_env(void) {
     if (g_search_set_by_app) return;
     const char *sl = getenv("HV_NET_SEARCH"), *dm = getenv("HV_NET_DOMAIN");
     if (sl || dm) hv_net_set_search_domains(sl, dm);
+}
+
+/* Deliberate hostfwd set: SSH and Screen Sharing on host loopback only.
+ * Installs immediately if slirp exists, otherwise at attach time. */
+static int g_default_fwds_pending;
+static void install_default_fwds_now(void) {
+    struct in_addr h, g;
+    inet_pton(AF_INET, "127.0.0.1", &h);
+    inet_pton(AF_INET, "10.0.2.15", &g);
+    if (slirp_add_hostfwd(slirp, 0, h, 2222, g, 22) != 0)
+        fprintf(stderr, "hengevm: no forward for port 2222\n");
+    if (slirp_add_hostfwd(slirp, 0, h, 5900, g, 5900) != 0)
+        fprintf(stderr, "hengevm: no forward for port 5900\n");
+}
+void hv_net_install_default_fwds(void) {
+    if (slirp) install_default_fwds_now();
+    else g_default_fwds_pending = 1;
 }
 
 static int push(Queue *q, const uint8_t *data, uint32_t len) {
@@ -359,14 +376,22 @@ int hv_net_attach(HvMachine *m, HvVirtioNet *n) {
         if (g_search_vec) for (int i = 0; g_search_vec[i]; i++) fprintf(stderr, " %s", g_search_vec[i]);
         fprintf(stderr, "\n");
     }
-    if (getenv("HV_NET_FWD")) { /* debugging: "hostport:guestport", from this Mac's loopback into the guest */
-        int hp, gp;
+    if (g_default_fwds_pending) { install_default_fwds_now(); g_default_fwds_pending = 0; }
+    { const char *fs = getenv("HV_NET_FWD_SET"); /* host-build gate; the app build flips the default */
+      if (fs && strcmp(fs, "on") == 0) install_default_fwds_now(); }
+    if (getenv("HV_NET_FWD")) { /* debugging: "hostport:guestport" or a comma list
+                                   "hostport:guestport,...", from this Mac's loopback into the guest */
         struct in_addr h, g;
-        if (sscanf(getenv("HV_NET_FWD"), "%d:%d", &hp, &gp) == 2) {
-            inet_pton(AF_INET, "127.0.0.1", &h);
-            inet_pton(AF_INET, "10.0.2.15", &g);
-            if (slirp_add_hostfwd(slirp, 0, h, hp, g, gp) != 0) fprintf(stderr, "hengevm: no forward for port %d\n", hp);
+        inet_pton(AF_INET, "127.0.0.1", &h);
+        inet_pton(AF_INET, "10.0.2.15", &g);
+        char *copy = strdup(getenv("HV_NET_FWD")), *save = NULL;
+        for (char *tok = strtok_r(copy, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+            int hp, gp;
+            if (sscanf(tok, "%d:%d", &hp, &gp) == 2) {
+                if (slirp_add_hostfwd(slirp, 0, h, hp, g, gp) != 0) fprintf(stderr, "hengevm: no forward for port %d\n", hp);
+            }
         }
+        free(copy);
     }
     if (share_socket[0]) { /* 10.0.2.4:80 is the shared folder and clipboard: see share.c */
         struct in_addr addr;
