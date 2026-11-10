@@ -17,8 +17,33 @@ struct Trackpad: UIViewRepresentable {
     /// Four fingers tapped together: the session shows its hidden controls.
     static let revealTap = Notification.Name("henge.trackpad.revealTap")
 
-    func makeUIView(context: Context) -> Surface { Surface() }
-    func updateUIView(_ view: Surface, context: Context) {}
+    /// The running session's guest width in pixels, set by SessionView at start. 0 before any
+    /// session, when the size-class guess below is as good as anything.
+    static var guestScreenWidth = 0
+    /// The guest height too: the direct mapping needs both dimensions.
+    static var guestScreenHeight = 0
+
+    /// Direct (absolute) pointing. Default false is load-bearing: every surface is a
+    /// trackpad until SessionView opts the main surface in; the portrait pad panel never does.
+    var direct: Bool = false
+    /// The session's screen rect and this surface's origin, both in layout coordinates,
+    /// refreshed on every update so a rotation or fold re-aims the mapping at once.
+    var screenRect: CGRect = .zero
+    var touchOrigin: CGPoint = .zero
+
+    func makeUIView(context: Context) -> Surface {
+        let surface = Surface()
+        surface.direct = direct
+        surface.screenRect = screenRect
+        surface.touchOrigin = touchOrigin
+        return surface
+    }
+
+    func updateUIView(_ view: Surface, context: Context) {
+        view.direct = direct
+        view.screenRect = screenRect
+        view.touchOrigin = touchOrigin
+    }
 
     final class Surface: UIView, UIPointerInteractionDelegate {
         /// The emulated pad's sensor, in the Magic Trackpad 2's own units.
@@ -42,6 +67,19 @@ struct Trackpad: UIViewRepresentable {
         private var holdTimer: Timer?
         private let buzz = UIImpactFeedbackGenerator(style: .medium)
         private var tapsClick: Bool { VolumeClicks.inputMode == .touchscreen }
+
+        /// Direct-pointing configuration, set by the representable (see Trackpad).
+        var direct = false
+        var screenRect: CGRect = .zero
+        var touchOrigin: CGPoint = .zero
+        /// Shorter than the trackpad's hold: in direct mode the cursor is already
+        /// where the finger is, so a hold reads as intent sooner.
+        private static let directHoldTime: TimeInterval = 0.35
+        private var engaged = false   /* the left button is down for a direct drag */
+        private var pencilActive = false
+        private var hadTwoFingers = false
+        private var scrollX: CGFloat = 0
+        private var scrollY: CGFloat = 0
 
         override init(frame: CGRect) {
             super.init(frame: frame)
@@ -77,6 +115,7 @@ struct Trackpad: UIViewRepresentable {
         private static func ms(_ t: TimeInterval) -> UInt32 { UInt32(truncatingIfNeeded: Int(t * 1000)) }
 
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+            if direct { directBegan(touches, with: event); return }
             let touches = touches.filter { $0.type != .indirectPointer }
             guard !touches.isEmpty else { return }
             if fingers.isEmpty {
@@ -110,6 +149,7 @@ struct Trackpad: UIViewRepresentable {
         }
 
         override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+            if direct { directMoved(touches, with: event); return }
             var moved = false
             let ts = Self.ms(event?.timestamp ?? touches.first?.timestamp ?? 0)
             for t in touches where t.type != .indirectPointer {
@@ -127,8 +167,15 @@ struct Trackpad: UIViewRepresentable {
             if moved { henge_vm_touch_frame(ts) }
         }
 
-        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) { lift(touches) }
-        override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) { lift(touches) }
+        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+            if direct { directLift(touches); return }
+            lift(touches)
+        }
+
+        override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+            if direct { directLift(touches); return }
+            lift(touches)
+        }
 
         private func lift(_ touches: Set<UITouch>) {
             var lifted: [Int32] = []
@@ -169,6 +216,187 @@ struct Trackpad: UIViewRepresentable {
         }
 
         /// A finger that stays put presses the left button down, so moving it drags.
+        private func scroll(_ dx: CGFloat, _ dy: CGFloat) {
+            scrollX += dx
+            scrollY += dy
+            // Mostly one way is that way only: a page shouldn't drift sideways, or a browser go back.
+            if abs(scrollY) > 2 * abs(scrollX) { scrollX = 0 } else if abs(scrollX) > 2 * abs(scrollY) { scrollY = 0 }
+            let unitsX = wheelUnits(scrollX), unitsY = wheelUnits(scrollY)
+            guard unitsX != 0 || unitsY != 0 else { return }
+            if unitsX != 0 { scrollX = 0 }
+            if unitsY != 0 { scrollY = 0 }
+            henge_vm_mouse_scroll(-unitsX, unitsY)
+        }
+
+        private func wheelUnits(_ points: CGFloat) -> Int32 {
+            guard abs(points) >= 0.25 else { return 0 } // less than this is a finger resting
+            let units = (6 * abs(points).squareRoot()).rounded()
+            return Int32(points < 0 ? -units : units)
+        }
+
+        // MARK: Direct (absolute) pointing
+
+        /// Map a point in this surface's coordinates to a guest pixel: convert to
+        /// layout coordinates, then scale the session's screen rect onto the guest.
+        /// Touches outside the screen rect clamp to the nearest edge pixel, as a
+        /// real absolute tablet pins the cursor at its active-area boundary.
+        private func guestCoords(forSurfacePoint p: CGPoint) -> (Int32, Int32) {
+            let gw = max(Trackpad.guestScreenWidth, 1)
+            let gh = max(Trackpad.guestScreenHeight, 1)
+            let qx = p.x + touchOrigin.x
+            let qy = p.y + touchOrigin.y
+            var gx = 0
+            var gy = 0
+            if screenRect.width > 0 { gx = Int((qx - screenRect.minX) / screenRect.width * CGFloat(gw)) }
+            if screenRect.height > 0 { gy = Int((qy - screenRect.minY) / screenRect.height * CGFloat(gh)) }
+            return (Int32(min(max(gx, 0), gw - 1)), Int32(min(max(gy, 0), gh - 1)))
+        }
+
+        private func sendAbs(surfacePoint p: CGPoint) {
+            let (gx, gy) = guestCoords(forSurfacePoint: p)
+            henge_vm_mouse_move_abs(gx, gy)
+        }
+
+        private func sendAbs(for touch: UITouch, precise: Bool) {
+            sendAbs(surfacePoint: precise ? touch.preciseLocation(in: self) : touch.location(in: self))
+        }
+
+        private func directBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+            for touch in touches where touch.type != .indirectPointer {
+                if touch.type == .pencil {
+                    // A pen landing ends any finger drag: release it, then the pen drives.
+                    if engaged { henge_vm_mouse_button(0, 0); engaged = false }
+                    fingers.removeAll { $0.touch.type == .direct }
+                    cancelHold()
+                    pencilActive = true
+                    if fingers.isEmpty { started = Date(); travelled = 0; hadTwoFingers = false }
+                    fingers.append(Finger(touch: touch, id: 0))
+                    // Pen-down semantics: the button engages on first contact, and the
+                    // move first puts the cursor under the pen (and makes the tablet
+                    // the engine's active pointer device).
+                    sendAbs(for: touch, precise: true)
+                    henge_vm_mouse_button(0, 1)
+                    engaged = true
+                } else {
+                    // Palm rule: fingers are ignored while the pen is down.
+                    if pencilActive { continue }
+                    if fingers.isEmpty {
+                        started = Date()
+                        travelled = 0
+                        hadTwoFingers = false
+                        scrollX = 0
+                        scrollY = 0
+                        buzz.prepare()
+                    }
+                    fingers.append(Finger(touch: touch, id: 0))
+                    if fingers.count >= 2 {
+                        hadTwoFingers = true
+                        cancelHold()
+                        if engaged { henge_vm_mouse_button(0, 0); engaged = false }
+                    } else {
+                        sendAbs(for: touch, precise: false)
+                        armDirectHold()
+                    }
+                }
+            }
+        }
+
+        private func directMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+            let active = touches.filter { t in fingers.contains { $0.touch == t } }
+            guard !active.isEmpty else { return }
+            if pencilActive {
+                // Every coalesced sample, in order: the device slot coalesces, so
+                // sending them all costs bridge calls, not guest lag.
+                for touch in active where touch.type == .pencil {
+                    for sample in event?.coalescedTouches(for: touch) ?? [touch] {
+                        sendAbs(surfacePoint: sample.preciseLocation(in: self))
+                    }
+                }
+                return
+            }
+            if fingers.count >= 2 {
+                // Scroll from the centroid's motion, as the trackpad path does.
+                var dx: CGFloat = 0, dy: CGFloat = 0
+                for touch in active {
+                    let now = touch.location(in: self), before = touch.previousLocation(in: self)
+                    dx += now.x - before.x
+                    dy += now.y - before.y
+                }
+                dx /= CGFloat(active.count)
+                dy /= CGFloat(active.count)
+                travelled += abs(dx) + abs(dy)
+                scroll(dx, dy)
+                return
+            }
+            guard let finger = fingers.first?.touch, active.contains(finger) else { return }
+            let now = finger.location(in: self), before = finger.previousLocation(in: self)
+            travelled += abs(now.x - before.x) + abs(now.y - before.y)
+            if !engaged, travelled >= Self.tapDistance {
+                cancelHold()
+                sendAbs(surfacePoint: now)
+                henge_vm_mouse_button(0, 1)
+                engaged = true
+                return
+            }
+            sendAbs(surfacePoint: now)
+        }
+
+        private func directLift(_ touches: Set<UITouch>) {
+            let lifting = Array(touches.filter { $0.type != .indirectPointer })
+            guard !lifting.isEmpty else { return }
+            // Fingers lifting under an active pen were never registered.
+            let registered = lifting.filter { t in fingers.contains { $0.touch == t } }
+            fingers.removeAll { f in lifting.contains(f.touch) }
+            if registered.isEmpty { return }
+            if !fingers.contains(where: { $0.touch.type == .pencil }) { pencilActive = false }
+            guard fingers.isEmpty else { return }
+            cancelHold()
+            if engaged {
+                engaged = false
+                if let last = registered.last { sendAbs(for: last, precise: last.type == .pencil) }
+                henge_vm_mouse_button(0, 0)
+                StickyKeys.shared.releaseAll()
+                return
+            }
+            guard travelled < Self.tapDistance, Date().timeIntervalSince(started) < Self.tapTime else { return }
+            if hadTwoFingers {
+                // A two-finger tap is a right click at the centroid: where the fingers are.
+                let cx = registered.map { $0.location(in: self).x }.reduce(0, +) / CGFloat(registered.count)
+                let cy = registered.map { $0.location(in: self).y }.reduce(0, +) / CGFloat(registered.count)
+                sendAbs(surfacePoint: CGPoint(x: cx, y: cy))
+                henge_vm_mouse_button(1, 1)
+                henge_vm_mouse_button(1, 0)
+            } else if let last = registered.last {
+                // A tap is a click at that pixel: move and click use the same point.
+                sendAbs(for: last, precise: last.type == .pencil)
+                henge_vm_mouse_button(0, 1)
+                henge_vm_mouse_button(0, 0)
+            }
+            StickyKeys.shared.releaseAll()
+        }
+
+        private func armDirectHold() {
+            holdTimer?.invalidate()
+            holdTimer = Timer.scheduledTimer(withTimeInterval: Self.directHoldTime, repeats: false) { [weak self] _ in
+                guard let self, self.direct, self.fingers.count == 1, !self.engaged, self.travelled < Self.tapDistance else { return }
+                self.engaged = true
+                henge_vm_mouse_button(0, 1)
+                self.buzz.impactOccurred()
+            }
+        }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard window == nil else { return }
+            // A layout rebuild must not strand a held button in the guest.
+            if engaged || holding {
+                henge_vm_mouse_button(0, 0)
+                engaged = false
+                holding = false
+            }
+            cancelHold()
+        }
+
         private func armHold() {
             cancelHold()
             let timer = Timer(timeInterval: Self.holdTime, repeats: false) { [weak self] _ in

@@ -21,6 +21,10 @@ struct SessionView: View {
     @State private var started = Date()
     @State private var thermalState = ProcessInfo.processInfo.thermalState
     @AppStorage("henge.cpus") private var cpus = 4
+    /// Pointing mode: "auto" (the default when nothing is stored), "direct", or
+    /// "trackpad". A person-and-posture preference, readable before any machine
+    /// is chosen, so it lives here and not in the machine record.
+    @AppStorage("henge.pointing") private var pointing = "auto"
     @AppStorage("henge.matchScreenColors") private var matchScreenColors = true
     @AppStorage("henge.display.brightness") private var screenBrightness = 1.0
     @AppStorage("henge.cursor.scale") private var cursorScale = Device.isPad ? 1 : 3
@@ -56,6 +60,9 @@ struct SessionView: View {
                               height: geo.size.height + insets.top + insets.bottom)
             let landscape = full.width > full.height
             let layout = Layout(full: full, insets: insets, landscape: landscape, zoomed: zoomed, typing: typing, centre: zoomCentre, aspect: mac.aspect)
+            /// An explicit choice wins; auto is direct when the pane fills the phone
+            /// and trackpad in the portrait split.
+            let effectiveDirect = pointing == "direct" || (pointing != "trackpad" && layout.fillsPhone)
             ZStack(alignment: .topLeading) {
                 (landscape || zoomed ? Color.black : Desk.page)
                 // One view in every layout: it holds the layer the engine draws into.
@@ -84,7 +91,7 @@ struct SessionView: View {
                     }
                     .position(x: layout.screen.midX, y: layout.screen.midY)
                 if state != 2 {
-                    Trackpad()
+                    Trackpad(direct: effectiveDirect, screenRect: layout.screen, touchOrigin: layout.touch.origin)
                         .frame(width: layout.touch.width, height: layout.touch.height)
                         .position(x: layout.touch.midX, y: layout.touch.midY)
                     if inputMode == .volumeButtons && volumeMode == .intercept {
@@ -183,6 +190,11 @@ struct SessionView: View {
             HardwareKeys.releaseAll()
             HardwareMouse.shared.releaseButtons()
             VolumeClicks.shared.releaseButtons()
+            // Blanket release on whichever pointer device is active: no-ops when
+            // nothing is down, and the rescue when a drag is interrupted.
+            henge_vm_mouse_button(0, 0)
+            henge_vm_mouse_button(1, 0)
+            henge_vm_mouse_button(2, 0)
         }
         .onChange(of: showDetails) { showing in
             if showing { HardwareKeys.releaseAll(); StickyKeys.shared.releaseAll() }
@@ -200,6 +212,9 @@ struct SessionView: View {
             zoomFollowing?.cancel()
             StickyKeys.shared.releaseAll()
             HardwareKeys.releaseAll()
+            henge_vm_mouse_button(0, 0)
+            henge_vm_mouse_button(1, 0)
+            henge_vm_mouse_button(2, 0)
             HardwareMouse.shared.stop()
             VolumeClicks.shared.stop()
         }
@@ -293,6 +308,8 @@ struct SessionView: View {
                 Spacer()
                 tool("plus.magnifyingglass", "Zoom in") { zoomed = true }
                 Spacer()
+                pointingToggle(fillsPhone: false)
+                Spacer()
                 tool("info.circle", "Details") { showDetails = true }
                 Spacer()
                 tool("power", "Shut down", tint: Desk.bad) { stopTapped() }
@@ -364,6 +381,18 @@ struct SessionView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { showRevealHint = false }
     }
 
+    /// The pointing-mode toggle: one tap always flips the effective mode, including
+    /// from auto, because it writes the explicit value opposite to it. Symbol and
+    /// label name the mode a tap switches to, as the zoom tool names its action.
+    /// Returning to auto is done by the absence of a stored value (v1).
+    private func pointingToggle(fillsPhone: Bool, tint: Color = Desk.text) -> some View {
+        let isDirect = pointing == "direct" || (pointing != "trackpad" && fillsPhone)
+        return tool(isDirect ? "cursorarrow.click.2" : "hand.tap.fill",
+                    isDirect ? "Trackpad pointing" : "Direct pointing", tint: tint) {
+            pointing = isDirect ? "trackpad" : "direct"
+        }
+    }
+
     private func tool(_ symbol: String, _ label: String, tint: Color = Desk.text, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
@@ -385,6 +414,7 @@ struct SessionView: View {
             tool("keyboard", "Keyboard", tint: .white) { typing.toggle() }
             pasteTool
             tool(zoomed ? "minus.magnifyingglass" : "plus.magnifyingglass", zoomed ? "Zoom out" : "Zoom in", tint: zoomed ? Desk.accentLight : .white) { zoomed.toggle() }
+            pointingToggle(fillsPhone: true, tint: .white)
             tool("info.circle", "Details", tint: .white) { showDetails = true }
             Rectangle().fill(Color.white.opacity(0.3)).frame(width: 1, height: 22).padding(.horizontal, 4)
             tool("power", "Shut down", tint: Desk.bad) { stopTapped() }
@@ -596,6 +626,8 @@ struct SessionView: View {
         JITBootstrap.releaseLingeringDebugger()
         Sharing.prepare()
         EngineTuning.apply()
+        Trackpad.guestScreenWidth = mac.screen.width
+        Trackpad.guestScreenHeight = mac.screen.height
         henge_vm_set_display(UInt32(mac.screen.width), UInt32(mac.screen.height))
         if mac.isRetina {
             henge_vm_set_display_mm(UInt32(Device.retinaMM.width), UInt32(Device.retinaMM.height))

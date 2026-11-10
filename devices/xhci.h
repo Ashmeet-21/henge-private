@@ -6,15 +6,15 @@
 #include "pcie.h"
 
 /* An xHCI USB host controller (xHCI 1.0, one interrupter, 32-byte contexts,
-   INTx) with two USB HID devices: a boot keyboard on port 1 and a Magic
-   Trackpad 2 on port 2: what Virtualization.framework gives a macOS guest as
+   INTx) with three USB HID devices: a boot keyboard on port 1, a Magic
+   Trackpad 2 on port 2, and an absolute-position tablet on port 3: what Virtualization.framework gives a macOS guest as
    its "Virtual USB Keyboard", plus Apple's multitouch pad, so the guest's
    own gesture engine sees a real trackpad. Changes come from the host UI on
    any thread (hv_xhci_key, hv_xhci_touch); the CPU thread delivers them
    (hv_xhci_poll). */
 #define HV_XHCI_SLOTS 8
-#define HV_XHCI_PORTS 2
-#define HV_XHCI_DEVICES 2
+#define HV_XHCI_PORTS 3
+#define HV_XHCI_DEVICES 3
 #define HV_XHCI_INTRS 4
 #define HV_XHCI_EPS 32 /* device context index 1..31 */
 #define HV_XHCI_REPORTS 256
@@ -83,6 +83,16 @@ typedef struct HvXhci {
     uint32_t tp_multi_logs; /* multi-finger deliveries logged, capped */
     uint8_t tp_f1[8];   /* feature report 1: the header for the selected sensor register */
     int tp_f1_len;
+    /* The tablet (port 3): a generated report descriptor and a single
+       latest-state slot. Absolute positions coalesce here, never queue. */
+    uint8_t tab_desc[70];
+    int tab_desc_len;
+    uint16_t tab_xmax, tab_ymax; /* clamp bounds the descriptor was built with */
+    uint8_t tab_buttons;
+    uint16_t tab_x, tab_y;
+    int tab_wheel;               /* accumulated wheel delta awaiting emission */
+    int tab_dirty;
+    uint64_t tab_delivered;
 } HvXhci;
 
 HvXhci *hv_xhci_create(HvMachine *m, HvPcie *bus);
@@ -102,6 +112,10 @@ void hv_xhci_touch(HvXhci *x, int id, int phase, int px, int py, uint32_t ts_ms)
 void hv_xhci_touch_frame(HvXhci *x, uint32_t ts_ms);
 /* Any thread: the pad's full press (a click), down or up. */
 void hv_xhci_touch_button(HvXhci *x, int down);
+/* Any thread: the tablet's latest state (absolute position, button, wheel). */
+void hv_xhci_tablet_move(HvXhci *x, uint16_t px, uint16_t py);
+void hv_xhci_tablet_button(HvXhci *x, int button, int down);
+void hv_xhci_tablet_wheel(HvXhci *x, int dy);
 /* CPU thread: hand waiting reports to the guest. */
 void hv_xhci_poll(HvXhci *x);
 

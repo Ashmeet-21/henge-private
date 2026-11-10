@@ -6,6 +6,7 @@
 #include <time.h>
 
 #include "machine.h"
+#include "pvg_lite.h"
 
 /* Register layout in BAR 0. */
 #define CAPLENGTH 0x40
@@ -133,9 +134,33 @@ struct HvXhciDev {
     const uint8_t *report_desc;
     unsigned report_desc_len;
 };
+
+/* Port 3: an absolute-position USB HID tablet (a digitizer whose report is a
+   single pointer at an absolute position: buttons 1 to 3, absolute X and Y,
+   and a wheel). Its report descriptor is generated at request time from the
+   current display size, so each axis's logical maximum is the guest size
+   minus one and the guest's scale onto the display is exactly 1. */
+#define TAB_DESC_LEN 70
+
+static const uint8_t tab_device_desc[18] = {
+    18, 1, 0x00, 0x02, 0, 0, 0, 64, /* USB 2.0, class per interface, EP0 64 bytes */
+    0x27, 0x06, 0x01, 0x00,         /* vendor 0x0627, product 0x0001 (the QEMU USB tablet identity) */
+    0x00, 0x01, 1, 2, 3, 1,         /* bcdDevice 1.00, strings 1-3, one configuration */
+};
+
+static const uint8_t tab_config_desc[34] = {
+    9, 2, 34, 0, 1, 1, 0, 0xa0, 50,           /* one interface, remote wakeup, 100 mA */
+    9, 4, 0, 0, 1, 3, 0, 0, 0,                /* interface 0: HID, not boot, protocol 0 (a boot-mouse protocol makes macOS emit bogus relative motion) */
+    9, 0x21, 0x11, 0x01, 0, 1, 0x22, TAB_DESC_LEN, 0, /* HID 1.11, the generated report descriptor */
+    7, 5, 0x81, 3, 6, 0, 1,                   /* EP1 IN, interrupt, 6 bytes, every 1 ms */
+};
+
+static const char *const tab_strings[] = {NULL, "HengeVM", "HengeVM USB Tablet", "1"};
+
 static const struct HvXhciDev devs[HV_XHCI_DEVICES] = {
     {kbd_strings, kbd_device_desc, kbd_config_desc, kbd_report_desc, sizeof kbd_report_desc},
     {tp_strings, tp_device_desc, tp_config_desc, tp_report_desc, sizeof tp_report_desc},
+    {tab_strings, tab_device_desc, tab_config_desc, NULL, 0}, /* the tablet's report descriptor is generated: see control() */
 };
 
 static int xlog(void) {
@@ -316,6 +341,65 @@ static void tp_select(HvXhci *x, int reg) {
     x->tp_f1_len = 5;
 }
 
+
+/* Build the tablet's report descriptor for the current display size. X and Y
+   each declare their own Logical Maximum (guest size minus 1 per axis), so the
+   guest's scale of logical range onto display is exactly 1 on both axes.
+   Built at request time, never cached from create time, so it always
+   matches the mode the PVG offers. The top-level usage is Mouse (0x02),
+   unconditionally. */
+static void build_tab_desc(HvXhci *x) {
+    uint32_t w = 0, h = 0;
+    hv_pvg_lite_display_size(&w, &h);
+    uint16_t xmax = 32767, ymax = 32767;
+    if (w >= 2 && h >= 2) {
+        xmax = (uint16_t)(w - 1);
+        ymax = (uint16_t)(h - 1);
+    }
+    x->tab_xmax = xmax;
+    x->tab_ymax = ymax;
+    uint8_t *d = x->tab_desc;
+    int i = 0;
+    d[i++] = 0x05; d[i++] = 0x01;             /* Usage Page (Generic Desktop) */
+    d[i++] = 0x09; d[i++] = 0x02;             /* Usage (Mouse) */
+    d[i++] = 0xa1; d[i++] = 0x01;             /* Collection (Application) */
+    d[i++] = 0x09; d[i++] = 0x01;             /* Usage (Pointer) */
+    d[i++] = 0xa1; d[i++] = 0x00;             /* Collection (Physical) */
+    d[i++] = 0x05; d[i++] = 0x09;             /* Usage Page (Button) */
+    d[i++] = 0x19; d[i++] = 0x01;             /* Usage Minimum (Button 1) */
+    d[i++] = 0x29; d[i++] = 0x03;             /* Usage Maximum (Button 3) */
+    d[i++] = 0x15; d[i++] = 0x00;             /* Logical Minimum (0) */
+    d[i++] = 0x25; d[i++] = 0x01;             /* Logical Maximum (1) */
+    d[i++] = 0x95; d[i++] = 0x03;             /* Report Count (3) */
+    d[i++] = 0x75; d[i++] = 0x01;             /* Report Size (1) */
+    d[i++] = 0x81; d[i++] = 0x02;             /* Input (Data, Variable, Absolute) */
+    d[i++] = 0x95; d[i++] = 0x01;             /* Report Count (1) */
+    d[i++] = 0x75; d[i++] = 0x05;             /* Report Size (5) */
+    d[i++] = 0x81; d[i++] = 0x01;             /* Input (Constant, Array, Absolute) */
+    d[i++] = 0x05; d[i++] = 0x01;             /* Usage Page (Generic Desktop) */
+    d[i++] = 0x09; d[i++] = 0x30;             /* Usage (X) */
+    d[i++] = 0x15; d[i++] = 0x00;             /* Logical Minimum (0) */
+    d[i++] = 0x26; d[i++] = (uint8_t)(xmax & 0xff); d[i++] = (uint8_t)(xmax >> 8); /* Logical Maximum (W-1) */
+    d[i++] = 0x75; d[i++] = 0x10;             /* Report Size (16) */
+    d[i++] = 0x95; d[i++] = 0x01;             /* Report Count (1) */
+    d[i++] = 0x81; d[i++] = 0x02;             /* Input (Data, Variable, Absolute) */
+    d[i++] = 0x09; d[i++] = 0x31;             /* Usage (Y) */
+    d[i++] = 0x26; d[i++] = (uint8_t)(ymax & 0xff); d[i++] = (uint8_t)(ymax >> 8); /* Logical Maximum (H-1) */
+    d[i++] = 0x95; d[i++] = 0x01;             /* Report Count (1) */
+    d[i++] = 0x81; d[i++] = 0x02;             /* Input (Data, Variable, Absolute) */
+    d[i++] = 0x09; d[i++] = 0x38;             /* Usage (Wheel) */
+    d[i++] = 0x15; d[i++] = 0x81;             /* Logical Minimum (-127) */
+    d[i++] = 0x25; d[i++] = 0x7f;             /* Logical Maximum (127) */
+    d[i++] = 0x75; d[i++] = 0x08;             /* Report Size (8) */
+    d[i++] = 0x95; d[i++] = 0x01;             /* Report Count (1) */
+    d[i++] = 0x81; d[i++] = 0x06;             /* Input (Data, Variable, Relative) */
+    d[i++] = 0xc0;                            /* End Collection (Physical) */
+    d[i++] = 0xc0;                            /* End Collection (Application) */
+    x->tab_desc_len = i;
+    if (i != TAB_DESC_LEN && x->m->log)
+        fprintf(stderr, "hengevm: xhci: tablet descriptor is %d bytes, expected %d\n", i, TAB_DESC_LEN);
+}
+
 /* Answer a SETUP on endpoint 0. Returns the reply length (data to send for IN
    requests), or -1 to stall. */
 static int control(HvXhci *x, int slot, const uint8_t setup[8], uint8_t *out, int max) {
@@ -353,7 +437,12 @@ static int control(HvXhci *x, int slot, const uint8_t setup[8], uint8_t *out, in
         } else
             return -1; /* no device qualifier: full speed only */
     } else if (type == 0x81 && req == 6) { /* GET_DESCRIPTOR (interface): HID, report */
-        if ((value >> 8) == 0x22) src = d->report_desc, len = (int)d->report_desc_len;
+        if ((value >> 8) == 0x22) {
+            if (x->slots[slot].dev == 2) { /* the tablet's descriptor is generated for the current display size */
+                build_tab_desc(x);
+                src = x->tab_desc, len = x->tab_desc_len;
+            } else src = d->report_desc, len = (int)d->report_desc_len;
+        }
         else if ((value >> 8) == 0x21) src = d->config_desc + 18, len = 9;
         else return -1;
     } else if (type == 0x80 && req == 0) { /* GET_STATUS */
@@ -373,6 +462,17 @@ static int control(HvXhci *x, int slot, const uint8_t setup[8], uint8_t *out, in
         src = tmp, len = 1;
     } else if (type == 0xa1 && req == 1) { /* GET_REPORT: wValue is (type << 8) | report ID */
         if (x->slots[slot].dev == 0) src = x->state, len = 8;
+        else if (x->slots[slot].dev == 2) { /* the tablet's current state, no report ID */
+            pthread_mutex_lock(&x->mu);
+            tmp[0] = x->tab_buttons;
+            tmp[1] = (uint8_t)(x->tab_x & 0xff);
+            tmp[2] = (uint8_t)(x->tab_x >> 8);
+            tmp[3] = (uint8_t)(x->tab_y & 0xff);
+            tmp[4] = (uint8_t)(x->tab_y >> 8);
+            tmp[5] = 0;
+            pthread_mutex_unlock(&x->mu);
+            src = tmp, len = 6;
+        }
         else {
             int rtype = value >> 8, rid = value & 0xff;
             if (rtype == 3) { /* feature: the sensor-configuration registers */
@@ -405,7 +505,7 @@ static int control(HvXhci *x, int slot, const uint8_t setup[8], uint8_t *out, in
             }
         }
     } else if (type == 0xa1 && (req == 2 || req == 3)) { /* GET_IDLE, GET_PROTOCOL */
-        tmp[0] = req == 3 ? 1 : 0;
+        tmp[0] = req == 3 ? (x->slots[slot].dev == 2 ? 0 : 1) : 0; /* the tablet runs no boot protocol */
         src = tmp, len = 1;
     } else if ((type & 0x60) == 0x20 || (type == 0x00 && (req == 1 || req == 3)) || (type == 0x01 && req == 11) ||
                (type == 0x02 && (req == 1 || req == 3)) ||
@@ -505,6 +605,30 @@ static void run_ep_in(HvXhci *x, int slot) {
             wr(x, buf, x->reports[x->rhead % HV_XHCI_REPORTS], n);
             x->rhead++;
             x->delivered++;
+            transfer_event(x, at, n < want ? CC_SHORT_PACKET : CC_SUCCESS, want - n, slot, dci);
+        }
+    } else if (s->dev == 2) {
+        /* The tablet coalesces: the slot holds only the newest state, so a slow
+           guest skips stale positions instead of replaying them. */
+        while (x->tab_dirty && ring_peek(x, r, trb, &at)) {
+            int type = (trb[3] >> 10) & 0x3f;
+            ring_advance(r);
+            if (type != TRB_NORMAL) continue;
+            uint64_t buf = (uint64_t)trb[1] << 32 | trb[0];
+            uint32_t want = trb[2] & 0x1ffff;
+            int chunk = x->tab_wheel > 127 ? 127 : x->tab_wheel < -127 ? -127 : x->tab_wheel;
+            uint8_t report[6];
+            report[0] = x->tab_buttons;
+            report[1] = (uint8_t)(x->tab_x & 0xff);
+            report[2] = (uint8_t)(x->tab_x >> 8);
+            report[3] = (uint8_t)(x->tab_y & 0xff);
+            report[4] = (uint8_t)(x->tab_y >> 8);
+            report[5] = (uint8_t)(int8_t)chunk;
+            x->tab_wheel -= chunk;
+            if (x->tab_wheel == 0) x->tab_dirty = 0; /* a wheel remainder stays dirty for the next transfer */
+            uint32_t n = want < 6 ? want : 6;
+            wr(x, buf, report, n);
+            x->tab_delivered++;
             transfer_event(x, at, n < want ? CC_SHORT_PACKET : CC_SUCCESS, want - n, slot, dci);
         }
     } else {
@@ -760,6 +884,11 @@ static void reset(HvXhci *x) {
     x->tp_db = 0;
     x->tp_multi_logs = 0;
     x->tp_f1_len = 0;
+    x->tab_buttons = 0;
+    x->tab_x = x->tab_y = 0;
+    x->tab_wheel = 0;
+    x->tab_dirty = 0;
+    x->tab_delivered = 0;
     for (int p = 0; p < HV_XHCI_PORTS; p++)
         x->portsc[p] = PORT_PP | PORT_CCS | PORT_CSC | (uint32_t)(p ? SPEED_HIGH : SPEED_FULL) << PORT_SPEED_SHIFT | 7u << PORT_PLS_SHIFT;
     update_irq(x);
@@ -1108,6 +1237,46 @@ void hv_xhci_touch_button(HvXhci *x, int down) {
         x->tp_button = down & 1;
         tp_queue(x, 0);
     }
+    pthread_mutex_unlock(&x->mu);
+    hv_machine_wake(x->m);
+}
+
+void hv_xhci_tablet_move(HvXhci *x, uint16_t px, uint16_t py) {
+    if (!x) return;
+    pthread_mutex_lock(&x->mu);
+    uint16_t xmax = x->tab_xmax, ymax = x->tab_ymax;
+    if (!xmax && !ymax) { /* no descriptor built yet: clamp from the display size */
+        uint32_t w = 0, h = 0;
+        hv_pvg_lite_display_size(&w, &h);
+        xmax = w >= 2 ? (uint16_t)(w - 1) : 32767;
+        ymax = h >= 2 ? (uint16_t)(h - 1) : 32767;
+    }
+    if (px > xmax) px = xmax;
+    if (py > ymax) py = ymax;
+    x->tab_x = px;
+    x->tab_y = py;
+    x->tab_dirty = 1;
+    pthread_mutex_unlock(&x->mu);
+    hv_machine_wake(x->m);
+}
+
+void hv_xhci_tablet_button(HvXhci *x, int button, int down) {
+    if (!x || button < 0 || button > 2) return;
+    pthread_mutex_lock(&x->mu);
+    uint8_t bit = (uint8_t)(1u << button);
+    x->tab_buttons = down ? (uint8_t)(x->tab_buttons | bit) : (uint8_t)(x->tab_buttons & ~bit);
+    x->tab_dirty = 1;
+    pthread_mutex_unlock(&x->mu);
+    hv_machine_wake(x->m);
+}
+
+void hv_xhci_tablet_wheel(HvXhci *x, int dy) {
+    if (!x) return;
+    pthread_mutex_lock(&x->mu);
+    x->tab_wheel += dy;
+    if (x->tab_wheel > 1000) x->tab_wheel = 1000;
+    if (x->tab_wheel < -1000) x->tab_wheel = -1000;
+    x->tab_dirty = 1;
     pthread_mutex_unlock(&x->mu);
     hv_machine_wake(x->m);
 }
