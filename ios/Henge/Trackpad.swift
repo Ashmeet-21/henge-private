@@ -77,6 +77,24 @@ struct Trackpad: UIViewRepresentable {
         private static let directHoldTime: TimeInterval = 0.35
         private var engaged = false   /* the left button is down for a direct drag */
         private var pencilActive = false
+        /// The last absolute guest point this surface sent (a focus signal).
+        private var lastAbsPoint: (Int32, Int32)?
+
+        /// Record a guest click for the keyboard-viewport focus chain:
+        /// direct taps carry their own coordinates; trackpad clicks land at
+        /// the guest cursor, read back from the engine in the same turn.
+        static func recordClick(guestX: Int32, guestY: Int32) {
+            guard Trackpad.guestScreenWidth > 0, Trackpad.guestScreenHeight > 0 else { return }
+            KeyboardSignals.shared.recordTap(point: CGPoint(x: CGFloat(guestX) / CGFloat(Trackpad.guestScreenWidth),
+                                                            y: CGFloat(guestY) / CGFloat(Trackpad.guestScreenHeight)),
+                                             guestWidth: Trackpad.guestScreenWidth,
+                                             guestHeight: Trackpad.guestScreenHeight)
+        }
+
+        static func recordClickFromPointerReadback() {
+            var x: Int32 = 0, y: Int32 = 0
+            if henge_vm_pointer(&x, &y) == 0 { recordClick(guestX: x, guestY: y) }
+        }
         private var hadTwoFingers = false
         private var scrollX: CGFloat = 0
         private var scrollY: CGFloat = 0
@@ -211,6 +229,7 @@ struct Trackpad: UIViewRepresentable {
         /// A brief press of a mouse button: down then up.
         private func click(_ button: Int32) {
             henge_vm_mouse_button(button, 1)
+            Self.recordClickFromPointerReadback()
             henge_vm_mouse_button(button, 0)
             buzz.impactOccurred()
         }
@@ -254,6 +273,7 @@ struct Trackpad: UIViewRepresentable {
 
         private func sendAbs(surfacePoint p: CGPoint) {
             let (gx, gy) = guestCoords(forSurfacePoint: p)
+            lastAbsPoint = (gx, gy)
             henge_vm_mouse_move_abs(gx, gy)
         }
 
@@ -275,6 +295,7 @@ struct Trackpad: UIViewRepresentable {
                     // move first puts the cursor under the pen (and makes the tablet
                     // the engine's active pointer device).
                     sendAbs(for: touch, precise: true)
+                    if let point = lastAbsPoint { Self.recordClick(guestX: point.0, guestY: point.1) }
                     henge_vm_mouse_button(0, 1)
                     engaged = true
                 } else {
@@ -364,11 +385,13 @@ struct Trackpad: UIViewRepresentable {
                 let cx = registered.map { $0.location(in: self).x }.reduce(0, +) / CGFloat(registered.count)
                 let cy = registered.map { $0.location(in: self).y }.reduce(0, +) / CGFloat(registered.count)
                 sendAbs(surfacePoint: CGPoint(x: cx, y: cy))
+                if let point = lastAbsPoint { Self.recordClick(guestX: point.0, guestY: point.1) }
                 henge_vm_mouse_button(1, 1)
                 henge_vm_mouse_button(1, 0)
             } else if let last = registered.last {
                 // A tap is a click at that pixel: move and click use the same point.
                 sendAbs(for: last, precise: last.type == .pencil)
+                if let point = lastAbsPoint { Self.recordClick(guestX: point.0, guestY: point.1) }
                 henge_vm_mouse_button(0, 1)
                 henge_vm_mouse_button(0, 0)
             }
@@ -380,6 +403,7 @@ struct Trackpad: UIViewRepresentable {
             holdTimer = Timer.scheduledTimer(withTimeInterval: Self.directHoldTime, repeats: false) { [weak self] _ in
                 guard let self, self.direct, self.fingers.count == 1, !self.engaged, self.travelled < Self.tapDistance else { return }
                 self.engaged = true
+                if let point = self.lastAbsPoint { Self.recordClick(guestX: point.0, guestY: point.1) }
                 henge_vm_mouse_button(0, 1)
                 self.buzz.impactOccurred()
             }
@@ -403,6 +427,7 @@ struct Trackpad: UIViewRepresentable {
                 guard let self, self.fingers.count == 1, self.travelled < Self.tapDistance else { return }
                 self.holding = true
                 henge_vm_mouse_button(0, 1)
+                Self.recordClickFromPointerReadback()
                 self.buzz.impactOccurred()
             }
             RunLoop.main.add(timer, forMode: .common)
@@ -435,6 +460,7 @@ struct MouseButton: View {
                         guard !down else { return }
                         down = true
                         henge_vm_mouse_button(button, 1)
+                        Trackpad.Surface.recordClickFromPointerReadback()
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     }
                     .onEnded { _ in

@@ -6,11 +6,14 @@ import UIKit
 /// hardware keyboard works whether or not that is open.
 struct KeyboardCatcher: UIViewRepresentable {
     @Binding var active: Bool
+    /// Keyboard frame/lifecycle events for the keyboard viewport.
+    var onKeyboard: (KeyboardEvent) -> Void = { _ in }
 
     func makeUIView(context: Context) -> Holder { Holder() }
 
     func updateUIView(_ view: Holder, context: Context) {
         view.typer.onHide = { active = false }
+        view.onKeyboard = onKeyboard
         view.typing = active
         DispatchQueue.main.async { view.takeKeyboard() }
     }
@@ -19,15 +22,27 @@ struct KeyboardCatcher: UIViewRepresentable {
         let listener = KeyListener()
         let typer = CatcherView()
         var typing = false
+        var onKeyboard: (KeyboardEvent) -> Void = { _ in }
         private var hiding: NSObjectProtocol?
+        private var showing: NSObjectProtocol?
+        private var changing: NSObjectProtocol?
 
         override init(frame: CGRect) {
             super.init(frame: frame)
             addSubview(listener)
             addSubview(typer)
             hiding = NotificationCenter.default.addObserver(forName: UIResponder.keyboardWillHideNotification,
-                                                            object: nil, queue: .main) { [weak self] _ in
+                                                            object: nil, queue: .main) { [weak self] note in
                 self?.keyboardHid()
+                self?.keyboardEvent(note, isShow: false)
+            }
+            showing = NotificationCenter.default.addObserver(forName: UIResponder.keyboardWillShowNotification,
+                                                             object: nil, queue: .main) { [weak self] note in
+                self?.keyboardEvent(note, isShow: true)
+            }
+            changing = NotificationCenter.default.addObserver(forName: UIResponder.keyboardWillChangeFrameNotification,
+                                                              object: nil, queue: .main) { [weak self] note in
+                self?.keyboardEvent(note, isShow: true)
             }
         }
 
@@ -35,6 +50,41 @@ struct KeyboardCatcher: UIViewRepresentable {
 
         deinit {
             if let hiding { NotificationCenter.default.removeObserver(hiding) }
+            if let showing { NotificationCenter.default.removeObserver(showing) }
+            if let changing { NotificationCenter.default.removeObserver(changing) }
+        }
+
+        /// Read a keyboard notification for the viewport: end frame, duration
+        /// and curve from the SAME notification.
+        ///
+        /// Coordinate space, determined from the code: the notification's
+        /// frame arrives in screen
+        /// coordinates. UIScreen.main is documented in this tree as NOT
+        /// describing the device's inner panel (Hardware.swift, ViewportPlan),
+        /// so the frame is converted from the ACTIVE window scene's screen
+        /// coordinate space (the same scene discipline ViewportPlan uses)
+        /// into this view's window coordinates. SessionView then shifts
+        /// scene coordinates into Layout coordinates. The raw frame, the
+        /// converted frame and the scene bounds are logged on every event
+        /// so the device window can confirm the space on real hardware.
+        private func keyboardEvent(_ note: Notification, isShow: Bool) {
+            let info = note.userInfo
+            let duration = (info?[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue ?? 0.25
+            let curve = (info?[UIResponder.keyboardAnimationCurveUserInfoKey] as? NSNumber)?.intValue ?? 0
+            guard isShow else {
+                onKeyboard(.hide(duration: duration, curve: curve))
+                return
+            }
+            guard let window, window.rootViewController?.presentedViewController == nil,
+                  let scene = window.windowScene,
+                  let raw = (info?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue else { return }
+            let converted = window.convert(raw, from: scene.screen.coordinateSpace)
+            let bounds = scene.coordinateSpace.bounds
+            let docked = converted.width >= bounds.width * 0.9 && converted.maxY >= bounds.height - 1
+            HengeLog.log("keyboard", "frame raw \(raw) scene \(converted) bounds \(bounds) docked \(docked) dur \(duration) curve \(curve)")
+            onKeyboard(note.name == UIResponder.keyboardWillShowNotification
+                       ? .show(KeyboardInfo(frameInLayout: converted, docked: docked, duration: duration, curve: curve))
+                       : .changeFrame(KeyboardInfo(frameInLayout: converted, docked: docked, duration: duration, curve: curve)))
         }
 
         /// iPadOS's own hide-keyboard key closes the keyboard without asking the app, which then went on
