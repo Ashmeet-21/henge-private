@@ -8,6 +8,9 @@
    can't be made. agent is the gzipped helper that runs inside macOS, served to the guest; it may be NULL. */
 #define HV_SHARE_ADDR "10.0.2.4"
 int hv_share_start(const char *folder, const char *socket_path, const char *agent);
+/* Stop the share server and unlink its socket. hv_share_start after this, or with a different
+   folder, serves the new root: the pair is the resume/repair path (see share.c). */
+void hv_share_stop(void);
 
 /* The device's clipboard, for the guest to pick up. */
 void hv_share_set_clipboard(const char *text);
