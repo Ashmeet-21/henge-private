@@ -66,6 +66,40 @@ void hv_net_set_share_socket(const char *path) {
     snprintf(share_socket, sizeof share_socket, "%s", path ? path : "");
 }
 
+/* ---- Wi-Fi posture: DNS search domains ----
+ * hv_net_set_search_domains() is the app layer's entry point: the app passes
+ * the host resolver's search domains (comma-separated) and domain name, from
+ * Network.framework / resolver state. In the host build the defaults come
+ * from HV_NET_SEARCH / HV_NET_DOMAIN. Storage is process-lifetime (the vec
+ * must outlive slirp_new, which keeps the pointers). */
+static char **g_search_vec;      /* NULL-terminated, owned */
+static char *g_search_storage;   /* owned backing for the strings */
+static char g_domain[256];
+static int g_search_set_by_app;
+
+void hv_net_set_search_domains(const char *comma_list, const char *domain) {
+    free(g_search_vec); free(g_search_storage);
+    g_search_vec = NULL; g_search_storage = NULL; g_domain[0] = 0;
+    if (domain) snprintf(g_domain, sizeof g_domain, "%s", domain);
+    if (comma_list && comma_list[0]) {
+        g_search_storage = strdup(comma_list);
+        int n = 1;
+        for (const char *c = comma_list; *c; c++) if (*c == ',') n++;
+        g_search_vec = calloc((size_t)n + 1, sizeof(char *));
+        int i = 0;
+        char *save = NULL;
+        for (char *tok = strtok_r(g_search_storage, ",", &save); tok && i < n; tok = strtok_r(NULL, ",", &save))
+            g_search_vec[i++] = tok;
+        g_search_vec[i] = NULL;
+    }
+    g_search_set_by_app = 1;
+}
+static void load_search_from_env(void) {
+    if (g_search_set_by_app) return;
+    const char *sl = getenv("HV_NET_SEARCH"), *dm = getenv("HV_NET_DOMAIN");
+    if (sl || dm) hv_net_set_search_domains(sl, dm);
+}
+
 static int push(Queue *q, const uint8_t *data, uint32_t len) {
     pthread_mutex_lock(&q->mu);
     int ok = q->tail - q->head < QUEUE;
@@ -300,11 +334,31 @@ int hv_net_attach(HvMachine *m, HvVirtioNet *n) {
     inet_pton(AF_INET, "10.0.2.2", &cfg.vhost);
     inet_pton(AF_INET, "10.0.2.15", &cfg.vdhcp_start);
     inet_pton(AF_INET, "10.0.2.3", &cfg.vnameserver);
+    /* IPv6 on: fd00::/64 mirroring the v4 layout (.2 host, .3 DNS).
+     * Field names/semantics verified against libslirp.h (Homebrew 4.9.7
+     * header, SlirpConfig v1 fields): in6_enabled bool, vprefix_addr6
+     * struct in6_addr, vprefix_len uint8_t, vhost6 / vnameserver6 in6_addr,
+     * vdnssearch const char **, vdomainname const char *. */
+    cfg.in6_enabled = true;
+    inet_pton(AF_INET6, "fd00::", &cfg.vprefix_addr6);
+    cfg.vprefix_len = 64;
+    inet_pton(AF_INET6, "fd00::2", &cfg.vhost6);
+    inet_pton(AF_INET6, "fd00::3", &cfg.vnameserver6);
+    load_search_from_env();
+    if (g_search_vec) cfg.vdnssearch = (const char **)g_search_vec;
+    if (g_domain[0]) cfg.vdomainname = g_domain;
     cfg.vhostname = "hengevm";
     cfg.if_mtu = 1500;
     cfg.if_mru = 1500;
     slirp = slirp_new(&cfg, &callbacks, NULL);
     if (!slirp) { hv_net_detach(); return -1; }
+    if (getenv("HV_NET_LOG")) {
+        fprintf(stderr, "hengevm: net cfg v4 10.0.2.0/24 host 10.0.2.2 dhcp 10.0.2.15 dns 10.0.2.3 "
+                        "v6 fd00::/64 host6 fd00::2 dns6 fd00::3 domain %s search",
+                g_domain[0] ? g_domain : "(none)");
+        if (g_search_vec) for (int i = 0; g_search_vec[i]; i++) fprintf(stderr, " %s", g_search_vec[i]);
+        fprintf(stderr, "\n");
+    }
     if (getenv("HV_NET_FWD")) { /* debugging: "hostport:guestport", from this Mac's loopback into the guest */
         int hp, gp;
         struct in_addr h, g;
