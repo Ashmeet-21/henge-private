@@ -56,9 +56,14 @@ def versions():
     return out
 
 
+FIRST_SHOTS = ["macs.png", "trackpad.png", "install.png", "ipad.jpg"]  # the order the source shows them in
+
+
 def screenshots():
     folder = os.path.join(ROOT, "Screenshots")
-    return [f"{RAW}/Screenshots/{n}" for n in sorted(os.listdir(folder)) if n.lower().endswith((".png", ".jpg", ".jpeg"))]
+    names = [n for n in os.listdir(folder) if n.lower().endswith((".png", ".jpg", ".jpeg"))]
+    names.sort(key=lambda n: (FIRST_SHOTS.index(n) if n in FIRST_SHOTS else len(FIRST_SHOTS), n))
+    return [f"{RAW}/Screenshots/{n}" for n in names]
 
 
 def main():

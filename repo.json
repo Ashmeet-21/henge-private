@@ -20,10 +20,10 @@
       "tintColor": "#2E6BFF",
       "category": "utilities",
       "screenshots": [
-        "https://raw.githubusercontent.com/Leviidev/Henge/main/Screenshots/install.png",
-        "https://raw.githubusercontent.com/Leviidev/Henge/main/Screenshots/ipad.jpg",
         "https://raw.githubusercontent.com/Leviidev/Henge/main/Screenshots/macs.png",
-        "https://raw.githubusercontent.com/Leviidev/Henge/main/Screenshots/trackpad.png"
+        "https://raw.githubusercontent.com/Leviidev/Henge/main/Screenshots/trackpad.png",
+        "https://raw.githubusercontent.com/Leviidev/Henge/main/Screenshots/install.png",
+        "https://raw.githubusercontent.com/Leviidev/Henge/main/Screenshots/ipad.jpg"
       ],
       "versions": [
         {
