@@ -8,6 +8,9 @@ struct HengeApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
+        // Remote desktop on by default on this fork: the iPad's Mac is used from the laptop. Wi-Fi clients still
+        // have to send the 6-digit code shown in the session's Details; a value set in the toggles wins.
+        UserDefaults.standard.register(defaults: [RemoteDesktop.enabledKey: true, RemoteDesktop.wifiKey: true])
         // Order matters: HengeLog takes over stderr, so the engine's and the JIT
         // allocator's first lines land in Documents/henge.log too.
         HengeLog.start()

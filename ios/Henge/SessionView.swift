@@ -28,9 +28,9 @@ struct SessionView: View {
     @AppStorage("henge.cursor.sharp") private var sharpCursor = true
     @AppStorage(HardwareMouse.scrollSpeedKey) private var scrollSpeed = 0.3
     @ObservedObject private var remote = RemoteDesktop.shared
-    @AppStorage(RemoteDesktop.enabledKey) private var remoteEnabled = false
+    @AppStorage(RemoteDesktop.enabledKey) private var remoteEnabled = true
     @AppStorage(RemoteDesktop.headlessKey) private var remoteHeadless = true
-    @AppStorage(RemoteDesktop.wifiKey) private var remoteWifi = false
+    @AppStorage(RemoteDesktop.wifiKey) private var remoteWifi = true
     @AppStorage(RemoteDesktop.muteHereKey) private var remoteMuteHere = true
 
     @State private var typing = false
