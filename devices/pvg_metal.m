@@ -2093,7 +2093,7 @@ typedef struct {
                 } else if (etype == 0 && tag == 26) {
                     if (e) [e endEncoding];
                     e = [self beginPass:r task:task commandBuffer:cb];
-                    pipeline_set = NO, tess_factors = NO;
+                    pipeline_set = NO, tess_factors = NO, skip_pipe = NO;
                 } else if (e) {
                     if (etype == 0) [self render:e tag:tag rec:r task:task];
                     else if (etype == 1) [self compute:e tag:tag rec:r task:task];
