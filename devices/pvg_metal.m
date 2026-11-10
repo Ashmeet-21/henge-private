@@ -146,6 +146,7 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     BOOL tracing; /* HV_PVG_TRACE_FILE exists: say what each exec draws */
     id<MTLBuffer> trace_vb[32]; /* while tracing: the vertex buffers bound, with offset and stride */
     NSUInteger trace_vo[32], trace_vs[32];
+    NSMutableSet<NSValue *> *trace_dumped; /* buffers already written to gpu-dump/ this trace */
     /* The newest frame, BGRA, for hv_pvg_metal_frame, and the same without the pointer on it. */
     uint8_t *frame, *base;
     uint32_t frame_w, frame_h;
@@ -1216,10 +1217,25 @@ typedef struct {
 
 /* Tracing: what an indexed draw reads. The index range shows whether it stays inside its mesh; the
    first values at each vertex stream's offset show the layout. Streams are the high slots (16 up). */
+/* Tracing: each buffer a draw reads, written once per trace to gpu-dump/<address>.bin beside the trace file, to check offline. */
+- (void)traceDump:(id<MTLBuffer>)b {
+    if (b.storageMode == MTLStorageModePrivate) return;
+    NSValue *key = [NSValue valueWithPointer:(__bridge void *)b];
+    if (!trace_dumped) trace_dumped = [NSMutableSet set];
+    if ([trace_dumped containsObject:key]) return;
+    [trace_dumped addObject:key];
+    NSString *dir = [[@(getenv("HV_PVG_TRACE_FILE") ?: "/tmp/x") stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"gpu-dump"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    [[NSData dataWithBytesNoCopy:b.contents length:b.length freeWhenDone:NO]
+        writeToFile:[dir stringByAppendingPathComponent:[NSString stringWithFormat:@"%p.bin", (__bridge void *)b]] atomically:NO];
+}
+
 - (void)traceIndexed:(id<MTLBuffer>)b offset:(NSUInteger)off type:(NSUInteger)type count:(NSUInteger)count instances:(NSUInteger)instances base:(NSInteger)base primitive:(NSUInteger)primitive {
     NSUInteger size = type == MTLIndexTypeUInt32 ? 4 : 2;
-    fprintf(stderr, "trace:  indexed prim %lu idxtype %lu count %lu inst %lu base %ld idxoff %lu idxlen %lu", (unsigned long)primitive, (unsigned long)type,
-            (unsigned long)count, (unsigned long)instances, (long)base, (unsigned long)off, (unsigned long)b.length);
+    [self traceDump:b];
+    for (uint32_t s = 0; s < 32; s++) if (trace_vb[s]) [self traceDump:trace_vb[s]];
+    fprintf(stderr, "trace:  indexed prim %lu idxtype %lu count %lu inst %lu base %ld idxoff %lu idxlen %lu ibuf %p", (unsigned long)primitive, (unsigned long)type,
+            (unsigned long)count, (unsigned long)instances, (long)base, (unsigned long)off, (unsigned long)b.length, (__bridge void *)b);
     if (b.storageMode != MTLStorageModePrivate && count && off <= b.length && count <= (b.length - off) / size) {
         const uint8_t *p = (const uint8_t *)b.contents + off;
         uint32_t lo = UINT32_MAX, hi = 0;
@@ -1235,7 +1251,7 @@ typedef struct {
     for (uint32_t s = 16; s < 32; s++) {
         id<MTLBuffer> v = trace_vb[s];
         if (!v) continue;
-        fprintf(stderr, "trace:   stream %u off %lu stride %lu len %lu:", s, (unsigned long)trace_vo[s], (unsigned long)trace_vs[s], (unsigned long)v.length);
+        fprintf(stderr, "trace:   stream %u off %lu stride %lu len %lu buf %p:", s, (unsigned long)trace_vo[s], (unsigned long)trace_vs[s], (unsigned long)v.length, (__bridge void *)v);
         if (v.storageMode != MTLStorageModePrivate && trace_vo[s] < v.length) {
             const float *f = (const float *)((const uint8_t *)v.contents + trace_vo[s]);
             NSUInteger n = MIN((v.length - trace_vo[s]) / 4, (NSUInteger)24);
@@ -1917,6 +1933,7 @@ typedef struct {
     const uint32_t *res = a + 3;
     const uint8_t *bufs = (const uint8_t *)(res + nres * 2);
     tracing = hv_pvg_trace_on() != 0;
+    if (!tracing) trace_dumped = nil;
     if (tracing) fprintf(stderr, "trace: exec task %u, %u resources, %u buffers\n", task, nres, nbuf);
     double t_begin = now_seconds();
     id<MTLCommandBuffer> cb = [queue commandBuffer];
