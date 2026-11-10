@@ -62,13 +62,9 @@ final class Installer: NSObject, ObservableObject {
     @Published private(set) var stepProgress: Double = 0
     @Published private(set) var machineName = ""
 
-    private var session: URLSession?
     /* Background time, so a moment out of the foreground (a notification, iPhone Mirroring reconnecting)
        does not suspend the restore at once; iOS gives about 30 s. */
     private var grace = UIBackgroundTaskIdentifier.invalid
-    private var downloadContinuation: CheckedContinuation<URL, Error>?
-    nonisolated(unsafe) private var downloadTarget: URL? // set before the task starts, read by the delegate
-    private var lastResumeData: Data?
 
     var busy: Bool {
         switch phase {
@@ -89,10 +85,20 @@ final class Installer: NSObject, ObservableObject {
 
     static func haveImage(_ r: MacOSRelease) -> Bool { imageSize(r) != nil }
 
-    static func deleteImage(_ r: MacOSRelease) { try? FileManager.default.removeItem(at: imagePath(r)) }
+    static func deleteImage(_ r: MacOSRelease) {
+        try? FileManager.default.removeItem(at: imagePath(r))
+        try? FileManager.default.removeItem(at: partPath(r))
+    }
+    /// Where a download in progress (or stopped partway) is kept.
+    nonisolated static func partPath(_ r: MacOSRelease) -> URL { imageDirectory.appendingPathComponent("\(r.id).ipsw.part") }
+    /// Bytes of a download that stopped partway, or nil.
+    static func partSize(_ r: MacOSRelease) -> Int64? {
+        let n = RangedDownload.size(of: partPath(r))
+        return n > 0 ? n : nil
+    }
 
     /// Free space an install takes: the new Mac's disk, and the download if it is not here yet.
-    static func spaceNeeded(_ r: MacOSRelease) -> Int64 { (haveImage(r) ? 0 : r.bytes) + r.macBytes }
+    static func spaceNeeded(_ r: MacOSRelease) -> Int64 { (haveImage(r) ? 0 : max(r.bytes - (partSize(r) ?? 0), 0)) + r.macBytes }
 
     func reset() { if !busy { phase = .idle } }
 
@@ -156,35 +162,34 @@ final class Installer: NSObject, ObservableObject {
             return dest
         }
         phase = .downloading
-        received = 0
+        // Into a .part file next to where it ends up: an interrupted download (no network, Henge closed or killed)
+        // goes on from where it stopped next time, and Install's trash button deletes a partial one too (#58).
+        let part = Self.partPath(r)
+        received = RangedDownload.size(of: part)
         expected = r.bytes
-        downloadTarget = dest
+        if received > 0 { HengeLog.log("install", "going on with \(r.name)'s download from \(ByteText.string(UInt64(received)))") }
         HengeLog.log("install", "downloading \(r.url.absoluteString)")
         for attempt in 1...20 {
+            let d = RangedDownload(url: r.url, part: part) { have, total in
+                Task { @MainActor in
+                    Installer.shared.received = have
+                    if total > 0 { Installer.shared.expected = total }
+                }
+            }
             do {
-                return try await downloadOnce(r.url)
-            } catch let error as URLError where error.code != .cancelled && attempt < 20 {
-                lastResumeData = error.downloadTaskResumeData ?? lastResumeData
-                HengeLog.log("install", "download interrupted (\(error.localizedDescription)); resuming")
+                try await d.run()
+                try? FileManager.default.removeItem(at: dest)
+                try FileManager.default.moveItem(at: part, to: dest)
+                return dest
+            } catch {
+                if Task.isCancelled || attempt == 20 { throw error }
+                HengeLog.log("install", "download interrupted (\(error.localizedDescription)) at \(ByteText.string(UInt64(RangedDownload.size(of: part)))); going on")
                 try await Task.sleep(nanoseconds: 3_000_000_000)
             }
         }
         throw message("The download kept failing.")
     }
 
-    private func downloadOnce(_ url: URL) async throws -> URL {
-        let cfg = URLSessionConfiguration.default
-        cfg.timeoutIntervalForRequest = 120
-        cfg.timeoutIntervalForResource = 48 * 3600
-        let s = URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
-        session = s
-        return try await withCheckedThrowingContinuation { (c: CheckedContinuation<URL, Error>) in
-            downloadContinuation = c
-            let task = lastResumeData.map { s.downloadTask(withResumeData: $0) } ?? s.downloadTask(with: url)
-            lastResumeData = nil
-            task.resume()
-        }
-    }
 
     // MARK: The new machine
 
@@ -268,47 +273,3 @@ final class Installer: NSObject, ObservableObject {
     }
 }
 
-extension Installer: URLSessionDownloadDelegate {
-    nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64,
-                                totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        Task { @MainActor in
-            self.received = totalBytesWritten
-            if totalBytesExpectedToWrite > 0 { self.expected = totalBytesExpectedToWrite }
-        }
-    }
-
-    nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didResumeAtOffset fileOffset: Int64,
-                                expectedTotalBytes: Int64) {
-        Task { @MainActor in self.received = fileOffset }
-    }
-
-    nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        // The file is gone when this returns: move it now, on this thread.
-        let target = self.downloadTarget
-        let status = (downloadTask.response as? HTTPURLResponse)?.statusCode ?? 0
-        do {
-            guard let target, status == 200 || status == 206 else {
-                throw NSError(domain: "Henge", code: 3, userInfo: [NSLocalizedDescriptionKey: "Apple's server answered \(status)."])
-            }
-            try? FileManager.default.removeItem(at: target)
-            try FileManager.default.moveItem(at: location, to: target)
-            Task { @MainActor in
-                self.downloadContinuation?.resume(returning: target)
-                self.downloadContinuation = nil
-            }
-        } catch {
-            Task { @MainActor in
-                self.downloadContinuation?.resume(throwing: error)
-                self.downloadContinuation = nil
-            }
-        }
-    }
-
-    nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        guard let error else { return }
-        Task { @MainActor in
-            self.downloadContinuation?.resume(throwing: error)
-            self.downloadContinuation = nil
-        }
-    }
-}
