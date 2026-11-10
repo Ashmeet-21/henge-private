@@ -778,3 +778,10 @@ HvPvgLite *hv_pvg_lite_create(HvMachine *m, HvGic *gic, uint64_t gfx_pa, uint64_
     hv_machine_add_mmio(m, iosfc_pa, 0x10000, p, iosfc_read, iosfc_write, "iosurface");
     return p;
 }
+
+void hv_pvg_lite_destroy(HvPvgLite *p) {
+    if (!p) return;
+    hv_pvg_metal_destroy(atomic_exchange(&p->metal, NULL));
+    if (p->layer) CFRelease(p->layer);
+    free(p);
+}

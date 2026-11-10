@@ -141,6 +141,8 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     /* Work the GPU has not finished. Stamps are given back in the order they came: the
        GPU's completion handlers run in the order of commit. */
     _Atomic int inflight;
+    _Atomic int stopping;
+    dispatch_group_t completions;
     id<MTLCommandBuffer> last_cb;
     double encode_time, gpu_wait_time;
     BOOL pipeline_set; /* in the open encoder */
@@ -149,6 +151,7 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     BOOL tracing; /* HV_PVG_TRACE_FILE exists: say what each exec draws */
     /* The newest frame, BGRA, for hv_pvg_metal_frame, and the same without the pointer on it. */
     uint8_t *frame, *base;
+    NSMutableArray<NSValue *> *retired_frames;
     uint32_t frame_w, frame_h;
     /* The pointer: macOS sends it apart from the screen, for the display hardware to overlay. */
     uint8_t *cursor;
@@ -2005,6 +2008,7 @@ typedef struct {
     if (sync < 0) sync = getenv("HV_PVG_SYNC") != NULL;
     HvPvgLite *l = lite;
     atomic_fetch_add(&inflight, 1);
+    dispatch_group_enter(completions);
     [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
         if (done.error) {
             self->failed++;
@@ -2012,6 +2016,7 @@ typedef struct {
         }
         if (complete) hv_pvg_lite_complete(l, ch, stamp);
         atomic_fetch_sub(&self->inflight, 1);
+        dispatch_group_leave(self->completions);
     }];
     [cb commit];
     last_cb = cb;
@@ -2317,6 +2322,7 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
    this only says what to show next. Whatever is newest when a drawable comes is what is shown. */
 - (void)kickPresenter:(BOOL)fresh {
     /* screen_lock held */
+    if (atomic_load(&stopping)) return;
     if (fresh) screen_requests++;
     if (presenter_running || !layer || !screen_tex || drawable_retry_pending) return;
     if (drawable_retry_cooldown) {
@@ -2527,6 +2533,7 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
 
 /* What the display should show: at most a few times a second by CPU, for tests and the boot's first frames. */
 - (void)present:(uint64_t)mapping {
+    if (atomic_load(&stopping)) return;
     double now = now_seconds();
     on_screen = mapping;
     if ([self hasDisplayLayer]) {
@@ -2557,7 +2564,10 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
         base = malloc((size_t)w * h * 4);
         uint8_t *old = frame;
         frame = calloc((size_t)w * h, 4); /* the old one may be on screen for a moment yet: a small leak beats a crash */
-        (void)old;
+        if (old) {
+            if (!retired_frames) retired_frames = [NSMutableArray new];
+            [retired_frames addObject:[NSValue valueWithPointer:old]];
+        }
         frame_w = w, frame_h = h;
         drawn_w = drawn_h = 0;
     }
@@ -2616,6 +2626,7 @@ HvPvgMetal *hv_pvg_metal_create(HvPvgLite *lite) {
         if (proto) class_addProtocol([HvContext class], proto);
         HvReplay *r = [HvReplay new];
         r->lite = lite;
+        r->completions = dispatch_group_create();
         r->device = dev;
         r->queue = [dev newCommandQueueWithMaxCommandBufferCount:64];
         r->worker = dispatch_queue_create("hengevm.pvg", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
@@ -2645,6 +2656,48 @@ HvPvgMetal *hv_pvg_metal_create(HvPvgLite *lite) {
 #endif
         fprintf(stderr, "hengevm: pvg-metal: drawing on %s\n", dev.name.UTF8String);
         return (HvPvgMetal *)CFBridgingRetain(r);
+    }
+}
+
+void hv_pvg_metal_destroy(HvPvgMetal *m) {
+    if (!m) return;
+    @autoreleasepool {
+        HvReplay *r = CFBridgingRelease(m);
+        atomic_store(&r->stopping, 1);
+        if (r->shot_timer) { dispatch_source_cancel(r->shot_timer); r->shot_timer = nil; }
+        if (cp.timer) { dispatch_source_cancel(cp.timer); cp.timer = nil; }
+        os_unfair_lock_lock(&r->screen_lock);
+        r->layer = nil;
+        r->layer_generation++;
+        r->screen_dirty = NO;
+        os_unfair_lock_unlock(&r->screen_lock);
+        /* No CPU can enqueue more work. Delayed presentation blocks see
+           stopping before touching guest memory; already queued work drains. */
+        dispatch_sync(r->worker, ^{ r->late = NO; });
+        dispatch_sync(r->presenter, ^{});
+        id<MTLCommandBuffer> fence = [r->queue commandBuffer];
+        [fence commit];
+        [fence waitUntilCompleted];
+        dispatch_group_wait(r->completions, DISPATCH_TIME_FOREVER);
+        /* GPU completions may have enqueued a final readback on the worker. */
+        dispatch_sync(r->worker, ^{
+            r->lite = NULL;
+            r->tasks = nil;
+            r->surfaces = nil;
+            r->mapped_textures = nil;
+            r->planar = nil;
+            r->screen_tex = nil;
+            r->cursor_tex = nil;
+            r->last_cb = nil;
+            r->readback = r->test_readback = nil;
+            free(r->frame); r->frame = NULL;
+            free(r->base); r->base = NULL;
+            free(r->cursor); r->cursor = NULL;
+            for (NSValue *old in r->retired_frames) free(old.pointerValue);
+            r->retired_frames = nil;
+            free(cp.pend_src); cp.pend_src = NULL;
+            cp.on = 0;
+        });
     }
 }
 
