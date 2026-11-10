@@ -13,7 +13,7 @@ struct SettingsView: View {
     @AppStorage(EngineTuning.refreshKey) private var refreshRate = 60
     @AppStorage(EngineTuning.fastFlushKey) private var fastFlush = true
     @AppStorage(EngineTuning.wfiSpinKey) private var wfiSpin = false
-    @AppStorage(EngineTuning.superblocksKey) private var superblocks = false
+    @AppStorage(EngineTuning.superblocksKey) private var superblocks = true
     @AppStorage(JITBootstrap.codeCacheKey) private var codeCacheMB = JITBootstrap.defaultCodeCacheMB
 
     /// The second footer paragraph: how you click, given the selected input mode.
