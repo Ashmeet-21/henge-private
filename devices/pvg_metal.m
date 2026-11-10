@@ -44,6 +44,8 @@ static int cursor_scale(void) {
 #include <stdatomic.h>
 #include <mach/vm_map.h>
 #include <stdio.h>
+
+extern int hv_base_vertex_quirk_hits; /* core/translate.c */
 #include <stdlib.h>
 #include <string.h>
 
@@ -157,10 +159,7 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     NSArray<NSString *> *skip_rules; /* debugging: Documents/skip-draws, a line each; draws whose pipeline's trace name holds one aren't drawn */
     double skip_checked;
     BOOL skip_pipe; /* the pipeline set now matches a rule */
-    /* Experiment (Documents/base-fix exists, with HV_INSPECT): see fixBase. */
-    BOOL base_fix;
-    NSMutableDictionary<NSString *, NSNumber *> *base_fix_cache; /* mesh -> what to add to its base vertex; emptied every half second */
-    unsigned base_fix_moved, base_fix_said;
+    BOOL base_vertex_warned;
     /* Inspector (HV_INSPECT, tools/henge-inspect.py): lists the meshes drawn, hides them, hands one over to look at.
        Worker queue only, apart from insp_on. */
     BOOL insp_on;
@@ -1398,42 +1397,6 @@ static NSData *insp_slice(id<MTLBuffer> b, NSUInteger from, NSUInteger length) {
     return [insp_hidden containsObject:key] || [insp_hidden_pipes containsObject:@(cur_pipe)] || (insp_solo && ![insp_solo isEqualToString:key]);
 }
 
-/* Experiment, Documents/base-fix: Roblox's rigid meshes whose vertices lie 65536 further into the pool than the
-   base vertex read from the draw says. Such a draw's vertices name more parts than the bones it was given (the
-   gap from constant slot 1 to slot 11, 48 bytes a bone), and the vertices 65536 further do not: then that is
-   added. A test of where the vertices are, not a fix: it only sees meshes it can tell apart this way. */
-- (NSInteger)fixBase:(NSInteger)base index:(id<MTLBuffer>)b offset:(NSUInteger)off type:(NSUInteger)type count:(NSUInteger)count {
-    if (!base_fix || !b || type != MTLIndexTypeUInt16 || base < 0 || base >= 65536 || !count) return base;
-    if (cur_strides.count <= 17 || cur_strides[17].unsignedIntegerValue != 16) return base;
-    id<MTLBuffer> ids = trace_vb[17], bones = trace_vb[1];
-    if (!ids || !bones || bones != trace_vb[11] || trace_vo[11] <= trace_vo[1] || trace_vo[17] >= ids.length) return base;
-    if (b.storageMode == MTLStorageModePrivate || ids.storageMode == MTLStorageModePrivate) return base;
-    if (off > b.length || count > (b.length - off) / 2) return base;
-    NSUInteger cap = (trace_vo[11] - trace_vo[1]) / 48;
-    NSString *key = [NSString stringWithFormat:@"%p:%lu:%lu:%ld:%lu", (__bridge void *)b, (unsigned long)off, (unsigned long)count, (long)base, (unsigned long)cap];
-    NSNumber *known = base_fix_cache[key];
-    if (known) return base + known.integerValue;
-    const uint8_t *ix = (const uint8_t *)b.contents + off;
-    const uint8_t *v = (const uint8_t *)ids.contents + trace_vo[17];
-    NSUInteger nv = (ids.length - trace_vo[17]) / 16;
-    NSUInteger here = 0, further = 0;
-    BOOL reach = YES;
-    for (NSUInteger i = 0; i < count; i++) {
-        uint16_t x;
-        memcpy(&x, ix + i * 2, 2);
-        NSUInteger at = (NSUInteger)base + x;
-        if (at + 65536 >= nv) { reach = NO; break; }
-        NSUInteger p0 = v[at * 16 + 4], p1 = v[(at + 65536) * 16 + 4];
-        if (p0 > here) here = p0;
-        if (p1 > further) further = p1;
-    }
-    NSInteger add = reach && here >= cap && further < cap ? 65536 : 0;
-    if (!base_fix_cache) base_fix_cache = [NSMutableDictionary dictionary];
-    base_fix_cache[key] = @(add);
-    if (add) base_fix_moved++;
-    return base + add;
-}
-
 - (void)render:(id<MTLRenderCommandEncoder>)e tag:(uint32_t)tag rec:(Rec)r task:(uint32_t)task {
     BOOL draw = tag <= 19 || tag == 28 || tag == 29 || tag == 155 || tag == 162;
     if (!pipeline_set && draw) return;
@@ -1771,11 +1734,15 @@ static NSData *insp_slice(id<MTLBuffer> b, NSUInteger from, NSUInteger length) {
         break;
     case 10: case 28: { /* {primitive, index type, ref, offset 64, count 64, instances 64, base vertex 64, base instance 64} */
         id<MTLBuffer> b = [self get:U32(4) task:task];
+        if (tag == 28 && !hv_base_vertex_quirk_hits && !base_vertex_warned) {
+            /* The guest's driver cuts record 28's base vertex to 16 bits unless the translator took that out
+               (base_vertex_quirk in core/translate.c): a driver it does not recognise is not corrected. */
+            base_vertex_warned = YES;
+            fprintf(stderr, "hengevm: pvg-metal: indexed draws arrive in record 28 and the driver's base vertex cut was not found: meshes past vertex 65535 of a buffer will be drawn wrong\n");
+        }
         if (insp_on && b && [self inspect:b offset:(NSUInteger)U64(8) type:U16(2) count:(NSUInteger)U64(16) instances:(NSUInteger)U64(24) base:(NSInteger)U64(32)]) break;
         if (b) [e drawIndexedPrimitives:(MTLPrimitiveType)U16(0) indexCount:(NSUInteger)U64(16) indexType:(MTLIndexType)U16(2) indexBuffer:b indexBufferOffset:(NSUInteger)U64(8)
-                          instanceCount:(NSUInteger)U64(24)
-                             baseVertex:[self fixBase:(NSInteger)U64(32) index:b offset:(NSUInteger)U64(8) type:U16(2) count:(NSUInteger)U64(16)]
-                           baseInstance:(NSUInteger)U64(40)];
+                          instanceCount:(NSUInteger)U64(24) baseVertex:(NSInteger)U64(32) baseInstance:(NSUInteger)U64(40)];
         if (tracing && b) [self traceIndexed:b offset:(NSUInteger)U64(8) type:U16(2) count:(NSUInteger)U64(16) instances:(NSUInteger)U64(24) base:(NSInteger)U64(32) primitive:U16(0)];
         draws++;
         break;
@@ -2140,11 +2107,6 @@ static NSData *insp_slice(id<MTLBuffer> b, NSUInteger from, NSUInteger length) {
         if (!(now_rules == skip_rules || [now_rules isEqualToArray:skip_rules]))
             fprintf(stderr, "hengevm: skip-draws: %s\n", now_rules ? [[now_rules componentsJoinedByString:@" | "] UTF8String] : "off");
         skip_rules = now_rules;
-        BOOL fix = tf && insp_on && [[NSFileManager defaultManager] fileExistsAtPath:[[@(tf) stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"base-fix"]];
-        if (fix != base_fix || (fix && base_fix_moved != base_fix_said))
-            fprintf(stderr, "hengevm: base-fix: %s, %u meshes moved in the last half second\n", fix ? "on" : "off", base_fix_moved);
-        base_fix = fix, base_fix_said = base_fix_moved, base_fix_moved = 0;
-        base_fix_cache = nil; /* the pool's vertices change: look again */
     }
     if (tracing) fprintf(stderr, "trace: exec task %u, %u resources, %u buffers\n", task, nres, nbuf);
     double t_begin = now_seconds();
@@ -2303,6 +2265,21 @@ static const uint8_t *half_to_byte(void) {
         [self complain:@"pointer image unreadable"];
         return;
     }
+    /* The pointer is drawn as colour already multiplied by alpha (colour + what is under it * (1 - alpha)). An app's
+       own pointer can come with plain colour instead (Roblox's: white at an alpha of a few): added whole, that gave
+       white specks around it. No multiplied pixel has a colour above its alpha, so one that does says which it is. */
+    BOOL plain = NO;
+    for (uint32_t y = 0; y < h && !plain; y++) {
+        const uint8_t *px = bits + (size_t)y * stride;
+        for (uint32_t x = 0; x < w; x++, px += 4)
+            if (px[0] > px[3] || px[1] > px[3] || px[2] > px[3]) { plain = YES; break; }
+    }
+    if (plain)
+        for (uint32_t y = 0; y < h; y++) {
+            uint8_t *px = bits + (size_t)y * stride;
+            for (uint32_t x = 0; x < w; x++, px += 4)
+                for (int c = 0; c < 3; c++) px[c] = (uint8_t)((px[c] * px[3] + 127) / 255);
+        }
     free(cursor);
     MTLTextureDescriptor *ct = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:w height:h mipmapped:NO];
     ct.storageMode = MTLStorageModeShared;

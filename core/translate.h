@@ -42,4 +42,7 @@ uint32_t hv_translate_last_words(void);
 
 int hv_branch_retarget(uint32_t *w, int64_t off);
 
+/* Set once the translator has left out the 16-bit cut of the base vertex in macOS's virtual GPU driver. */
+extern int hv_base_vertex_quirk_hits;
+
 #endif

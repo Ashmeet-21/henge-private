@@ -82,7 +82,6 @@ struct HvPvgLite {
     uint64_t task_objects[512], task_placement[512]; /* task offsets of its object lists */
     uint8_t obj_seen[512][8192];
     int tally;
-    uint32_t deser; /* the deserializer version device info gives (key 0x0a) */
     uint64_t counts[6][256];
     uint64_t execs, bad;
     double last_tally;
@@ -133,13 +132,6 @@ static void do_root(HvPvgLite *p) {
             if (dst && count) {
                 uint32_t n = sizeof device_info / sizeof device_info[0];
                 memcpy(dst, device_info, sizeof device_info);
-                /* Key 0x0a is taken to be the deserializer version (8 from the framework; the guest's Metal driver
-                   reads its version at 4 * (0x0a - 1) = 0x24 of what the kernel hands it, and "more than 7" turns on
-                   records 28 and 29 for indexed draws). HV_PVG_DESERIALIZER gives another, for looking into it: with
-                   7 the Mac stopped as Roblox's menu came up. */
-                for (uint32_t i = 0; i < n; i++)
-                    if (dst[i * 2] == 0x0a) dst[i * 2 + 1] = p->deser;
-                if (p->deser != 8) fprintf(stderr, "hengevm: pvg-lite: device info given, deserializer version %u\n", p->deser);
                 if (p->log) fprintf(stderr, "hengevm: pvg-lite: device info: %u keys (asked %u)\n", n, *count);
             }
         }
@@ -761,7 +753,6 @@ HvPvgLite *hv_pvg_lite_create(HvMachine *m, HvGic *gic, uint64_t gfx_pa, uint64_
     p->iosfc_irq = iosfc_irq;
     p->log = getenv("HV_PVG_LITE_LOG") != NULL;
     p->tally = getenv("HV_PVG_TALLY") != NULL;
-    p->deser = getenv("HV_PVG_DESERIALIZER") ? (uint32_t)atoi(getenv("HV_PVG_DESERIALIZER")) : 8; /* as the framework answers */
     hv_machine_add_mmio(m, gfx_pa, 0x10000, p, gfx_read, gfx_write, "gfx");
     hv_machine_add_mmio(m, iosfc_pa, 0x10000, p, iosfc_read, iosfc_write, "iosurface");
     return p;

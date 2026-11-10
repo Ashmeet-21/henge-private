@@ -1938,6 +1938,8 @@ static int translate_emit(HvMachine *m, HvBlock *b, const uint32_t *code, uint32
    instanceCount:baseVertex:baseInstance:]. A mesh whose vertices start past 65535 in its buffer (Roblox keeps
    131072 to a buffer) is then drawn from 65536 vertices before it. Those five instructions, in user code, are
    translated without the `and`: the record then holds the base vertex whole, which is how the device reads it. */
+int hv_base_vertex_quirk_hits; /* blocks translated without it: 0 says this guest's driver is not the one known */
+
 static const uint32_t *base_vertex_quirk(const HvBlock *b, const uint32_t *code, uint32_t avail) {
     static __thread uint32_t patched[HV_MAX_BLOCK_INSNS];
     static int said;
@@ -1949,6 +1951,7 @@ static const uint32_t *base_vertex_quirk(const HvBlock *b, const uint32_t *code,
             continue;
         memcpy(patched, code, max * sizeof code[0]);
         patched[i] = 0xd503201fu; /* nop */
+        hv_base_vertex_quirk_hits = 1;
         if (!said) said = 1, fprintf(stderr, "hengevm: the virtual GPU driver's base vertex is left whole (block %llx)\n", (unsigned long long)b->va);
         return patched;
     }
