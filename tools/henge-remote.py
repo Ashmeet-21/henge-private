@@ -97,6 +97,8 @@ move = [0.0, 0.0]  # pointer motion not yet sent: a batch of events goes as one 
 def flush_move():
     dx, dy = int(move[0]), int(move[1])
     if dx or dy:
+        if os.environ.get("HENGE_REMOTE_LOG"):  # debugging: every move as sent
+            print(f"move {dx:+d} {dy:+d}", flush=True)
         send(1, 0, dx, dy)
         move[0] -= dx
         move[1] -= dy
