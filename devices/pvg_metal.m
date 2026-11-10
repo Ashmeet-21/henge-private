@@ -15,6 +15,10 @@
 #import <TargetConditionals.h>
 #import <IOSurface/IOSurfaceRef.h>
 #import <CoreVideo/CoreVideo.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <unistd.h>
 #include <string.h>
 #include <sys/utsname.h>
 
@@ -153,6 +157,17 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     NSArray<NSString *> *skip_rules; /* debugging: Documents/skip-draws, a line each; draws whose pipeline's trace name holds one aren't drawn */
     double skip_checked;
     BOOL skip_pipe; /* the pipeline set now matches a rule */
+    /* Inspector (HV_INSPECT, tools/henge-inspect.py): lists the meshes drawn, hides them, hands one over to look at.
+       Worker queue only, apart from insp_on. */
+    BOOL insp_on;
+    double insp_until; /* capturing until then */
+    NSMutableDictionary<NSString *, NSMutableDictionary *> *insp_meshes; /* the last capture: key -> mesh */
+    NSMutableSet<NSString *> *insp_hidden;
+    NSMutableSet<NSNumber *> *insp_hidden_pipes;
+    NSString *insp_solo;
+    uint32_t cur_pipe;
+    NSString *cur_pipe_name;
+    NSArray<NSNumber *> *cur_strides; /* the pipeline's vertex buffer strides, by slot */
     /* The newest frame, BGRA, for hv_pvg_metal_frame, and the same without the pointer on it. */
     uint8_t *frame, *base;
     uint32_t frame_w, frame_h;
@@ -518,6 +533,12 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
                         (unsigned long)c.sourceAlphaBlendFactor, (unsigned long)c.alphaBlendOperation, (unsigned long)c.destinationAlphaBlendFactor,
                         (unsigned long)c.writeMask);
             }
+        }
+        if (state && tag == 0xe) { /* the inspector reads vertices with these */
+            MTLVertexDescriptor *vd = ((MTLRenderPipelineDescriptor *)descriptor).vertexDescriptor;
+            NSMutableArray *strides = [NSMutableArray array];
+            for (NSUInteger l = 0; l < 31; l++) [strides addObject:@(vd.layouts[l].stride)];
+            objc_setAssociatedObject(state, "hvstrides", strides, OBJC_ASSOCIATION_RETAIN);
         }
         if (state && tag == 0xe && getenv("HV_PVG_TRACE_FILE")) {
             MTLRenderPipelineDescriptor *rp = descriptor;
@@ -1324,6 +1345,55 @@ typedef struct {
     }
 }
 
+/* Inspector: a mesh is its index buffer, offset, count and base vertex, the same from one frame to the next.
+   While capturing, the first draw of each mesh keeps a copy of what it reads: its indices, the vertices they
+   reach in each stream, and the start of each constant buffer (bones and the like change every frame). */
+static NSData *insp_slice(id<MTLBuffer> b, NSUInteger from, NSUInteger length) {
+    if (!b || b.storageMode == MTLStorageModePrivate || from >= b.length) return nil;
+    return [NSData dataWithBytes:(const uint8_t *)b.contents + from length:MIN(length, b.length - from)];
+}
+
+- (BOOL)inspect:(id<MTLBuffer>)b offset:(NSUInteger)off type:(NSUInteger)type count:(NSUInteger)count instances:(NSUInteger)inst base:(NSInteger)base {
+    NSString *key = [NSString stringWithFormat:@"%p:%lu:%lu:%ld", (__bridge void *)b, (unsigned long)off, (unsigned long)count, (long)base];
+    if (insp_until > 0 && now_seconds() < insp_until) {
+        NSMutableDictionary *m = insp_meshes[key];
+        if (m) m[@"draws"] = @([m[@"draws"] intValue] + 1);
+        else if (insp_meshes.count < 4000) {
+            m = [NSMutableDictionary dictionary];
+            [m addEntriesFromDictionary:@{@"key": key, @"pipe": @(cur_pipe), @"name": cur_pipe_name ?: @"", @"count": @(count),
+                                          @"instances": @(inst), @"base": @(base), @"index_type": @(type), @"draws": @1}];
+            NSUInteger size = type == MTLIndexTypeUInt32 ? 4 : 2;
+            NSData *idx = insp_slice(b, off, count * size);
+            uint32_t lo = UINT32_MAX, hi = 0;
+            if (idx.length == count * size && count) {
+                for (NSUInteger i = 0; i < count; i++) {
+                    uint32_t v = 0;
+                    memcpy(&v, (const uint8_t *)idx.bytes + i * size, size);
+                    if (v < lo) lo = v;
+                    if (v > hi) hi = v;
+                }
+                [m addEntriesFromDictionary:@{@"indices": idx, @"min": @(lo), @"max": @(hi)}];
+                NSMutableDictionary *streams = [NSMutableDictionary dictionary];
+                for (uint32_t s = 16; s < 31; s++) {
+                    NSUInteger stride = s < cur_strides.count ? cur_strides[s].unsignedIntegerValue : 0;
+                    if (!stride || !trace_vb[s] || (NSInteger)lo + base < 0) continue;
+                    NSData *d = insp_slice(trace_vb[s], trace_vo[s] + ((NSUInteger)((NSInteger)lo + base)) * stride, (NSUInteger)(hi - lo + 1) * stride);
+                    if (d) streams[[@(s) stringValue]] = @{@"stride": @(stride), @"data": d};
+                }
+                m[@"streams"] = streams;
+            }
+            NSMutableDictionary *consts = [NSMutableDictionary dictionary];
+            for (uint32_t s = 0; s < 16; s++) {
+                NSData *d = insp_slice(trace_vb[s], trace_vo[s], 16384);
+                if (d) consts[[@(s) stringValue]] = d;
+            }
+            m[@"consts"] = consts;
+            insp_meshes[key] = m;
+        }
+    }
+    return [insp_hidden containsObject:key] || [insp_hidden_pipes containsObject:@(cur_pipe)] || (insp_solo && ![insp_solo isEqualToString:key]);
+}
+
 - (void)render:(id<MTLRenderCommandEncoder>)e tag:(uint32_t)tag rec:(Rec)r task:(uint32_t)task {
     BOOL draw = tag <= 19 || tag == 28 || tag == 29 || tag == 155 || tag == 162;
     if (!pipeline_set && draw) return;
@@ -1350,6 +1420,9 @@ typedef struct {
         id state = [self get:U32(0) task:task];
         if (state) [e setRenderPipelineState:state];
         pipeline_set = state != nil;
+        cur_pipe = U32(0);
+        cur_pipe_name = objc_getAssociatedObject(state, "hvname");
+        cur_strides = objc_getAssociatedObject(state, "hvstrides");
         skip_pipe = NO;
         if (skip_rules) {
             NSString *name = objc_getAssociatedObject(state, "hvname");
@@ -1370,6 +1443,8 @@ typedef struct {
             offsets[i] = (NSUInteger)U64(12 + i * 12);
         }
         NSRange range = NSMakeRange(index, count);
+        if (insp_on && !tracing && tag == 125) for (uint32_t i = 0; i < count && index + i < 32; i++)
+            trace_vb[index + i] = strong[i], trace_vo[index + i] = offsets[i], trace_vs[index + i] = 0;
         if (tracing) for (uint32_t i = 0; i < count; i++) { /* m4 fork: what the shaders are given */
             id<MTLBuffer> bb = strong[i];
             if (tag == 125 && index + i < 32) trace_vb[index + i] = bb, trace_vo[index + i] = offsets[i], trace_vs[index + i] = 0;
@@ -1388,7 +1463,7 @@ typedef struct {
         break;
     }
     case 126:
-        if (tracing && U32(0) < 32) trace_vo[U32(0)] = (NSUInteger)U64(4);
+        if ((tracing || insp_on) && U32(0) < 32) trace_vo[U32(0)] = (NSUInteger)U64(4);
         [e setVertexBufferOffset:(NSUInteger)U64(4) atIndex:U32(0)];
         break;
     case 111: [e setFragmentBufferOffset:(NSUInteger)U64(4) atIndex:U32(0)]; break;
@@ -1542,12 +1617,12 @@ typedef struct {
             offsets[i] = (NSUInteger)U64(12 + i * 20);
             strides[i] = (NSUInteger)U64(20 + i * 20);
         }
-        if (tracing) for (uint32_t i = 0; i < count && index + i < 32; i++) trace_vb[index + i] = strong[i], trace_vo[index + i] = offsets[i], trace_vs[index + i] = strides[i];
+        if (tracing || insp_on) for (uint32_t i = 0; i < count && index + i < 32; i++) trace_vb[index + i] = strong[i], trace_vo[index + i] = offsets[i], trace_vs[index + i] = strides[i];
         [e setVertexBuffers:buffers offsets:offsets attributeStrides:strides withRange:NSMakeRange(index, count)];
         break;
     }
     case 166:
-        if (tracing && U32(0) < 32) trace_vo[U32(0)] = (NSUInteger)U64(4), trace_vs[U32(0)] = (NSUInteger)U64(12);
+        if ((tracing || insp_on) && U32(0) < 32) trace_vo[U32(0)] = (NSUInteger)U64(4), trace_vs[U32(0)] = (NSUInteger)U64(12);
         [e setVertexBufferOffset:(NSUInteger)U64(4) attributeStride:(NSUInteger)U64(12) atIndex:U32(0)];
         break;
     case 101: {
@@ -1652,6 +1727,7 @@ typedef struct {
         break;
     case 10: case 28: { /* {primitive, index type, ref, offset 64, count 64, instances 64, base vertex 64, base instance 64} */
         id<MTLBuffer> b = [self get:U32(4) task:task];
+        if (insp_on && b && [self inspect:b offset:(NSUInteger)U64(8) type:U16(2) count:(NSUInteger)U64(16) instances:(NSUInteger)U64(24) base:(NSInteger)U64(32)]) break;
         if (b) [e drawIndexedPrimitives:(MTLPrimitiveType)U16(0) indexCount:(NSUInteger)U64(16) indexType:(MTLIndexType)U16(2) indexBuffer:b indexBufferOffset:(NSUInteger)U64(8)
                           instanceCount:(NSUInteger)U64(24) baseVertex:(NSInteger)U64(32) baseInstance:(NSUInteger)U64(40)];
         if (tracing && b) [self traceIndexed:b offset:(NSUInteger)U64(8) type:U16(2) count:(NSUInteger)U64(16) instances:(NSUInteger)U64(24) base:(NSInteger)U64(32) primitive:U16(0)];
@@ -1661,6 +1737,7 @@ typedef struct {
     case 11: case 29: { /* {primitive, index type, ref, offset 16, count 16, instances 16, base vertex 16, base instance 16}; 29's base vertex can be negative */
         id<MTLBuffer> b = [self get:U32(4) task:task];
         NSInteger base_vertex = tag == 29 ? (NSInteger)(int16_t)U16(14) : (NSInteger)U16(14);
+        if (insp_on && b && [self inspect:b offset:U16(8) type:U16(2) count:U16(10) instances:U16(12) base:base_vertex]) break;
         if (b) [e drawIndexedPrimitives:(MTLPrimitiveType)U16(0) indexCount:U16(10) indexType:(MTLIndexType)U16(2) indexBuffer:b indexBufferOffset:U16(8)
                           instanceCount:U16(12) baseVertex:base_vertex baseInstance:U16(16)];
         if (tracing && b) [self traceIndexed:b offset:U16(8) type:U16(2) count:U16(10) instances:U16(12) base:base_vertex primitive:U16(0)];
@@ -2638,6 +2715,101 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
 
 @end
 
+/* Inspector server (HV_INSPECT): one JSON request a line on 127.0.0.1:5902, one JSON reply a line. Loopback only,
+   so only this device and a computer through usbmux (iproxy 15902:5902) reach it.
+   {"op":"capture","seconds":s}  the meshes drawn in the next s seconds, without their data
+   {"op":"hide","keys":[..],"pipes":[..],"solo":key|null}  what not to draw from now on (replaces the last)
+   {"op":"mesh","key":k}  one mesh of the last capture with its data, base64 */
+static id insp_json_safe(id v) {
+    if ([v isKindOfClass:NSData.class]) return [(NSData *)v base64EncodedStringWithOptions:0];
+    if ([v isKindOfClass:NSDictionary.class]) {
+        NSMutableDictionary *o = [NSMutableDictionary dictionary];
+        [(NSDictionary *)v enumerateKeysAndObjectsUsingBlock:^(id k, id x, BOOL *stop) { (void)stop; o[k] = insp_json_safe(x); }];
+        return o;
+    }
+    return v;
+}
+
+static NSDictionary *insp_handle(HvReplay *r, NSDictionary *q) {
+    NSString *op = q[@"op"];
+    if ([op isEqual:@"capture"]) {
+        double secs = MIN(MAX([q[@"seconds"] doubleValue], 0.05), 2.0);
+        dispatch_sync(r->worker, ^{ r->insp_meshes = [NSMutableDictionary dictionary]; r->insp_until = now_seconds() + secs; });
+        usleep((useconds_t)((secs + 0.15) * 1e6));
+        NSMutableArray *list = [NSMutableArray array];
+        dispatch_sync(r->worker, ^{
+            r->insp_until = 0;
+            for (NSMutableDictionary *m in r->insp_meshes.allValues) {
+                NSMutableDictionary *summary = [NSMutableDictionary dictionary];
+                for (NSString *k in @[@"key", @"pipe", @"name", @"count", @"instances", @"base", @"index_type", @"draws", @"min", @"max"])
+                    if (m[k]) summary[k] = m[k];
+                [list addObject:summary];
+            }
+        });
+        return @{@"meshes": list};
+    }
+    if ([op isEqual:@"hide"]) {
+        NSArray *keys = [q[@"keys"] isKindOfClass:NSArray.class] ? q[@"keys"] : @[];
+        NSArray *pipes = [q[@"pipes"] isKindOfClass:NSArray.class] ? q[@"pipes"] : @[];
+        NSString *solo = [q[@"solo"] isKindOfClass:NSString.class] ? q[@"solo"] : nil;
+        dispatch_sync(r->worker, ^{
+            r->insp_hidden = [NSMutableSet setWithArray:keys];
+            r->insp_hidden_pipes = [NSMutableSet setWithArray:pipes];
+            r->insp_solo = solo;
+        });
+        return @{@"ok": @YES};
+    }
+    if ([op isEqual:@"mesh"]) {
+        __block id out = nil;
+        dispatch_sync(r->worker, ^{ NSDictionary *m = r->insp_meshes[q[@"key"]]; if (m) out = insp_json_safe(m); });
+        return out ?: @{@"error": @"not in the last capture"};
+    }
+    return @{@"error": @"unknown op"};
+}
+
+static void insp_serve(HvReplay *r) {
+    int s = socket(AF_INET, SOCK_STREAM, 0), one = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    struct sockaddr_in a = {0};
+    a.sin_len = sizeof a, a.sin_family = AF_INET, a.sin_port = htons(5902), a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (s < 0 || bind(s, (struct sockaddr *)&a, sizeof a) || listen(s, 2)) {
+        fprintf(stderr, "hengevm: inspector: can't listen on 127.0.0.1:5902\n");
+        if (s >= 0) close(s);
+        return;
+    }
+    fprintf(stderr, "hengevm: inspector on 127.0.0.1:5902 (from a computer: iproxy 15902:5902)\n");
+    for (;;) {
+        int c = accept(s, NULL, NULL);
+        if (c < 0) continue;
+        setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+        NSMutableData *in = [NSMutableData data];
+        char chunk[8192];
+        ssize_t n;
+        BOOL alive = YES;
+        while (alive && (n = recv(c, chunk, sizeof chunk, 0)) > 0) @autoreleasepool {
+            [in appendBytes:chunk length:(NSUInteger)n];
+            for (;;) {
+                const char *b = in.bytes, *nl = in.length ? memchr(b, '\n', in.length) : NULL;
+                if (!nl) break;
+                NSData *line = [in subdataWithRange:NSMakeRange(0, (NSUInteger)(nl - b))];
+                [in replaceBytesInRange:NSMakeRange(0, (NSUInteger)(nl - b) + 1) withBytes:NULL length:0];
+                id q = [NSJSONSerialization JSONObjectWithData:line options:0 error:nil];
+                NSDictionary *reply = [q isKindOfClass:NSDictionary.class] ? insp_handle(r, q) : @{@"error": @"bad request"};
+                NSMutableData *out = [[NSJSONSerialization dataWithJSONObject:reply options:0 error:nil] mutableCopy] ?: [NSMutableData data];
+                [out appendBytes:"\n" length:1];
+                for (NSUInteger sent = 0; sent < out.length;) {
+                    ssize_t k = send(c, (const uint8_t *)out.bytes + sent, out.length - sent, 0);
+                    if (k <= 0) { alive = NO; break; }
+                    sent += (NSUInteger)k;
+                }
+                if (!alive) break;
+            }
+        }
+        close(c);
+    }
+}
+
 HvPvgMetal *hv_pvg_metal_create(HvPvgLite *lite) {
     @autoreleasepool {
         id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
@@ -2663,6 +2835,10 @@ HvPvgMetal *hv_pvg_metal_create(HvPvgLite *lite) {
         r->complaints = [NSMutableSet new];
         r->shot = getenv("HV_PVG_SHOT");
         cp_start(r);
+        if (getenv("HV_INSPECT")) { /* debugging: tools/henge-inspect.py */
+            r->insp_on = YES;
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ insp_serve(r); });
+        }
 #if !TARGET_OS_IPHONE
         if (getenv("HV_PVG_GPU_TEST")) r->layer = [CAMetalLayer layer];
 #endif

@@ -22,6 +22,7 @@ on:
     # (Run it by hand from the Actions tab if an IPA is wanted anyway.)
     paths-ignore:
       - 'tools/henge-remote.py'
+      - 'tools/henge-inspect.py'
       - 'docs/**'
       - '**.md'
       - '.gitignore'
