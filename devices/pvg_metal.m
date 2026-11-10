@@ -73,6 +73,10 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
 @interface HvPlaneState : NSObject {
 @public
     uint64_t hash[4];
+    /* Planes over PVG_FULL_HASH_MAX: a full hash of each eighth, checked one eighth per sync (see sync_iosurface). */
+    uint64_t window_hash[4][8];
+    uint8_t window_next[4];
+    uint32_t window_valid; /* bit i: plane i's eighths are noted */
 }
 @end
 @implementation HvPlaneState
@@ -126,6 +130,11 @@ static NSCountedSet<NSNumber *> *wb_unmapping; /* mapping ids unmapped by the gu
     uint64_t map_id; /* a surface: the guest's mapping id */
     /* Unmapped by the guest: its pages may already hold something else, so nothing is written back into them. */
     _Atomic BOOL gone;
+    /* A surface over PVG_FULL_HASH_MAX: a full hash of each eighth of it, checked one eighth per sync, so a change
+       the strided sample misses is still caught within 8 syncs (the planes' own are in HvPlaneState, shared). */
+    uint64_t content_window_hash[8];
+    uint8_t window_next;
+    BOOL content_windows_valid;
     /* A heap: private memory, a buffer over all of it. */
     id<MTLBuffer> heap_whole;
     /* A heap's or a private texture's copy in guest memory, and which side has the newest bytes. */
@@ -882,7 +891,8 @@ static IOSurfaceRef make_iosurface(HvObject *to, const uint8_t *desc, uint64_t a
     return made;
 }
 
-/* A sample of every 64th byte, to tell cheaply whether pixels changed. */
+/* A sample of every 64th byte, to tell cheaply whether pixels changed. Kept as the base
+   sample for large surfaces only: see the note at hash_bytes_full. */
 static uint64_t hash_bytes(const uint8_t *from, uint64_t len) {
     uint64_t hash = 0xcbf29ce484222325ull;
     for (uint64_t i = 0; i + 8 <= len; i += 64) {
@@ -893,7 +903,34 @@ static uint64_t hash_bytes(const uint8_t *from, uint64_t len) {
     return hash;
 }
 
-static uint64_t guest_hash(HvObject *s) { return hash_bytes(s->mapped + s->first, s->alloc); }
+/* The strided sample above misses any guest change confined
+   to unsampled bytes, so small updates (caret edits, small tiles, thin lines) stayed stale
+   indefinitely. Surfaces up to a few MB are now hashed over every byte. Larger surfaces
+   keep the strided sample as a base and add, per sync, a full hash of one rotating eighth
+   of the range (hash_window_bytes + the window tables on HvObject): each sync covers a
+   different eighth, so worst-case staleness for a missed change is bounded at 8 syncs. */
+#define PVG_FULL_HASH_MAX (4ull << 20)
+static uint64_t hash_bytes_full(const uint8_t *from, uint64_t len) {
+    uint64_t hash = 0xcbf29ce484222325ull;
+    uint64_t i = 0;
+    for (; i + 8 <= len; i += 8) {
+        uint64_t v;
+        memcpy(&v, from + i, 8);
+        hash = (hash ^ v) * 0x100000001b3ull;
+    }
+    for (; i < len; i++) hash = (hash ^ from[i]) * 0x100000001b3ull;
+    return hash;
+}
+
+static uint64_t hash_window_bytes(const uint8_t *from, uint64_t len, unsigned w) {
+    uint64_t start = len * w / 8, end = len * (w + 1) / 8;
+    return hash_bytes_full(from + start, end - start);
+}
+
+static uint64_t guest_hash(HvObject *s) {
+    return s->alloc <= PVG_FULL_HASH_MAX ? hash_bytes_full(s->mapped + s->first, s->alloc)
+                                         : hash_bytes(s->mapped + s->first, s->alloc);
+}
 
 /* Plane i of a multi-plane surface in the guest's memory, or 0 bytes if its layout does not fit the allocation. */
 static uint64_t plane_bytes(HvObject *s, uint32_t i) {
@@ -902,11 +939,35 @@ static uint64_t plane_bytes(HvObject *s, uint32_t i) {
     return row * s->plane_h[i];
 }
 
+static uint64_t plane_hash_now(HvObject *s, uint32_t i) {
+    uint64_t len = plane_bytes(s, i);
+    return len <= PVG_FULL_HASH_MAX ? hash_bytes_full(s->mapped + s->first + s->plane_from[i], len)
+                                    : hash_bytes(s->mapped + s->first + s->plane_from[i], len);
+}
+
+static void note_content_windows(HvObject *s) {
+    for (unsigned w = 0; w < 8; w++)
+        s->content_window_hash[w] = hash_window_bytes(s->mapped + s->first, s->alloc, w);
+    s->content_windows_valid = YES;
+    s->window_next = 0;
+}
+
+/* Plane i's eighths as the guest has them now (large planes only; under wb_lock when the state is shared). */
+static void note_plane_windows(HvObject *s, uint32_t i) {
+    uint64_t len = plane_bytes(s, i);
+    if (!s->planes || len <= PVG_FULL_HASH_MAX) return;
+    for (unsigned w = 0; w < 8; w++)
+        s->planes->window_hash[i][w] = hash_window_bytes(s->mapped + s->first + s->plane_from[i], len, w);
+    s->planes->window_valid |= 1u << i;
+}
+
 /* Every plane's hash as the guest has it now, for a host surface already holding those pixels. */
 static void note_plane_hashes(HvObject *s) {
     if (!s->plane_hash) return;
-    for (uint32_t i = 0; i < s->plane_count && i < 4; i++)
-        s->plane_hash[i] = hash_bytes(s->mapped + s->first + s->plane_from[i], plane_bytes(s, i));
+    for (uint32_t i = 0; i < s->plane_count && i < 4; i++) {
+        s->plane_hash[i] = plane_hash_now(s, i);
+        note_plane_windows(s, i);
+    }
 }
 
 static void sync_iosurface_locked(HvObject *s);
@@ -927,13 +988,28 @@ static void sync_iosurface_locked(HvObject *s) {
     uint64_t *have = s->plane_hash;
     if (by_plane) {
         for (uint32_t i = 0; i < s->plane_count && i < 4; i++) {
-            hashes[i] = hash_bytes(from + s->plane_from[i], plane_bytes(s, i));
+            hashes[i] = plane_hash_now(s, i);
             if (hashes[i] != have[i]) changed |= 1u << i;
+            uint64_t len = plane_bytes(s, i);
+            if (len > PVG_FULL_HASH_MAX && s->planes) { /* a different eighth each sync */
+                HvPlaneState *st = s->planes;
+                unsigned w = st->window_next[i] & 7;
+                st->window_next[i] = (uint8_t)((w + 1) & 7);
+                if (!(st->window_valid & 1u << i) || hash_window_bytes(from + s->plane_from[i], len, w) != st->window_hash[i][w])
+                    changed |= 1u << i;
+            }
         }
         if (!changed) return;
     } else {
         uint64_t hash = guest_hash(s);
-        if (hash == s->content_hash) return;
+        BOOL win_changed = NO;
+        if (s->alloc > PVG_FULL_HASH_MAX) { /* rotating window: a different eighth each sync */
+            unsigned w = s->window_next;
+            uint64_t win = hash_window_bytes(from, s->alloc, w);
+            s->window_next = (uint8_t)((w + 1) & 7);
+            if (s->content_windows_valid && win != s->content_window_hash[w]) win_changed = YES;
+        }
+        if (hash == s->content_hash && !win_changed) return;
         s->content_hash = hash;
     }
     IOSurfaceLock(s->iosurface, 0, NULL);
@@ -966,6 +1042,7 @@ static void sync_iosurface_locked(HvObject *s) {
         for (uint32_t i = 0; i < s->plane_count && i < 4; i++) {
             if (!(changed & 1u << i)) continue;
             have[i] = hashes[i];
+            note_plane_windows(s, i);
             uint8_t *dst = IOSurfaceGetBaseAddressOfPlane(s->iosurface, i);
             size_t dst_row = IOSurfaceGetBytesPerRowOfPlane(s->iosurface, i);
             size_t rows = MIN((size_t)s->plane_h[i], IOSurfaceGetHeightOfPlane(s->iosurface, i));
@@ -978,6 +1055,7 @@ static void sync_iosurface_locked(HvObject *s) {
     } else {
         uint8_t *base = IOSurfaceGetBaseAddress(s->iosurface);
         memcpy(base, from, MIN(s->alloc, IOSurfaceGetAllocSize(s->iosurface)));
+        if (s->alloc > PVG_FULL_HASH_MAX) note_content_windows(s);
     }
     IOSurfaceUnlock(s->iosurface, 0, NULL);
     const char *dump = getenv("HV_PVG_SURFACE_DUMP");
@@ -1021,10 +1099,12 @@ static void write_back_iosurface_locked(HvObject *s) {
         size_t bytes = MIN((size_t)dst_row, src_row);
         for (size_t y = 0; y < rows; y++)
             memcpy(to + dst_off + y * dst_row, src + y * src_row, bytes);
-        s->plane_hash[i] = hash_bytes(to + dst_off, plane_bytes(s, i));
+        s->plane_hash[i] = plane_hash_now(s, i);
+        note_plane_windows(s, i);
     }
     IOSurfaceUnlock(s->iosurface, kIOSurfaceLockReadOnly, NULL);
     s->content_hash = guest_hash(s);
+    if (s->alloc > PVG_FULL_HASH_MAX) note_content_windows(s);
 }
 
 /* A surface (IOSurface in the guest): a texture over its guest pages, so the
@@ -1109,6 +1189,7 @@ static void write_back_iosurface_locked(HvObject *s) {
             CFRelease(made);
             surface->iosurface = (IOSurfaceRef)CFRetain((__bridge CFTypeRef)shared);
             surface->content_hash = guest_hash(surface);
+            if (surface->alloc > PVG_FULL_HASH_MAX) note_content_windows(surface);
             HvPlaneState *state = planar_state[pk];
             os_unfair_lock_lock(&wb_lock);
             surface->planes = state ?: [HvPlaneState new];
