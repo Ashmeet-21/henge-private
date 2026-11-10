@@ -28,10 +28,10 @@ struct MacOSRelease: Identifiable, Hashable {
                      bytes: 16_035 << 20, note: "Recommended: the version Henge is tested with."),
         MacOSRelease(id: "25G83", name: "macOS Tahoe 26.6.2",
                      url: URL(string: "https://updates.cdn-apple.com/2026SummerFCS/fullrestores/140-75212/A2A24B94-1FC1-45A3-93F7-C51B02AF1F4D/UniversalMac_26.6.2_25G83_Restore.ipsw")!,
-                     bytes: 18_856 << 20, note: "Not tested with Henge yet."),
+                     bytes: 18_856 << 20, note: "Installs and runs on iPhone. Its first setup is slow: creating the account can take 10 minutes."),
         MacOSRelease(id: "26B123", name: "macOS 27.2",
                      url: URL(string: "https://updates.cdn-apple.com/2026FallFCS/c9671975-52db-4fb5-9af2-00217169ba8d/UniversalMac_27.2_26B123_Restore.ipsw")!,
-                     bytes: 24_409 << 20, note: "The newest. Not tested with Henge yet."),
+                     bytes: 24_409 << 20, note: "The newest. Installs and runs on iPhone, but it's the slowest here, and Safari's pages may stay blank."),
     ]
 
     /// Selected in the Install tab when nothing is downloaded yet: the one Henge is tested with most.
