@@ -5,6 +5,7 @@
 #include "henge-vm.h"
 
 #include <os/proc.h>
+#include <TargetConditionals.h>
 #include <stdio.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -302,8 +303,6 @@ int henge_vm_snapshot(uint8_t *bgra, int width, int height) {
     pthread_rwlock_unlock(&api_lock);
     return result;
 }
-
-/* Touch reports go through the same running-state lock as the other input calls. */
 void henge_vm_touch(int finger, int phase, int x, int y, uint32_t ts_ms) {
     if (!lock_running()) return;
     hv_vm_touch(finger, phase, x, y, ts_ms);
@@ -351,7 +350,11 @@ int henge_vm_boot_display(const uint8_t **pixels, int *width, int *height, int *
 }
 void henge_vm_free_display(const uint8_t *pixels) { free((void *)pixels); }
 
+#if TARGET_OS_IPHONE
 size_t henge_available_memory(void) { return os_proc_available_memory(); }
+#else
+size_t henge_available_memory(void) { return 0; } /* macOS has no per-app limit (the lifecycle test links this file) */
+#endif
 
 /* The most address space this app can reserve in one piece, in GB (measuring, for a fastmem window): PROT_NONE
    reservations cost no memory, and each is given back at once. */
