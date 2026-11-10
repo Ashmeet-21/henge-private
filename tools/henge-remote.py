@@ -9,7 +9,8 @@
 Click the window to capture the mouse; Left Ctrl + Left Alt lets it go. The protocol is in ios/Henge/RemoteDesktop.swift:
 H.264 Annex-B one way, 6-byte input messages [type][a][x int16 LE][y int16 LE] the other.
 """
-import socket, struct, sys, threading
+import os, socket, struct, sys, threading
+os.environ.setdefault("SDL_RENDER_SCALE_QUALITY", "linear")  # a resized window is filtered, not pixel-doubled unevenly
 import av
 import pygame
 
