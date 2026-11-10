@@ -1,17 +1,27 @@
 import SwiftUI
 import UIKit
 
-/// A surface that works like a Mac's trackpad — it is one: the engine presents it on
+/// A surface that works like a Mac's trackpad: the engine presents it on
 /// the Mac's USB bus as a Magic Trackpad 2, so the Mac's own multitouch engine sees
 /// the fingers: two scroll, three swipe between Spaces and to Mission Control, four
-/// show the session's hidden controls.
+/// show the session's hidden controls. Every contact is forwarded to the emulated
+/// pad exactly as it arrives, in both input modes; nothing below changes that.
 ///
 /// Clicking depends on the input mode (Settings > Trackpad):
-///  - Touchscreen: the surface itself clicks. A quick tap is a left click, a quick
-///    two-finger tap is a right click, and touching then holding presses the button
-///    down so moving drags. These go out as mouse buttons alongside the pad's fingers.
+///  - Touchscreen: the surface itself clicks, through the click language in
+///    GestureEngine (GestureEngine.swift). A quick tap is a left click. A press
+///    held still is a right click: the secondary button goes down when the hold
+///    threshold passes and up when the finger lifts. A double tap whose second
+///    press is held is a grab: the primary button goes down on the second press
+///    itself and up at lift, so moving drags. These go out as mouse buttons
+///    alongside the forwarded contacts; the contacts keep owning pointer motion,
+///    so the engine's own motion actions are never executed here. Two or more
+///    fingers produce no app-side buttons at all: the forwarded contacts carry
+///    the gesture and the guest's trackpad driver owns the result, including
+///    scrolling.
 ///  - Volume buttons: the surface only points and gestures; the clicks live on the
-///    volume keys (VolumeClicks), so a tap here does nothing.
+///    volume keys (VolumeClicks), so a tap here does nothing, and the gesture
+///    engine never runs.
 /// Only fingers count: a real trackpad or mouse goes through HardwareMouse.
 struct Trackpad: UIViewRepresentable {
     /// Four fingers tapped together: the session shows its hidden controls.
@@ -37,11 +47,17 @@ struct Trackpad: UIViewRepresentable {
         private var mostFingers = 0
         private var touchesLogged = 0
 
-        /* Touchscreen-mode clicking. */
-        private var holding = false
-        private var holdTimer: Timer?
+        /* Touchscreen-mode clicking: the gesture engine arbitrates each
+           single-finger contact; this surface executes only its button
+           actions. sessionClicks is the input-mode derivation captured
+           when the current gesture began, so a mode change mid-gesture
+           cannot strand a held button or start the engine mid-contact. */
+        private lazy var engine = GestureEngine(direct: false, holdThreshold: Self.holdTime)
+        private var sessionClicks = false
+        private var gestureTimer: Timer?
         private let buzz = UIImpactFeedbackGenerator(style: .medium)
         private var tapsClick: Bool { VolumeClicks.inputMode == .touchscreen }
+        private var now: TimeInterval { Date().timeIntervalSinceReferenceDate }
 
         override init(frame: CGRect) {
             super.init(frame: frame)
@@ -83,6 +99,7 @@ struct Trackpad: UIViewRepresentable {
                 started = Date()
                 travelled = 0
                 mostFingers = 0
+                sessionClicks = tapsClick
                 if tapsClick { buzz.prepare() }
             }
             for t in touches {
@@ -97,15 +114,14 @@ struct Trackpad: UIViewRepresentable {
                 }
             }
             mostFingers = max(mostFingers, fingers.count)
-            guard tapsClick else { return }
-            if fingers.count >= 2 {
-                cancelHold()
-                if holding { /* a drag becomes a multi-finger gesture */
-                    holding = false
-                    henge_vm_mouse_button(0, 0)
-                }
-            } else {
-                armHold()
+            guard sessionClicks else { return }
+            if fingers.count == 1, let finger = fingers.first {
+                execute(engine.down(kind: .finger, point: finger.touch.location(in: self), time: now))
+            } else if fingers.count >= 2 {
+                /* A second finger ends the click arbitration: any held
+                   button is released first, and the forwarded contacts
+                   carry the gesture from here. */
+                execute(engine.cancelForScroll())
             }
         }
 
@@ -120,8 +136,12 @@ struct Trackpad: UIViewRepresentable {
                 henge_vm_touch(fingers[i].id, 1, x, y, ts)
                 moved = true
             }
-            /* Moving means pointing or a gesture, not a tap or a press-to-drag. */
-            if tapsClick && travelled >= Self.tapDistance && !holding { cancelHold() }
+            /* The single finger's motion feeds the arbitration (stillness
+               is part of the language); the engine's motion actions are
+               dropped, because the forwarded contacts own the pointer. */
+            if sessionClicks, fingers.count == 1, let finger = fingers.first, touches.contains(finger.touch) {
+                execute(engine.move(point: finger.touch.location(in: self), time: now))
+            }
             /* One frame with every finger that moved, so the guest sees a gesture's
                fingers move together rather than one at a time. */
             if moved { henge_vm_touch_frame(ts) }
@@ -141,19 +161,22 @@ struct Trackpad: UIViewRepresentable {
             guard !lifted.isEmpty else { return }
             let ts = Self.ms(touches.map(\.timestamp).max() ?? 0)
             for id in lifted { henge_vm_touch(id, 2, 0, 0, ts) }
+            if sessionClicks, fingers.count == 1, let remaining = fingers.first {
+                /* One finger remains after a multi-finger gesture: it
+                   becomes a pass-through that can never click, hold or
+                   grab, exactly as a leftover finger behaves. */
+                engine.resumeLeftover(point: remaining.touch.location(in: self))
+            }
             guard fingers.isEmpty else { return } /* fingers still down: the gesture goes on */
             /* The whole gesture is over. */
-            if tapsClick {
-                cancelHold()
-                let quick = Date().timeIntervalSince(started) < Self.tapTime
-                let still = travelled < Self.tapDistance
-                if holding {
-                    holding = false
-                    henge_vm_mouse_button(0, 0) /* let go of the drag */
-                } else if quick && still {
-                    if mostFingers == 1 { click(0) }      /* a tap is a left click */
-                    else if mostFingers == 2 { click(1) } /* a two-finger tap is a right click */
-                }
+            if sessionClicks {
+                /* A single finger's lift is the arbitration's last word
+                   (a tap clicks here; a held button releases here). After
+                   a multi-finger gesture the engine is suspended or
+                   holding a pass-through finger, and its lift emits no
+                   buttons; scrollEnded clears the suspension either way. */
+                execute(engine.up(time: now))
+                engine.scrollEnded()
             }
             if mostFingers >= 4, travelled < Self.tapDistance * 3, Date().timeIntervalSince(started) < Self.tapTime * 2 {
                 NotificationCenter.default.post(name: Trackpad.revealTap, object: nil)
@@ -168,22 +191,52 @@ struct Trackpad: UIViewRepresentable {
             buzz.impactOccurred()
         }
 
-        /// A finger that stays put presses the left button down, so moving it drags.
-        private func armHold() {
-            cancelHold()
-            let timer = Timer(timeInterval: Self.holdTime, repeats: false) { [weak self] _ in
-                guard let self, self.fingers.count == 1, self.travelled < Self.tapDistance else { return }
-                self.holding = true
-                henge_vm_mouse_button(0, 1)
-                self.buzz.impactOccurred()
+        // MARK: Engine action execution
+
+        /// Execute only the engine's button actions. Its motion actions
+        /// are dropped on purpose: the forwarded contacts own pointer
+        /// motion on this surface, exactly as the surface's own buttons
+        /// always went out alongside the contacts and never moved the
+        /// pointer. Outcomes need no bridge call here; the gesture-end
+        /// bookkeeping below (reveal, sticky-key release) is unchanged.
+        private func execute(_ actions: [GestureAction]) {
+            for action in actions {
+                switch action {
+                case .buttonDown(let b, _):
+                    henge_vm_mouse_button(b, 1)
+                    buzz.impactOccurred()
+                case .buttonUp(let b):
+                    henge_vm_mouse_button(b, 0)
+                case .click(let b, _):
+                    click(b)
+                case .moveAbs, .moveRel, .ended:
+                    break
+                }
             }
-            RunLoop.main.add(timer, forMode: .common)
-            holdTimer = timer
+            refreshGestureTimer()
         }
 
-        private func cancelHold() {
-            holdTimer?.invalidate()
-            holdTimer = nil
+        /// Arm the one-shot timer that lets a still press cross the
+        /// engine's hold threshold (the right click) with no event.
+        private func refreshGestureTimer() {
+            gestureTimer?.invalidate()
+            gestureTimer = nil
+            guard sessionClicks, let deadline = engine.nextTickDeadline else { return }
+            let timer = Timer(timeInterval: max(deadline - now, 0), repeats: false) { [weak self] _ in
+                guard let self, self.sessionClicks else { return }
+                self.execute(self.engine.tick(time: self.now))
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            gestureTimer = timer
+        }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard window == nil else { return }
+            /* A layout rebuild must not strand a held button in the guest. */
+            if sessionClicks { execute(engine.cancelAll()) }
+            gestureTimer?.invalidate()
+            gestureTimer = nil
         }
     }
 }

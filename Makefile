@@ -214,3 +214,12 @@ $(B)/test_jit_advice: ios/Henge/JIT/JITNetworkAdvice.swift tests/test_jit_advice
 test-jit-advice: $(B)/test_jit_advice
 	$(B)/test_jit_advice
 .PHONY: test-jit-advice
+
+# Click language: the shipped GestureEngine.swift compiled unchanged,
+# exercised headlessly over the click arbitration streams.
+$(B)/test_gesture_engine: ios/Henge/GestureEngine.swift tests/test_gesture_engine.swift | $(B)
+	xcrun --sdk macosx swiftc $^ -o $@
+
+test-gesture-engine: $(B)/test_gesture_engine
+	$(B)/test_gesture_engine
+.PHONY: test-gesture-engine
