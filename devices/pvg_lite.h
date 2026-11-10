@@ -29,6 +29,8 @@ uint32_t hv_pvg_lite_task_page(HvPvgLite *p, uint32_t task, uint64_t offset);
 uint8_t *hv_pvg_lite_page(HvPvgLite *p, uint32_t guest_page);
 void *hv_pvg_lite_phys(HvPvgLite *p, uint64_t pa, uint64_t length);
 uint64_t hv_pvg_lite_task_objects(HvPvgLite *p, uint32_t task);
+/* The guest's GPU driver is an older one (macOS 14 seen): no object list command, compact surface descriptions. */
+int hv_pvg_lite_old_driver(HvPvgLite *p);
 /* A surface's descriptor (1 KB), or NULL if the mapper has none for it. */
 const uint8_t *hv_pvg_lite_surface(HvPvgLite *p, uint32_t mapping);
 void hv_pvg_metal_unmap(HvPvgMetal *m, uint32_t mapping);
