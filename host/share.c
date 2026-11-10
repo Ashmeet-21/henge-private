@@ -621,9 +621,15 @@ static const char lighten_script[] =
     "defaults -currentHost write com.apple.screensaver idleTime -int 0 </dev/null\n"
     "defaults write com.apple.WindowManager StandardHideWidgets -int 1 </dev/null\n"
     "defaults write com.apple.WindowManager StageManagerHideWidgets -int 1 </dev/null\n"
+    /* Only a moving wallpaper (an aerial video, decoded by the emulated CPUs) is swapped for a still one; a picture
+       or a colour costs nothing once drawn, so it stays. The Desktop entries of the wallpaper store say which
+       (macOS 14 and later; the Idle entries are the screen saver's, aerial or not). */
+    "S=\"$HOME/Library/Application Support/com.apple.wallpaper/Store/Index.plist\"\n"
+    "MOVING=$(plutil -p \"$S\" 2>/dev/null </dev/null | awk '/\"Desktop\" =>/{d=1} /\"Idle\" =>/{d=0} d && /Provider/ && /aerial/{m=1} END{print m+0}')\n"
     "W=\"/System/Library/Desktop Pictures/Solid Colors/Black.png\"\n"
     "[ -f \"$W\" ] || W=$(ls \"/System/Library/Desktop Pictures/Solid Colors/\"*.png 2>/dev/null | head -1)\n"
-    "if [ -n \"$W\" ]; then\n"
+    "if [ \"$MOVING\" = 1 ] && [ -n \"$W\" ]; then\n"
+    "  echo '  The wallpaper moves: a still one instead.'\n"
     "  osascript -l JavaScript - \"$W\" >/dev/null 2>&1 <<'JS'\n"
     "ObjC.import('AppKit');\n"
     "function run(argv) {\n"
@@ -634,7 +640,7 @@ static const char lighten_script[] =
     "JS\n"
     "fi\n"
     "killall Dock 2>/dev/null\n"
-    "echo 'Done: window and Dock animations, desktop widgets, the screen saver and a moving wallpaper are off.'\n"
+    "echo 'Done: window and Dock animations, desktop widgets, the screen saver and a moving wallpaper are off (a still wallpaper stays).'\n"
     "echo 'Also turn on Reduce Motion and Reduce Transparency: System Settings, Accessibility.'\n"
     "echo 'Log out and back in for all of it to take effect. To undo: curl -s http://" HV_SHARE_ADDR "/.henge/unlighten | sh'\n";
 

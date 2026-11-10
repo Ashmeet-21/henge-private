@@ -41,6 +41,8 @@ sock = socket.create_connection((host, int(port or 15901)))
 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 if code:
     sock.sendall(code.encode()[:6].rjust(6, b"0"))
+_name = socket.gethostname().split(".")[0].encode()[:63]  # what the phone shows it's streaming to
+sock.sendall(struct.pack("<BBhh", 5, len(_name), 0, 0) + _name)
 send_lock = threading.Lock()
 
 

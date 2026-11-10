@@ -7,7 +7,8 @@ import QuartzCore
 
 /// Remote desktop: the Mac's screen through the phone's hardware H.264 encoder to one client on port 5901,
 /// as a raw Annex-B stream, and the client's mouse and keyboard back as 6-byte messages:
-/// [type][a][x: Int16 LE][y: Int16 LE], type 1 move (x, y), 2 button (a, x = down), 3 scroll (x, y), 4 key (a = HID usage, x = down).
+/// [type][a][x: Int16 LE][y: Int16 LE], type 1 move (x, y), 2 button (a, x = down), 3 scroll (x, y), 4 key (a = HID usage, x = down),
+/// 5 the computer's name (a = its length in bytes, which follow the message; shown instead of its address).
 /// The client is tools/henge-remote.py; over USB, `iproxy 15901:5901` on the computer. `ffplay tcp://…` shows the picture alone.
 /// Only USB clients by default. With Wi-Fi allowed, a network client must first send the 6-digit code shown on the phone.
 final class RemoteDesktop: ObservableObject {
@@ -423,6 +424,14 @@ final class RemoteDesktop: ObservableObject {
         var at = 0
         while at + 6 <= inbox.count {
             let type = inbox[at], a = inbox[at + 1]
+            if type == 5 { // the computer's name: a bytes after the message
+                guard at + 6 + Int(a) <= inbox.count else { break }
+                let raw = String(decoding: inbox[(at + 6)..<(at + 6 + Int(a))], as: UTF8.self)
+                let name = String(raw.filter { !$0.isNewline && ($0.asciiValue ?? 32) >= 32 }.prefix(63)) // no control characters
+                at += 6 + Int(a)
+                if !name.isEmpty { DispatchQueue.main.async { self.client = name } }
+                continue
+            }
             let x = Int32(Int16(bitPattern: UInt16(inbox[at + 2]) | UInt16(inbox[at + 3]) << 8))
             let y = Int32(Int16(bitPattern: UInt16(inbox[at + 4]) | UInt16(inbox[at + 5]) << 8))
             at += 6
