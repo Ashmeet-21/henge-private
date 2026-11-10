@@ -741,16 +741,30 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
 /* A multi-plane surface as a real IOSurface, laid out as the guest laid it out.
    Planes are in the descriptor from +0x80, 0x80 apart: offset +8, size +0x18,
    width +0x20, height +0x28, row +0x30, bytes per element +0x38. */
-static IOSurfaceRef make_iosurface(HvObject *to, const uint8_t *desc, uint64_t alloc) {
+/* compact: macOS 14's description, 0x40 bytes of header then 0x40 a plane: offset +0x0c, size +0x10, width and height
+   << 8 at +0x14 and +0x18, row +0x1c, bytes per element +0x20 (x420 3840x2160: luma at 0x200, 8000-byte rows, 2 bytes;
+   chroma at 0x1194400, 1920x1080, 4 bytes). The plane count is the u32 at +0x24. */
+static IOSurfaceRef make_iosurface(HvObject *to, const uint8_t *desc, uint64_t alloc, BOOL compact) {
     uint32_t fourcc, planes = desc[0x3e];
     uint64_t width, height;
     memcpy(&fourcc, desc + 4, 4), memcpy(&width, desc + 0x20, 8), memcpy(&height, desc + 0x28, 8);
+    if (compact) {
+        uint32_t w32, h32;
+        memcpy(&w32, desc + 0x14, 4), memcpy(&h32, desc + 0x18, 4), memcpy(&planes, desc + 0x24, 4);
+        width = w32 >> 8, height = h32 >> 8;
+    }
     NSMutableArray *info = [NSMutableArray new], *plain = [NSMutableArray new];
     uint64_t at = 0;
     for (uint32_t i = 0; i < planes && i < 4; i++) {
         const uint8_t *pl = desc + 0x80 + i * 0x80;
         uint64_t off, size, w, h, row;
         uint16_t bpe;
+        if (compact) {
+            const uint8_t *cp = desc + 0x40 + i * 0x40;
+            uint32_t v[6];
+            memcpy(v, cp + 0x0c, sizeof v); /* offset, size, width << 8, height << 8, row, bytes per element */
+            off = v[0], size = v[1], w = v[2] >> 8, h = v[3] >> 8, row = v[4], bpe = (uint16_t)v[5];
+        } else
         memcpy(&off, pl + 8, 8), memcpy(&size, pl + 0x18, 8), memcpy(&w, pl + 0x20, 8), memcpy(&h, pl + 0x28, 8), memcpy(&row, pl + 0x30, 8), memcpy(&bpe, pl + 0x38, 2);
         [info addObject:@{(__bridge id)kIOSurfacePlaneWidth: @(w), (__bridge id)kIOSurfacePlaneHeight: @(h), (__bridge id)kIOSurfacePlaneBytesPerRow: @(row),
                           (__bridge id)kIOSurfacePlaneOffset: @(off), (__bridge id)kIOSurfacePlaneSize: @(size), (__bridge id)kIOSurfacePlaneBytesPerElement: @(bpe),
@@ -897,7 +911,9 @@ static void sync_iosurface(HvObject *s) {
        macOS 14's driver writes a compact one: u32 allocation at 0x10, width and height << 8 at 0x14 and 0x18, u32 row
        at 0x1c, bytes per pixel at 0x20 (BGRA 1920x1080: 007ec000 00078080 00043880 00001e00 00000004); one plane. */
     BOOL compact = hv_pvg_lite_old_driver(lite) != 0;
-    uint8_t planes = compact ? 1 : desc[0x3e];
+    uint32_t compact_planes = 1;
+    if (compact) memcpy(&compact_planes, desc + 0x24, 4);
+    uint8_t planes = compact ? (uint8_t)MIN(MAX(compact_planes, 1u), 4u) : desc[0x3e];
     memcpy(&list, desc, 4), memcpy(&alloc, desc + 0x18, 8), memcpy(&row, desc + 0x30, 8), memcpy(&first, desc + 0x60, 4);
     if (compact) {
         uint32_t a32, r32;
@@ -939,7 +955,7 @@ static void sync_iosurface(HvObject *s) {
     surfaces[key] = surface;
     if (planes >= 2) {
         surface->alloc = alloc;
-        IOSurfaceRef made = make_iosurface(surface, desc, alloc);
+        IOSurfaceRef made = make_iosurface(surface, desc, alloc, compact);
         /* The same guest memory, format and size under another mapping id (another process): the same host
            IOSurface, or what that process drew is not what this one sees. Its pixels are already there (or
            drawn over since), so they are not copied again now. */
