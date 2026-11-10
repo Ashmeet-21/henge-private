@@ -82,6 +82,7 @@ struct HvPvgLite {
     uint64_t task_objects[512], task_placement[512]; /* task offsets of its object lists */
     uint8_t obj_seen[512][8192];
     int tally;
+    uint32_t proto_cap; /* the newest protocol answered at +1034 (0: whatever the driver offers) */
     uint64_t counts[6][256];
     uint64_t execs, bad;
     double last_tally;
@@ -716,6 +717,16 @@ static void gfx_write(void *opaque, uint64_t off, uint64_t v, unsigned size) {
     HvPvgLite *p = opaque;
     (void)size;
     if (off >= 0x1000 && off < 0x2000) p->regs[(off - 0x1000) / 4] = (uint32_t)v;
+    if (off == 0x1034) {
+        /* The driver offers the newest protocol it has and takes the answer. From 8 on its Metal half
+           ("supportsCorrectBaseVertex") sends indexed draws as records 28 and 29, and in 28, the wide one, it
+           cuts the base vertex to 16 bits (macOS 15.6.1, -[PGSerializerRenderCommandEncoder
+           drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:instanceCount:baseVertex:baseInstance:]:
+           and x8, x8, #0xffff): a mesh past vertex 65535 of its buffer is then drawn from 65536 vertices
+           before it. With 7 it sends records 10 and 11, which carry the base vertex whole. */
+        if (p->proto_cap && v > p->proto_cap) p->regs[(0x1034 - 0x1000) / 4] = p->proto_cap;
+        fprintf(stderr, "hengevm: pvg-lite: the driver offers protocol %llu, answered %u\n", (unsigned long long)v, p->regs[(0x1034 - 0x1000) / 4]);
+    }
     /* Doorbells are answered here, on the CPU that rang: no waiting for CPU 0 to come by. */
     if (off == 0x1008) {
         do_root(p);
@@ -753,6 +764,7 @@ HvPvgLite *hv_pvg_lite_create(HvMachine *m, HvGic *gic, uint64_t gfx_pa, uint64_
     p->iosfc_irq = iosfc_irq;
     p->log = getenv("HV_PVG_LITE_LOG") != NULL;
     p->tally = getenv("HV_PVG_TALLY") != NULL;
+    p->proto_cap = getenv("HV_PVG_PROTOCOL") ? (uint32_t)atoi(getenv("HV_PVG_PROTOCOL")) : 7; /* HV_PVG_PROTOCOL=0: no cap */
     hv_machine_add_mmio(m, gfx_pa, 0x10000, p, gfx_read, gfx_write, "gfx");
     hv_machine_add_mmio(m, iosfc_pa, 0x10000, p, iosfc_read, iosfc_write, "iosurface");
     return p;
