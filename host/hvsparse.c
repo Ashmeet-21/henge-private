@@ -60,16 +60,28 @@ static int all_zero(const uint8_t *p, size_t n) {
     return 1;
 }
 
+/* Check the opened files, since different paths can name the same disk image. */
+static int open_output(const char *path, const struct stat *input) {
+    int fd = open(path, O_WRONLY | O_CREAT, 0644);
+    if (fd < 0) return -1;
+    struct stat output;
+    if (fstat(fd, &output) != 0 ||
+        (output.st_dev == input->st_dev && output.st_ino == input->st_ino) ||
+        ftruncate(fd, 0) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
 int hv_sparse_pack_progress(const char *src, const char *dst, void (*progress)(uint64_t, uint64_t, void *), void *opaque) {
     int in = open(src, O_RDONLY), out = -1;
     struct stat st;
     uint8_t *buf = malloc(CHUNK);
     int rc = -1;
     if (in < 0 || fstat(in, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 || !buf) goto done;
-    out = open(dst, O_WRONLY | O_CREAT, 0644);
+    out = open_output(dst, &st);
     if (out < 0) goto done;
-    struct stat dst_st;
-    if (fstat(out, &dst_st) != 0 || (st.st_dev == dst_st.st_dev && st.st_ino == dst_st.st_ino) || ftruncate(out, 0) != 0) goto done;
     uint64_t size = (uint64_t)st.st_size;
     if (write_all(out, "HVSPARSE", 8) || write_all(out, &size, 8)) goto done;
     /* Walk the data runs (SEEK_DATA/SEEK_HOLE), and skip zero chunks inside them too. */
@@ -114,17 +126,15 @@ int hv_sparse_pack(const char *src, const char *dst) { return hv_sparse_pack_pro
 
 int hv_sparse_unpack(const char *src, const char *dst, void (*progress)(uint64_t, uint64_t, void *), void *opaque) {
     int in = open(src, O_RDONLY), out = -1;
+    struct stat st;
     uint8_t *buf = malloc(CHUNK);
     int rc = -1;
     char magic[8];
     uint64_t size;
-    if (in < 0 || !buf || read_all(in, magic, 8) || memcmp(magic, "HVSPARSE", 8) || read_all(in, &size, 8)) goto done;
-    struct stat st, dst_st;
-    if (fstat(in, &st) != 0) goto done;
-    out = open(dst, O_WRONLY | O_CREAT, 0644);
-    if (out < 0 || fstat(out, &dst_st) != 0 || (st.st_dev == dst_st.st_dev && st.st_ino == dst_st.st_ino)) goto done;
+    if (in < 0 || fstat(in, &st) != 0 || !buf || read_all(in, magic, 8) || memcmp(magic, "HVSPARSE", 8) || read_all(in, &size, 8)) goto done;
     if (size > (uint64_t)INT64_MAX) goto done;
-    if (ftruncate(out, 0) != 0) goto done;
+    out = open_output(dst, &st);
+    if (out < 0) goto done;
     if (ftruncate(out, (off_t)size) != 0) goto done; /* the holes stay holes */
     for (;;) {
         uint64_t rec[2];

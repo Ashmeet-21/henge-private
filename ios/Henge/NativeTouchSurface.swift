@@ -59,7 +59,7 @@ struct NativeTouchSurface: UIViewRepresentable {
 
         @objc private func revealControls() {
             cancel()
-            NotificationCenter.default.post(name: Trackpad.threeFingerTap, object: nil)
+            NotificationCenter.default.post(name: Trackpad.revealTap, object: nil)
         }
 
         override func didMoveToWindow() {

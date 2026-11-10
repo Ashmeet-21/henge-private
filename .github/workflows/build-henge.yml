@@ -13,6 +13,7 @@
 
 name: Build Henge IPA
 
+# Manual only (Actions tab > Build Henge IPA > Run workflow): pushes to main don't build an IPA.
 on:
   # This fork builds with build-ipa.yml on push; this one only by hand (a private repo's macOS minutes count 10x).
   workflow_dispatch: {}

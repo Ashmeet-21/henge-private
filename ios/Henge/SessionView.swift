@@ -33,6 +33,8 @@ struct SessionView: View {
     @State private var showRevealHint = false
     @State private var pointerRefused = false
     @AppStorage("henge.controls.hintsShown") private var revealHintsShown = 0
+    @AppStorage(VolumeClicks.inputModeKey) private var inputMode = VolumeClicks.InputMode.touchscreen
+    @AppStorage(VolumeClicks.modeKey) private var volumeMode = VolumeClicks.Mode.delayHold
     /// Once per install: macOS's moving wallpapers and aerial screen saver are video, decoded by the emulated
     /// CPUs (a phone ran about 30% faster with a still one).
     @AppStorage("henge.tips.stillWallpaperShown") private var stillWallpaperTipShown = false
@@ -92,6 +94,13 @@ struct SessionView: View {
                 }
                 .frame(width: layout.touch.width, height: layout.touch.height)
                 .position(x: layout.touch.midX, y: layout.touch.midY)
+                if inputMode == .volumeButtons && volumeMode == .intercept {
+                    // The capture interaction must live in the SwiftUI hierarchy to receive
+                    // the volume-button events; it passes touches through to the trackpad.
+                    CaptureInteractionView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .allowsHitTesting(false)
+                }
                 if !layout.fillsPhone {
                     uprightControls(layout)
                 } else {
@@ -108,7 +117,7 @@ struct SessionView: View {
                         .allowsHitTesting(false)
                 }
                 if showRevealHint {
-                    Label("Tap with three fingers to show the controls", systemImage: "hand.tap")
+                    Label("Tap with four fingers to show the controls", systemImage: "hand.tap")
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 18).padding(.vertical, 12)
@@ -145,7 +154,7 @@ struct SessionView: View {
             .onReceive(NotificationCenter.default.publisher(for: .GCMouseDidConnect)) { _ in
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { pointerRefused = PointerLock.refused }
             }
-            .onReceive(NotificationCenter.default.publisher(for: Trackpad.threeFingerTap)) { _ in
+            .onReceive(NotificationCenter.default.publisher(for: Trackpad.revealTap)) { _ in
                 controlsHidden = false
                 showRevealHint = false
             }
@@ -185,6 +194,7 @@ struct SessionView: View {
             nativeTouch.stop()
             HardwareKeys.releaseAll()
             HardwareMouse.shared.releaseButtons()
+            VolumeClicks.shared.releaseButtons()
             BackgroundKeeper.leaving(toBackground: phase == .background) // the Mac lives on, paused or slowed
         }
         .onChange(of: showDetails) { showing in
@@ -196,6 +206,7 @@ struct SessionView: View {
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true
             HardwareMouse.shared.start()
+            VolumeClicks.shared.start()
         }
         .onDisappear {
             nativeTouch.stop()
@@ -205,6 +216,7 @@ struct SessionView: View {
             StickyKeys.shared.releaseAll()
             HardwareKeys.releaseAll()
             HardwareMouse.shared.stop()
+            VolumeClicks.shared.stop()
         }
         .modifier(ExternalMacDisplayModifier(presentation: MacPresentation(display: display, aspect: mac.aspect)))
         .task { await run() }
@@ -366,7 +378,7 @@ struct SessionView: View {
         .tint(Desk.raised)
     }
 
-    /// Hides the session's controls; three fingers on the screen bring them back. The first few times say so.
+    /// Hides the session's controls; four fingers on the screen bring them back. The first few times say so.
     private func hideControls() {
         controlsHidden = true
         typing = false
