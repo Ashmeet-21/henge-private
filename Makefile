@@ -154,12 +154,20 @@ $(IB)/libhengevm.a: $(IOS_OBJ)
 # The translation layer (tl/) for the app's experimental Mac apps: its loader and disk-image reader, not the toy AppKit.
 TL_SRC = tl/loader/tl_loader.c tl/loader/tl_bundle.m tl/loader/tl_stubs.m tl/loader/tl_tlv.S tl/dmg/udif.c tl/dmg/volume.c tl/dmg/hfsplus.c tl/dmg/apfs.c tl/dmg/appinfo.c
 TL_IOS_OBJ = $(patsubst %,$(IB)/%.o,$(TL_SRC))
-$(IB)/tl/%.o: tl/% tl/loader/*.h tl/dmg/*.h
+# Henge's AppKit, for Mac apps with windows, and the table of its C symbols (made from these objects).
+TL_SHIM = $(wildcard tl/shim/appkit/*.m)
+TL_SHIM_IOS_OBJ = $(patsubst %,$(IB)/%.o,$(TL_SHIM))
+$(IB)/tl/%.o: tl/% tl/loader/*.h tl/dmg/*.h tl/shim/appkit/*.h
 	@mkdir -p $(dir $@)
 	$(IOS_CC) -O2 -g -Wall -Wno-unused-parameter -fblocks $(if $(filter %.m,$<),-fobjc-arc) -c $< -o $@
-$(IB)/libhengetl.a: $(TL_IOS_OBJ)
+$(IB)/tl/shim/hk_symbols.c: $(TL_SHIM_IOS_OBJ) tl/shim/tools/hk_symbols.sh
+	@mkdir -p $(dir $@)
+	tl/shim/tools/hk_symbols.sh $@ $(TL_SHIM_IOS_OBJ)
+$(IB)/tl/shim/hk_symbols.o: $(IB)/tl/shim/hk_symbols.c
+	$(IOS_CC) -c $< -o $@
+$(IB)/libhengetl.a: $(TL_IOS_OBJ) $(TL_SHIM_IOS_OBJ) $(IB)/tl/shim/hk_symbols.o
 	rm -f $@
-	xcrun --sdk iphoneos libtool -static -o $@ $(TL_IOS_OBJ)
+	xcrun --sdk iphoneos libtool -static -o $@ $(TL_IOS_OBJ) $(TL_SHIM_IOS_OBJ) $(IB)/tl/shim/hk_symbols.o
 ios-lib: $(IB)/libhengevm.a $(IB)/libhengetl.a
 .PHONY: ios-lib
 
@@ -167,6 +175,15 @@ ios-lib: $(IB)/libhengevm.a $(IB)/libhengetl.a
 $(B)/test_tl_glue: tests/test_tl_glue.c ios/Henge/Native/henge-tl.c $(TL_SRC) host/jit_region.c | $(B)
 	$(CC) $(CFLAGS) -fblocks -Iios/Henge/Native tests/test_tl_glue.c ios/Henge/Native/henge-tl.c $(filter-out %.m,$(TL_SRC)) host/jit_region.c \
 	  -x objective-c -fobjc-arc tl/loader/tl_bundle.m tl/loader/tl_stubs.m -framework Foundation -lz -lbz2 -lcompression -o $@
+# The glue for Mac apps with windows (ios/Henge/Native/henge-tl-app.m) on the Mac, against Henge's AppKit as tl/
+# builds it: test_tl_app APP SNAPDIR [SECONDS] runs the app and draws its windows to PNG files.
+$(B)/test_tl_app: tests/test_tl_app.m ios/Henge/Native/henge-tl-app.m ios/Henge/Native/henge-tl.c $(TL_SRC) host/jit_region.c tl/shim/appkit/*.m tl/shim/appkit/*.h | $(B)
+	$(MAKE) -C tl build/tlios
+	$(CC) $(CFLAGS) -fblocks -Iios/Henge/Native tests/test_tl_app.m -x objective-c -fobjc-arc ios/Henge/Native/henge-tl-app.m -x none \
+	  ios/Henge/Native/henge-tl.c $(filter-out %.m,$(TL_SRC)) host/jit_region.c -x objective-c -fobjc-arc tl/loader/tl_bundle.m tl/loader/tl_stubs.m -x none \
+	  tl/build/shim/*.o tl/build/shim/hk_symbols.c -framework Foundation -framework QuartzCore -framework Metal -framework CoreGraphics \
+	  -framework CoreText -framework ImageIO -framework IOSurface -framework CoreVideo -framework UniformTypeIdentifiers \
+	  -lz -lbz2 -lcompression -o $@
 # Sample Mac programs for the app's Mac apps screen, as a disk image (read by the same import path as anyone's).
 $(B)/tl-samples.dmg: tests/tl/exit3.c tl/tests/hello.c tl/tests/fnd.m tl/tests/swifty.swift tl/tests/cxx.cpp tl/tests/fw.m tl/tests/fwapp.m | $(B)
 	make -C tl build/hello build/fnd build/swifty build/cxx build/FW.app/Contents/MacOS/fwapp

@@ -68,7 +68,8 @@ struct TlImage {
 };
 
 static TlHost *g_host;
-uint64_t tl_missing_data(const char *sym); /* tl_stubs.m */
+uint64_t tl_missing_data(const char *sym);     /* tl_stubs.m: a stand-in if the name says it is data */
+uint64_t tl_missing_data_any(const char *sym); /* tl_stubs.m: a stand-in for something known to be data */
 void *tl_runtime_lookup(const char *symbol);
 static TlImage *g_images, *g_main;
 static TlImage *g_order[1024]; /* every image, in the order it was loaded */
@@ -542,6 +543,7 @@ static uint64_t host_symbol(void *handle, const char *install_name, const char *
         if (s) { *found = 1; return (uint64_t)s; }
     }
     if (!handle || sym[0] != '_') return 0;
+    if (g_host->host_lacks && g_host->host_lacks(install_name ? install_name : "", sym)) return 0;
     void *s = dlsym(handle, sym + 1);
     if (s) *found = 1;
     return (uint64_t)s;
@@ -573,12 +575,18 @@ static uint64_t resolve_in_dep(TlImage *im, int ordinal, const char *sym, int *f
 
 static void tl_stub_binder(void) { abort(); } /* old binaries name it; every lazy pointer is bound up front here */
 
+/* While binding: whether the import being bound is reached through the image's call stubs (1, a function), never
+   (2, data or a function taken by address), or unknown (0). Soft missing symbols use it to pick a stand-in. */
+static int g_bind_kind;
+
 static int resolve_import(TlImage *im, int ordinal, const char *sym, int weak, uint64_t *out, char *err, size_t errlen) {
     if (!strcmp(sym, "dyld_stub_binder")) { *out = (uint64_t)&tl_stub_binder; return 0; }
     int found = 0;
     uint64_t v = resolve_in_dep(im, ordinal, sym, &found);
     if (found) { *out = v; return 0; }
-    if (weak) { *out = 0; return 0; }
+    /* A missing weak import is normally 0, for code that tests its address. Soft: a stand-in like any other, since
+       code that checks the OS version instead (@available, and the host here is new) would use 0 and crash. */
+    if (weak && !g_host->soft_missing) { *out = 0; return 0; }
     const char *lib = ordinal >= 1 && ordinal <= im->ndeps ? im->deps[ordinal - 1].install_name : "(flat)";
     if (g_host->strict) {
         set_err(err, errlen, "%s: %s is missing from %s", im->path, sym, lib);
@@ -586,7 +594,7 @@ static int resolve_import(TlImage *im, int ordinal, const char *sym, int weak, u
     }
     if (g_host->verbose) tl_log("%s: %s missing from %s, bound to a stub", im->path, sym, lib);
     if (g_host->soft_missing) {
-        uint64_t data = tl_missing_data(sym); /* tl_stubs.m: a class or constant gets a stand-in */
+        uint64_t data = g_bind_kind == 2 ? tl_missing_data_any(sym) : tl_missing_data(sym); /* tl_stubs.m */
         if (data) {
             if (g_nmissing < (int)(sizeof g_missing / sizeof *g_missing)) g_missing[g_nmissing++] = strdup(sym);
             *out = data;
@@ -599,6 +607,59 @@ static int resolve_import(TlImage *im, int ordinal, const char *sym, int weak, u
 
 /* ---- fixups ---- */
 
+static uint8_t *find_section(TlImage *im, const char *seg, const char *name, uint64_t *size);
+
+static int cmp_u64(const void *a, const void *b) {
+    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return x < y ? -1 : x > y;
+}
+
+/* Which imports the image calls through its stubs (adrp x16; ldr x16, [x16, #slot]; br x16): a flag per import,
+   from the pointer slots the stubs load and the chains that bind those slots. NULL if it cannot tell. */
+static uint8_t *called_imports(TlImage *im, const struct dyld_chained_fixups_header *h, const uint8_t *data) {
+    uint64_t size = 0;
+    uint8_t *stubs = find_section(im, "__TEXT", "__stubs", &size);
+    if (!stubs || size < 12) return NULL;
+    size_t n = size / 12, m = 0;
+    uint64_t *slots = malloc(n * sizeof *slots);
+    for (size_t k = 0; k < n; k++) {
+        const uint32_t *w = (const uint32_t *)(stubs + 12 * k);
+        if ((w[0] & 0x9F00001Fu) != 0x90000010u || (w[1] & 0xFFC003FFu) != 0xF9400210u) continue;
+        int64_t imm = (int64_t)((((w[0] >> 5) & 0x7FFFF) << 2) | ((w[0] >> 29) & 3));
+        if (imm & (1 << 20)) imm -= 1 << 21;
+        uint64_t page = ((uint64_t)(stubs + 12 * k) & ~0xFFFull) + (uint64_t)(imm << 12);
+        slots[m++] = page + ((w[1] >> 10) & 0xFFF) * 8;
+    }
+    if (!m) { free(slots); return NULL; }
+    qsort(slots, m, sizeof *slots, cmp_u64);
+    uint8_t *called = calloc(h->imports_count ? h->imports_count : 1, 1);
+    const struct dyld_chained_starts_in_image *starts = (const void *)(data + h->starts_offset);
+    for (uint32_t s = 0; s < starts->seg_count; s++) {
+        if (!starts->seg_info_offset[s]) continue;
+        const struct dyld_chained_starts_in_segment *seg = (const void *)((const uint8_t *)starts + starts->seg_info_offset[s]);
+        if (seg->pointer_format != DYLD_CHAINED_PTR_64 && seg->pointer_format != DYLD_CHAINED_PTR_64_OFFSET) continue;
+        for (uint32_t pg = 0; pg < seg->page_count; pg++) {
+            uint16_t off = seg->page_start[pg];
+            if (off == DYLD_CHAINED_PTR_START_NONE) continue;
+            uint8_t *loc = im->base + seg->segment_offset + (uint64_t)pg * seg->page_size + off;
+            for (;;) {
+                uint64_t raw;
+                memcpy(&raw, loc, 8);
+                if (raw >> 63) {
+                    uint32_t ordinal = raw & 0xFFFFFF;
+                    uint64_t at = (uint64_t)loc;
+                    if (ordinal < h->imports_count && bsearch(&at, slots, m, sizeof *slots, cmp_u64)) called[ordinal] = 1;
+                }
+                uint64_t next = (raw >> 51) & 0xFFF;
+                if (!next) break;
+                loc += next * 4;
+            }
+        }
+    }
+    free(slots);
+    return called;
+}
+
 static int fixup_chained(TlImage *im, char *err, size_t errlen) {
     const uint8_t *data = im->slice + im->chained->dataoff;
     const struct dyld_chained_fixups_header *h = (const void *)data;
@@ -609,6 +670,7 @@ static int fixup_chained(TlImage *im, char *err, size_t errlen) {
     uint64_t *targets = calloc(h->imports_count ? h->imports_count : 1, sizeof *targets);
     const char *syms = (const char *)data + h->symbols_offset;
     const uint8_t *imp = data + h->imports_offset;
+    uint8_t *called = g_host->soft_missing ? called_imports(im, h, data) : NULL;
     for (uint32_t i = 0; i < h->imports_count; i++) {
         int ordinal, weak;
         uint32_t name_off;
@@ -631,9 +693,13 @@ static int fixup_chained(TlImage *im, char *err, size_t errlen) {
             return -1;
         }
         uint64_t v;
-        if (resolve_import(im, ordinal, syms + name_off, weak, &v, err, errlen)) { free(targets); return -1; }
+        g_bind_kind = called ? (called[i] ? 1 : 2) : 0;
+        int rc = resolve_import(im, ordinal, syms + name_off, weak, &v, err, errlen);
+        g_bind_kind = 0;
+        if (rc) { free(targets); free(called); return -1; }
         targets[i] = v ? v + (uint64_t)addend : 0;
     }
+    free(called);
     const struct dyld_chained_starts_in_image *starts = (const void *)(data + h->starts_offset);
     for (uint32_t s = 0; s < starts->seg_count; s++) {
         if (!starts->seg_info_offset[s]) continue;
@@ -1215,6 +1281,10 @@ static void *rt_dlsym(void *handle, const char *name) {
             void *s = g_host->shim_lookup("", sym);
             if (s) return s;
         }
+        if (g_host->host_lacks && g_host->host_lacks("", sym)) {
+            rt_set_dlerror("%s: symbol not found", name);
+            return NULL;
+        }
         return dlsym(RTLD_DEFAULT, name);
     }
     return dlsym(handle, name);
@@ -1291,11 +1361,13 @@ static int rt_refuse(void) {
 }
 
 static int rt_posix_spawn(pid_t *pid, const char *path, const void *fa, const void *attr, char *const argv[], char *const envp[]) {
+    (void)pid, (void)fa, (void)attr, (void)argv, (void)envp;
     tl_log("the program tried to start another process: %s (refused, as on iOS)", path ? path : "?");
     return EPERM;
 }
 
 static int rt_execve(const char *path, char *const argv[], char *const envp[]) {
+    (void)argv, (void)envp;
     tl_log("the program tried to exec %s (refused, as on iOS)", path ? path : "?");
     return rt_refuse();
 }

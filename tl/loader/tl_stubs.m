@@ -82,3 +82,16 @@ uint64_t tl_missing_data(const char *sym) {
     }
     return 0;
 }
+
+/* For an import known to be data (the program never calls it): a class or ivar as above; anything else a string of
+   its own name, which is what most constants of Apple's libraries are (keys, notification names, error domains). */
+uint64_t tl_missing_data_any(const char *sym) {
+    uint64_t known = tl_missing_data(sym);
+    if (known) return known;
+    if (sym[0] != '_') return 0;
+    @autoreleasepool {
+        void **slot = calloc(1, 64);
+        *slot = (void *)CFBridgingRetain([[NSString alloc] initWithUTF8String:sym + 1]);
+        return (uint64_t)slot;
+    }
+}

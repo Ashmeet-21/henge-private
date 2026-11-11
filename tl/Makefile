@@ -10,7 +10,7 @@ TESTS = $(B)/hello $(B)/hello-opcodes $(B)/fnd $(B)/fnd-opcodes $(B)/swifty $(B)
 
 DMG = dmg/udif.c dmg/volume.c dmg/hfsplus.c dmg/apfs.c dmg/appinfo.c
 
-all: $(B)/tlrun $(B)/tlrun-mini $(B)/tldmg $(TESTS)
+all: $(B)/tlrun $(B)/tlrun-mini $(B)/tldmg $(B)/tlios $(TESTS)
 
 $(B):
 	mkdir -p $(B)
@@ -20,6 +20,19 @@ $(B)/tlrun: tools/tlrun.c $(LOADER) loader/tl_loader.h | $(B)
 # With the toy AppKit (shim/appkit_mini.m) standing in for the real one.
 $(B)/tlrun-mini: tools/tlrun.c $(LOADER) loader/tl_loader.h shim/appkit_mini.m shim/appkit_mini.h | $(B)
 	$(CC) $(CFLAGS) -fobjc-arc -DTL_APPKIT_MINI tools/tlrun.c $(LOADER) shim/appkit_mini.m -framework Foundation -framework CoreText -framework CoreGraphics -framework ImageIO -o $@
+
+# Henge's AppKit (shim/appkit) and tlios, which runs a Mac app the way it would run on iOS (see tools/tlios.m).
+SHIM = $(wildcard shim/appkit/*.m)
+SHIM_OBJ = $(patsubst shim/appkit/%.m,$(B)/shim/%.o,$(SHIM))
+$(B)/shim/%.o: shim/appkit/%.m shim/appkit/HKShim.h | $(B)
+	@mkdir -p $(B)/shim
+	$(CC) $(CFLAGS) -fobjc-arc -target arm64-apple-macos13 -Ishim/appkit -c $< -o $@
+$(B)/shim/hk_symbols.c: $(SHIM_OBJ) shim/tools/hk_symbols.sh
+	shim/tools/hk_symbols.sh $@ $(SHIM_OBJ)
+$(B)/tlios: tools/tlios.m $(LOADER) loader/tl_loader.h $(SHIM_OBJ) $(B)/shim/hk_symbols.c
+	$(CC) $(CFLAGS) -fobjc-arc -Ishim/appkit tools/tlios.m $(LOADER) $(SHIM_OBJ) $(B)/shim/hk_symbols.c \
+	  -framework Foundation -framework QuartzCore -framework Metal -framework CoreGraphics -framework CoreText \
+	  -framework ImageIO -framework IOSurface -framework CoreVideo -framework UniformTypeIdentifiers -o $@
 
 $(B)/tldmg: tools/tldmg.c $(DMG) dmg/tl_dmg.h dmg/tl_dmg_private.h | $(B)
 	$(CC) $(CFLAGS) tools/tldmg.c $(DMG) -framework CoreFoundation -lz -lbz2 -lcompression -o $@

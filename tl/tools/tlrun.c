@@ -35,6 +35,16 @@ static const char *map_name(const char *name, char *buf, size_t len) {
 
 static char g_app_dir[4096];
 
+/* TLRUN_MSGLOG_SECS=N: the Objective-C runtime logs every message for N seconds (to /tmp/msgSends-PID, its own
+   fixed place), for listing which AppKit methods an app really uses. */
+extern void instrumentObjcMessageSends(int flag);
+static void *msglog_off(void *arg) {
+    sleep((unsigned)(uintptr_t)arg);
+    instrumentObjcMessageSends(0);
+    fprintf(stderr, "tlrun: message log off\n");
+    return NULL;
+}
+
 /* TLRUN_POKE="NAME:0xVMADDR=BYTE": once an image whose path ends in NAME is linked, set that byte (a test hook). */
 static void poke(TlImage *im) {
     const char *spec = getenv("TLRUN_POKE");
@@ -140,6 +150,11 @@ int main(int argc, const char **argv, const char **envp) {
         char app[4096];
         snprintf(app, sizeof app, "%.*s", (int)(macos - path + 4), path);
         if (tl_adopt_main_bundle(app)) fprintf(stderr, "tlrun: %s is not a bundle\n", app);
+    }
+    if (getenv("TLRUN_MSGLOG_SECS")) {
+        pthread_t t;
+        instrumentObjcMessageSends(1);
+        pthread_create(&t, NULL, msglog_off, (void *)(uintptr_t)atoi(getenv("TLRUN_MSGLOG_SECS")));
     }
     return tl_run_main(exe, argc - i, argv + i, envp);
 }

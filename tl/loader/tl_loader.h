@@ -40,6 +40,9 @@ typedef struct TlHost {
     int soft_missing;
     /* The program may not start other processes (fork, posix_spawn, exec fail with EPERM), as on iOS. */
     int no_processes;
+    /* 1 when the host library must not answer this symbol although it has it (a Mac test runner refusing what
+       iOS lacks); install_name is "" for lookups without one. Asked after shim_lookup. */
+    int (*host_lacks)(const char *install_name, const char *symbol);
     /* Called for each image once it is fixed up, before its initializers run (app-specific adjustments). */
     void (*image_linked)(TlImage *image);
 } TlHost;

@@ -5,7 +5,9 @@ symbols it takes from it, and which of them the iOS SDK's stubs (.tbd) lack.
 Libraries inside the app are followed too. Private frameworks are not in the
 SDK, so they are reported as unknown rather than missing.
 
-usage: tl_ios_gap.py [--list N] APP_OR_BINARY..."""
+usage: tl_ios_gap.py [--list N] [--deny FILE] APP_OR_BINARY...
+--deny FILE writes what iOS lacks, one "INSTALL_NAME<tab>SYMBOL" per line ("*" for a whole library), for
+tlrun -deny: a Mac run that binds none of it behaves, as far as libraries go, as the app would on iOS."""
 import os, re, subprocess, sys
 
 SDK = subprocess.run(["xcrun", "--sdk", "iphoneos", "--show-sdk-path"], capture_output=True, text=True).stdout.strip()
@@ -47,6 +49,25 @@ def tbd_exports(path, seen=None):
     _tbd_cache[path] = out
     return out
 
+# Where iOS keeps what macOS exports from an umbrella or a Mac-only library (ApplicationServices re-exports
+# CoreGraphics and CoreText; AudioUnit's calls live in AudioToolbox on iOS): Mac install names, tried in order.
+ALTERNATES = ["/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics",
+              "/System/Library/Frameworks/CoreText.framework/Versions/A/CoreText",
+              "/System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO",
+              "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+              "/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation",
+              "/System/Library/Frameworks/AudioToolbox.framework/Versions/A/AudioToolbox",
+              "/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices",
+              "/System/Library/Frameworks/Accelerate.framework/Versions/A/Accelerate",
+              "/usr/lib/libSystem.B.dylib"]
+
+def alternate_for(sym, not_lib):
+    for alt in ALTERNATES:
+        if alt == not_lib: continue
+        tbd = ios_tbd_path(alt)
+        if tbd and sym in tbd_exports(tbd): return alt
+    return None
+
 def dyld_info(args):
     return subprocess.run(["xcrun", "dyld_info"] + args, capture_output=True, text=True).stdout
 
@@ -86,7 +107,11 @@ def analyze(binary, app_dir, report, done):
 def main():
     args = sys.argv[1:]
     nlist = 12
-    if args[:1] == ["--list"]: nlist, args = int(args[1]), args[2:]
+    deny = None
+    while args[:1] in (["--list"], ["--deny"]):
+        if args[0] == "--list": nlist = int(args[1])
+        else: deny = open(args[1], "w")
+        args = args[2:]
     for target in args:
         app_dir = target if target.endswith(".app") else None
         binary = target
@@ -104,12 +129,21 @@ def main():
             if lib.startswith("@") or lib.startswith("<"): continue
             tbd = ios_tbd_path(lib)
             if not tbd:
+                if deny:
+                    deny.write(f"{lib}\t*\n")
+                    for sym, weak in sorted(set(syms)):
+                        alt = alternate_for(sym, lib)
+                        if alt: deny.write(f"{lib}\t{sym}\t={alt}\n")
                 private = "/PrivateFrameworks/" in lib
                 unknown_total += len(syms)
                 rows.append((lib, len(syms), None, "private on macOS: unknown on iOS" if private else "NOT ON iOS", []))
                 continue
             exports = tbd_exports(tbd)
             miss = sorted({s for s, weak in syms if s not in exports and not s.startswith("$ld$")})
+            if deny:
+                for sym in miss:
+                    alt = alternate_for(sym, lib)
+                    deny.write(f"{lib}\t{sym}" + (f"\t={alt}" if alt else "") + "\n")
             missing_total += len(miss)
             rows.append((lib, len(syms), len(miss), "", miss))
         for lib, n, m, note, miss in rows:
