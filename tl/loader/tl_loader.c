@@ -392,7 +392,90 @@ static int parse(TlImage *im, char *err, size_t errlen) {
 
 /* ---- mapping ---- */
 
+/* Where an image's data lives. Normally right where the file puts it, in place of the executable region's pages
+   after its code (ordinary memory mapped over them). Some systems refuse that: an iOS JIT region a debugger made
+   (StikDebug, iOS 26) can be neither replaced nor unmapped. Then each image gets an address range of its own,
+   ordinary memory, with its code pages mapped into it a second time (vm_remap of the region's pages, made
+   read-and-execute) and its data between them as the file has it. Checked once, by running a function through
+   such a mapping; TL_CODE_ALIAS=1 (a test switch) uses it from the start. */
+static int g_code_alias = -1; /* -1 not decided, 0 data over the region, 1 code aliases */
+
+#include <setjmp.h>
+#include <signal.h>
+static sigjmp_buf g_alias_jump;
+static volatile sig_atomic_t g_alias_probing;
+static void alias_fault(int sig) {
+    if (g_alias_probing) siglongjmp(g_alias_jump, 1);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+/* A second mapping of the region's pages [rx, rx + bytes) at dst (which this process owns), read and execute. */
+static int alias_code(uint8_t *dst, uint8_t *rx, size_t bytes) {
+    vm_address_t at = (vm_address_t)dst;
+    vm_prot_t cur, max;
+    kern_return_t kr = vm_remap(mach_task_self(), &at, bytes, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, mach_task_self(),
+                                (vm_address_t)rx, FALSE, &cur, &max, VM_INHERIT_NONE);
+    if (kr != KERN_SUCCESS) { errno = EPERM; tl_log("code alias: vm_remap %s", mach_error_string(kr)); return -1; }
+    kr = vm_protect(mach_task_self(), at, bytes, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    if (kr != KERN_SUCCESS) { errno = EPERM; tl_log("code alias: vm_protect r-x %s (max %#x)", mach_error_string(kr), max); return -1; }
+    sys_icache_invalidate(dst, bytes);
+    return 0;
+}
+
+/* Whether code runs through such a second mapping here: a two-instruction function, called through one. */
+static int alias_works(void) {
+    static const uint32_t fn[2] = {0x528B4B40u, 0xD65F03C0u}; /* movz w0, #0x5a5a ; ret */
+    uint8_t *rx = region_take(TL_PAGE);
+    uint8_t *dst = mmap(NULL, TL_PAGE, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (!rx || dst == MAP_FAILED) return 0;
+    code_write(rx, fn, sizeof fn);
+    code_finish(rx, sizeof fn);
+    if (alias_code(dst, rx, TL_PAGE)) return 0;
+    struct sigaction sa, ob, os, oi;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = alias_fault;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGBUS, &sa, &ob), sigaction(SIGSEGV, &sa, &os), sigaction(SIGILL, &sa, &oi);
+    int ok = 0;
+    g_alias_probing = 1;
+    if (!sigsetjmp(g_alias_jump, 1)) ok = ((int (*)(void))(void *)dst)() == 0x5a5a;
+    g_alias_probing = 0;
+    sigaction(SIGBUS, &ob, NULL), sigaction(SIGSEGV, &os, NULL), sigaction(SIGILL, &oi, NULL);
+    tl_log("code alias test: %s", ok ? "runs" : "faults");
+    return ok;
+}
+
+static int map_segments_aliased(TlImage *im, char *err, size_t errlen) {
+    uint8_t *base = mmap(NULL, im->vmsize, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (base == MAP_FAILED) { set_err(err, errlen, "%s: no address space (%s)", im->path, strerror(errno)); return -1; }
+    im->base = base;
+    im->slide = (int64_t)((uint64_t)base - im->vmmin);
+    for (int i = 0; i < im->nsegs; i++) {
+        TlSeg *g = &im->segs[i];
+        if (!g->vmsize) continue;
+        uint8_t *dst = (uint8_t *)(g->vmaddr + im->slide);
+        uint64_t span = (g->vmsize + TL_PAGE - 1) & ~(TL_PAGE - 1);
+        uint64_t copy = g->filesize < g->vmsize ? g->filesize : g->vmsize;
+        if (g->fileoff + copy > im->slicelen) { set_err(err, errlen, "%s: segment %s is cut short", im->path, g->name); return -1; }
+        if (g->prot & VM_PROT_EXECUTE) {
+            uint8_t *rx = region_take(span);
+            if (!rx) { set_err(err, errlen, "%s: the executable region is full", im->path); return -1; }
+            code_write(rx, im->slice + g->fileoff, copy);
+            code_finish(rx, span);
+            if (alias_code(dst, rx, span)) { set_err(err, errlen, "%s: cannot map code segment %s", im->path, g->name); return -1; }
+        } else {
+            void *p = mmap(dst, span, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
+            if (p != dst) { set_err(err, errlen, "%s: cannot place segment %s (%s)", im->path, g->name, strerror(errno)); return -1; }
+            memcpy(dst, im->slice + g->fileoff, copy);
+        }
+    }
+    return 0;
+}
+
 static int map_segments(TlImage *im, char *err, size_t errlen) {
+    if (g_code_alias < 0 && getenv("TL_CODE_ALIAS")) g_code_alias = alias_works() ? 1 : 0;
+    if (g_code_alias == 1) return map_segments_aliased(im, err, errlen);
     uint8_t *base = region_take(im->vmsize);
     if (!base) { set_err(err, errlen, "%s: the executable region is full", im->path); return -1; }
     im->base = base;
@@ -410,7 +493,16 @@ static int map_segments(TlImage *im, char *err, size_t errlen) {
         } else {
             /* Ordinary memory in place of these pages of the region, at the file's distance from the code. */
             void *p = mmap(dst, span, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
+            if (p != dst && g_code_alias < 0 && (errno == EPERM || errno == EACCES)) {
+                /* The region's pages cannot be replaced here (iOS 26's debugger-made JIT region): code aliases, if
+                   code runs through them; this image again that way (its region pages so far are left unused). */
+                tl_log("data over the executable region refused (%s): trying code aliases", strerror(errno));
+                g_code_alias = alias_works() ? 1 : 0;
+                if (g_code_alias == 1) return map_segments_aliased(im, err, errlen);
+                errno = EPERM;
+            }
             if (p != dst) { set_err(err, errlen, "%s: cannot place segment %s (%s)", im->path, g->name, strerror(errno)); return -1; }
+            if (g_code_alias < 0) g_code_alias = 0;
             memcpy(dst, im->slice + g->fileoff, copy);
         }
     }
