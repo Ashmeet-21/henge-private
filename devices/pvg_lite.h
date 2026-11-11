@@ -55,6 +55,8 @@ int hv_pvg_trace_on(void);
 
 /* The size macOS is told its screen is. Set before the machine starts; default 1920 x 1080. */
 void hv_pvg_lite_set_mode(uint32_t width, uint32_t height);
+/* The display's one mode. A scaled resolution chosen in macOS draws smaller surfaces for the same mode. */
+void hv_pvg_lite_mode(uint32_t *width, uint32_t *height);
 void hv_pvg_lite_set_size_mm(uint32_t width_mm, uint32_t height_mm);
 
 /* Instant resume (host/snapshot.c). State blobs: called with out NULL they return the size needed. */

@@ -2291,7 +2291,11 @@ static const uint8_t *half_to_byte(void) {
     if (where == 0xffffffff) return;
     /* Bigger than the guest draws it. The hot spot stays where it points. */
     const int scale = cursor_scale();
-    int x = (int)(where & 0xffff) - cursor_hot_x * scale, y = (int)(where >> 16) - cursor_hot_y * scale;
+    /* The pointer's place is in the display mode's pixels; a scaled resolution's frame is smaller than the mode. */
+    uint32_t mw = w, mh = h;
+    hv_pvg_lite_mode(&mw, &mh);
+    if (!mw || !mh) mw = w, mh = h;
+    int x = (int)((uint64_t)(where & 0xffff) * w / mw) - cursor_hot_x * scale, y = (int)((uint64_t)(where >> 16) * h / mh) - cursor_hot_y * scale;
     int cw = (int)cursor_w * scale, ch = (int)cursor_h * scale;
     int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
     int x1 = x + cw > (int)w ? (int)w : x + cw, y1 = y + ch > (int)h ? (int)h : y + ch;
@@ -2538,7 +2542,16 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
             const float scale = cursor_scale();
             float x = (float)(where & 0xffff) - hx * scale, y = (float)(where >> 16) - hy * scale;
             float cw = cw0 * scale, ch = ch0 * scale;
-            float r[4] = {x / W * 2 - 1, 1 - (y + ch) / H * 2, cw / W * 2, ch / H * 2};
+            /* The pointer's place is in the display mode's pixels, not the surface's: with a scaled resolution
+               chosen in macOS (1280x988 on a 1864x1440 display) the surface is smaller than the mode, and the
+               pointer was drawn further right and down than where it clicks. Seen on a phone: the pointer at
+               1842 of 1864 with a 1600 wide surface, and the Dock's magnification under where it is drawn now.
+               The guest stops the pointer 128 x (mode / surface - 1) pixels short of the right and bottom edges
+               there and crops its image, while what it clicks goes on to the edge; open. */
+            uint32_t MW = W, MH = H;
+            hv_pvg_lite_mode(&MW, &MH);
+            if (!MW || !MH) MW = W, MH = H;
+            float r[4] = {x / MW * 2 - 1, 1 - (y + ch) / MH * 2, cw / MW * 2, ch / MH * 2};
             [e setRenderPipelineState:cursor_pipe];
             [e setVertexBytes:r length:sizeof r atIndex:0];
             [e setFragmentTexture:ctex atIndex:0];

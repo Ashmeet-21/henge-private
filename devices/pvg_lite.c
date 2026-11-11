@@ -172,6 +172,11 @@ void hv_pvg_lite_set_mode(uint32_t width, uint32_t height) {
     display_h = height;
 }
 
+void hv_pvg_lite_mode(uint32_t *width, uint32_t *height) {
+    *width = display_w;
+    *height = display_h;
+}
+
 static void display_set_page(HvPvgLite *p, uint64_t pa) {
     uint8_t *d = hv_phys_ptr(p->m, pa, 0x4000);
     if (!d) return;
