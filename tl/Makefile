@@ -54,6 +54,18 @@ $(APPKIT_APP): tests/apps/HelloAppKit.m | $(B)
 	$(CC) $(GUEST) -O1 -fobjc-arc -framework Cocoa $< -o $@
 	printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleExecutable</key><string>HelloAppKit</string><key>CFBundleIdentifier</key><string>dev.henge.tl.appkit</string><key>CFBundleName</key><string>HelloAppKit</string><key>LSMinimumSystemVersion</key><string>13.0</string></dict></plist>\n' > $(B)/HelloAppKit.app/Contents/Info.plist
 
+# Disk images made here with hdiutil (HFS+ and APFS, four codecs), read back by tldmg and compared with their source folder.
+test-dmg: all
+	@src=$(B)/dmgsrc; mkdir -p $$src/docs "$$src/docs/name with spaces ü"; \
+	  cp -R $(B)/FW.app $$src/ 2>/dev/null; echo "read me" > $$src/docs/readme.txt; ln -f $$src/docs/readme.txt $$src/docs/hardlink.txt; \
+	  ln -sfh ../docs/readme.txt $$src/docs/relative-link; ln -sfh /Applications $$src/Applications; echo hi > "$$src/docs/name with spaces ü/f.txt"; \
+	  python3 -c "open('$$src/docs/big.txt','w').write(''.join('line %d of a long compressible file\n' % i for i in range(150000)))"; \
+	  fail=0; for fs in HFS+ APFS; do for fmt in UDZO ULFO UDBZ ULMO; do img=$(B)/t-$$fs-$$fmt.dmg; out=$(B)/x-$$fs-$$fmt-$$$$; \
+	    hdiutil create -quiet -ov -srcfolder $$src -volname "TL $$fs $$fmt" -fs $$fs -format $$fmt $$img || { echo "FAIL hdiutil $$fs $$fmt"; fail=1; continue; }; \
+	    if $(B)/tldmg extract $$img / $$out && python3 -I tests/compare_tree.py $$src $$out >$(B)/cmp.txt; then echo "ok   $$fs $$fmt: $$(tail -1 $(B)/cmp.txt)"; \
+	    else echo "FAIL $$fs $$fmt"; cat $(B)/cmp.txt; fail=1; fi; done; done; \
+	  $(B)/tldmg apps $(B)/t-APFS-ULFO.dmg $(B)/apps-$$$$ && $(B)/tlrun $(B)/apps-$$$$/FW.app/Contents/MacOS/fwapp | grep -q '^PASS' && echo "ok   app copied out of a dmg runs through the loader" || fail=1; exit $$fail
+
 # Window apps through the loader on this Mac. AppKit and SwiftUI are the Mac's own here, so this
 # proves the loader on real window apps, not that they would run on iOS.
 test-apps: all apps
@@ -69,4 +81,4 @@ test: all
 clean:
 	rm -rf $(B)
 
-.PHONY: all test clean apps test-apps
+.PHONY: all test clean apps test-apps test-dmg
