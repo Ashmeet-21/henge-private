@@ -1499,9 +1499,16 @@ static pid_t g_rendezvous_fifo[64];
 static int g_rendezvous_head, g_rendezvous_tail;
 static pthread_mutex_t g_rendezvous_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static pid_t fake_pid(int ns) { return (pid_t)(0x70000000 | ns); }
+/* Pids of processes started here: 0x70000000 + a per-run number * 256 + the namespace. The per-run part keeps names
+   programs derive from pids (named semaphores, sockets, shared memory, which outlive a crashed run) apart. */
+static uint32_t pid_salt(void) {
+    static uint32_t salt;
+    if (!salt) salt = 1 + (uint32_t)((getpid() * 2654435761u ^ (uint32_t)time(NULL)) % 0xFFFF);
+    return salt;
+}
+static pid_t fake_pid(int ns) { return (pid_t)(0x70000000 | (pid_salt() << 8) | (uint32_t)ns); }
 static TlProc *proc_of_pid(pid_t pid) {
-    if ((pid & 0x7FFFFF00) != 0x70000000) return NULL;
+    if ((pid & 0x7F000000) != 0x70000000 || (((uint32_t)pid >> 8) & 0xFFFF) != pid_salt()) return NULL;
     int ns = pid & 0xFF;
     return ns > 0 && ns < TL_MAX_NS ? g_procs[ns] : NULL;
 }
@@ -1559,8 +1566,8 @@ static void proc_finish(TlProc *p, int status) {
    this loader fires when the process ends. */
 static dispatch_source_t rt_dispatch_source_create(dispatch_source_type_t type, uintptr_t handle, uintptr_t mask,
                                                    dispatch_queue_t queue) {
-    if (type == DISPATCH_SOURCE_TYPE_PROC && (handle & ~(uintptr_t)0xFFFF) == 0x70000000 && (handle & 0xFFFF) < TL_MAX_NS) {
-        TlProc *p = g_procs[handle & 0xFFFF];
+    if (type == DISPATCH_SOURCE_TYPE_PROC && handle <= 0x7FFFFFFF && proc_of_pid((pid_t)handle)) {
+        TlProc *p = proc_of_pid((pid_t)handle);
         if (p) {
             dispatch_source_t s = dispatch_source_create(DISPATCH_SOURCE_TYPE_DATA_OR, 0, 0, queue);
             pthread_mutex_lock(&g_proc_lock);
@@ -1777,6 +1784,111 @@ static int rt_kill(pid_t pid, int sig) {
     return 0;
 }
 
+/* TL_IPC_TRACE=1 (a test switch): named semaphores and Unix socket paths a program uses, with its namespace. */
+#include <semaphore.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+static sem_t *rt_sem_open(const char *name, int oflag, ...) {
+    unsigned mode = 0, value = 0;
+    if (oflag & O_CREAT) {
+        va_list ap;
+        va_start(ap, oflag);
+        mode = va_arg(ap, unsigned);
+        value = va_arg(ap, unsigned);
+        va_end(ap);
+    }
+    sem_t *s = (oflag & O_CREAT) ? sem_open(name, oflag, mode, value) : sem_open(name, oflag);
+    tl_log("sem_open %s (flags %#x, value %u) from namespace %d: %s", name, oflag, value, ns_of(__builtin_return_address(0)),
+           s == SEM_FAILED ? strerror(errno) : "ok");
+    return s;
+}
+static int log_sockaddr(const char *what, int fd, const struct sockaddr *a, socklen_t len, int rc, void *ret) {
+    if (a && a->sa_family == AF_UNIX)
+        tl_log("%s fd %d %s from namespace %d: %s", what, fd, ((const struct sockaddr_un *)a)->sun_path, ns_of(ret),
+               rc ? strerror(errno) : "ok");
+    return rc;
+}
+static int rt_connect(int fd, const struct sockaddr *a, socklen_t len) {
+    return log_sockaddr("connect", fd, a, len, connect(fd, a, len), __builtin_return_address(0));
+}
+static int rt_bind(int fd, const struct sockaddr *a, socklen_t len) {
+    return log_sockaddr("bind", fd, a, len, bind(fd, a, len), __builtin_return_address(0));
+}
+
+/* launchd's job submission (launch_msg, which Steam uses to start its ipcserver): never the system's launchd (an iOS
+   app has none to reach, and a Mac runner must not leave jobs behind). A submitted job whose program is the app's own
+   starts as a process inside the app, where its bootstrap_check_in lands in the in-app name table; removing a job
+   succeeds; anything else fails. */
+/* liblaunch's data calls, found at run time (iOS's SDK has no header for them). */
+typedef struct _launch_data *launch_data_t;
+enum { TL_LD_DICT = 1, TL_LD_ARRAY = 2, TL_LD_ERRNO = 9 };
+#define LD(ret, name, args) static ret(*name) args
+LD(int, ld_type, (launch_data_t));
+LD(launch_data_t, ld_lookup, (launch_data_t, const char *));
+LD(size_t, ld_count, (launch_data_t));
+LD(launch_data_t, ld_index, (launch_data_t, size_t));
+LD(const char *, ld_string, (launch_data_t));
+LD(launch_data_t, ld_alloc, (int));
+LD(int, ld_set_errno, (launch_data_t, int));
+static int ld_bind(void) {
+    if (ld_type) return 1;
+    ld_lookup = dlsym(RTLD_DEFAULT, "launch_data_dict_lookup");
+    ld_count = dlsym(RTLD_DEFAULT, "launch_data_array_get_count");
+    ld_index = dlsym(RTLD_DEFAULT, "launch_data_array_get_index");
+    ld_string = dlsym(RTLD_DEFAULT, "launch_data_get_string");
+    ld_alloc = dlsym(RTLD_DEFAULT, "launch_data_alloc");
+    ld_set_errno = dlsym(RTLD_DEFAULT, "launch_data_set_errno");
+    ld_type = dlsym(RTLD_DEFAULT, "launch_data_get_type");
+    return ld_type && ld_lookup && ld_count && ld_index && ld_string && ld_alloc && ld_set_errno;
+}
+static launch_data_t ld_errno(int e) {
+    launch_data_t d = ld_alloc(TL_LD_ERRNO);
+    if (d) ld_set_errno(d, e);
+    return d;
+}
+static launch_data_t rt_launch_msg(launch_data_t msg) {
+    int ns = ns_of(__builtin_return_address(0));
+    if (!ld_bind() || !msg || ld_type(msg) != TL_LD_DICT) {
+        errno = ENOSYS;
+        return NULL;
+    }
+    launch_data_t job = ld_lookup(msg, "SubmitJob");
+    if (job && ld_type(job) == TL_LD_DICT) {
+        launch_data_t label = ld_lookup(job, "Label"), program = ld_lookup(job, "Program");
+        launch_data_t args = ld_lookup(job, "ProgramArguments");
+        char *argv[32] = {0};
+        size_t n = args && ld_type(args) == TL_LD_ARRAY ? ld_count(args) : 0;
+        for (size_t i = 0; i < n && i < 31; i++) argv[i] = (char *)ld_string(ld_index(args, i));
+        const char *path = program ? ld_string(program) : argv[0];
+        if (!argv[0]) argv[0] = (char *)path;
+        tl_log("launchd job %s: %s", label ? ld_string(label) : "?", path ? path : "?");
+        pid_t pid = 0;
+        extern char **environ;
+        if (path && g_host->processes_as_threads && is_guest_program(path) && !spawn_in_process(&pid, path, ns, argv, environ))
+            return ld_errno(0);
+        tl_log("  not started (not the app's own program)");
+        return ld_errno(EPERM);
+    }
+    if (ld_lookup(msg, "RemoveJob")) return ld_errno(0);
+    errno = ENOSYS;
+    return NULL;
+}
+
+/* waitid on a process started here (Steam's tier0 asks whether its web helper still runs with WNOHANG|WNOWAIT). */
+static int rt_waitid(idtype_t idtype, id_t id, siginfo_t *info, int options) {
+    TlProc *p = idtype == P_PID ? proc_of_pid((pid_t)id) : NULL;
+    if (!p) return waitid(idtype, id, info, options);
+    pthread_mutex_lock(&g_proc_lock);
+    while (!p->done && !(options & WNOHANG)) pthread_cond_wait(&g_proc_cond, &g_proc_lock);
+    if (info) memset(info, 0, sizeof *info);
+    if (p->done) {
+        if (info) info->si_signo = SIGCHLD, info->si_code = CLD_EXITED, info->si_pid = p->pid, info->si_status = p->status;
+        if (!(options & WNOWAIT)) p->done = 2;
+    }
+    pthread_mutex_unlock(&g_proc_lock);
+    return 0;
+}
+
 static pid_t rt_waitpid(pid_t pid, int *status, int options) {
     int ns = ns_of(__builtin_return_address(0));
     TlProc *only = pid > 0 ? proc_of_pid(pid) : NULL;
@@ -1955,7 +2067,8 @@ static int rt_posix_spawn_file_actions_destroy(posix_spawn_file_actions_t *fa) {
 
 /* System tools a program runs for a line of facts, answered here (iOS runs no tools): sw_vers. The output goes to
    where the program pointed the tool's standard output; the "process" has ended by the time it is returned. */
-static int builtin_tool(pid_t *pid, const char *path, const void *fa, int parent_ns, char *const argv[], char *const envp[]) {
+/* The output of a system tool answered here (sw_vers, uname; "sh -c 'uname -m'" counts as uname), or -1. */
+static int builtin_output(const char *path, char *const argv[], char *out, size_t outlen) {
     if (!path) return -1;
     char version[64] = "15.0", build[64] = "24A335", release[64] = "24.0.0";
     size_t n = sizeof version;
@@ -1964,7 +2077,6 @@ static int builtin_tool(pid_t *pid, const char *path, const void *fa, int parent
     sysctlbyname("kern.osversion", build, &n, NULL, 0);
     n = sizeof release;
     sysctlbyname("kern.osrelease", release, &n, NULL, 0);
-    char out[256];
     /* A shell running one of these tools ("sh -c 'uname -m'") is answered as the tool. */
     char cmd[128] = "";
     const char *tool = path, *arg = argv && argv[0] && argv[1] ? argv[1] : "";
@@ -1975,17 +2087,23 @@ static int builtin_tool(pid_t *pid, const char *path, const void *fa, int parent
         tool = cmd;
     }
     if (!strcmp(tool, "/usr/bin/sw_vers") || !strcmp(tool, "sw_vers")) {
-        if (!strcmp(arg, "-productVersion") || !strcmp(arg, "--productVersion")) snprintf(out, sizeof out, "%s\n", version);
-        else if (!strcmp(arg, "-buildVersion") || !strcmp(arg, "--buildVersion")) snprintf(out, sizeof out, "%s\n", build);
-        else if (!strcmp(arg, "-productName") || !strcmp(arg, "--productName")) snprintf(out, sizeof out, "macOS\n");
-        else snprintf(out, sizeof out, "ProductName:\t\tmacOS\nProductVersion:\t\t%s\nBuildVersion:\t\t%s\n", version, build);
+        if (!strcmp(arg, "-productVersion") || !strcmp(arg, "--productVersion")) snprintf(out, outlen, "%s\n", version);
+        else if (!strcmp(arg, "-buildVersion") || !strcmp(arg, "--buildVersion")) snprintf(out, outlen, "%s\n", build);
+        else if (!strcmp(arg, "-productName") || !strcmp(arg, "--productName")) snprintf(out, outlen, "macOS\n");
+        else snprintf(out, outlen, "ProductName:\t\tmacOS\nProductVersion:\t\t%s\nBuildVersion:\t\t%s\n", version, build);
     } else if (!strcmp(tool, "/usr/bin/uname") || !strcmp(tool, "uname")) {
-        if (!strcmp(arg, "-m") || !strcmp(arg, "-p")) snprintf(out, sizeof out, "%s\n", !strcmp(arg, "-m") ? "arm64" : "arm");
-        else if (!strcmp(arg, "-r")) snprintf(out, sizeof out, "%s\n", release);
-        else if (!*arg || !strcmp(arg, "-s")) snprintf(out, sizeof out, "Darwin\n");
+        if (!strcmp(arg, "-m") || !strcmp(arg, "-p")) snprintf(out, outlen, "%s\n", !strcmp(arg, "-m") ? "arm64" : "arm");
+        else if (!strcmp(arg, "-r")) snprintf(out, outlen, "%s\n", release);
+        else if (!*arg || !strcmp(arg, "-s")) snprintf(out, outlen, "Darwin\n");
         else return -1;
     } else
         return -1;
+    return 0;
+}
+
+static int builtin_tool(pid_t *pid, const char *path, const void *fa, int parent_ns, char *const argv[], char *const envp[]) {
+    char out[256];
+    if (builtin_output(path, argv, out, sizeof out)) return -1;
     pthread_mutex_lock(&g_spawn_fds_lock);
     TlSpawnFds *f = fa ? spawn_fds(*(const void *const *)fa, 0) : NULL;
     int fd = f && f->to[1] >= 0 ? f->to[1] : -1;
@@ -1997,6 +2115,72 @@ static int builtin_tool(pid_t *pid, const char *path, const void *fa, int parent
     if (pid) *pid = p->pid;
     proc_finish(p, 0);
     return 0;
+}
+
+/* system() and popen() start /bin/sh inside libc, past the spawn hooks: answered here. A command that is one of the
+   tools above gets its output; any other is refused, as on iOS (which has no shell). */
+int tl_plist_job(const char *path, char **argv, int max); /* tl_bundle.m */
+/* "launchctl load [-S X] [-w] PATH": the job's program, if it is the app's own, starts as a process inside the app
+   (Steam starts its ipcserver this way); "launchctl remove LABEL" succeeds. Returns -1 for anything else. */
+static int launchctl_command(const char *command, int ns) {
+    if (strncmp(command, "launchctl ", 10)) return -1;
+    if (!strncmp(command + 10, "remove ", 7) || !strncmp(command + 10, "unload ", 7)) return 0;
+    if (strncmp(command + 10, "load ", 5)) return -1;
+    char path[PATH_MAX] = "";
+    const char *q = strchr(command, '\'') ? strchr(command, '\'') : strchr(command, '"');
+    if (q) {
+        const char *e = strchr(q + 1, *q);
+        if (!e) return -1;
+        snprintf(path, sizeof path, "%.*s", (int)(e - q - 1), q + 1);
+    } else {
+        const char *last = strrchr(command, ' ');
+        snprintf(path, sizeof path, "%s", last ? last + 1 : "");
+    }
+    char *argv[32];
+    if (tl_plist_job(path, argv, 32) < 1) return -1;
+    pid_t pid = 0;
+    extern char **environ;
+    int rc = g_host->processes_as_threads && is_guest_program(argv[0]) ? spawn_in_process(&pid, argv[0], ns, argv, environ) : -1;
+    tl_log("launchctl load %s: %s", path, rc ? "not started (not the app's own program)" : "started inside the app");
+    for (int i = 0; argv[i]; i++) free(argv[i]);
+    return rc ? -1 : 0;
+}
+
+static int rt_system(const char *command) {
+    if (!command) return 0; /* "no shell available" */
+    if (!launchctl_command(command, ns_of(__builtin_return_address(0)))) return 0;
+    tl_log("the program tried to run a shell command: %.200s (refused, as on iOS)", command);
+    errno = EPERM;
+    return -1;
+}
+static FILE *g_popen_files[16];
+static FILE *rt_popen(const char *command, const char *mode) {
+    char *argv[] = {"/bin/sh", "-c", (char *)command, NULL};
+    char out[256];
+    if (command && mode && mode[0] == 'r' && !builtin_output("/bin/sh", argv, out, sizeof out)) {
+        int fds[2];
+        if (!pipe(fds)) {
+            (void)!write(fds[1], out, strlen(out));
+            close(fds[1]);
+            FILE *f = fdopen(fds[0], "r");
+            for (int i = 0; f && i < 16; i++)
+                if (!g_popen_files[i]) { g_popen_files[i] = f; break; }
+            tl_log("answered %.120s here", command);
+            return f;
+        }
+    }
+    tl_log("the program tried to run a shell command: %.200s (refused, as on iOS)", command ? command : "?");
+    errno = EPERM;
+    return NULL;
+}
+static int rt_pclose(FILE *f) {
+    for (int i = 0; i < 16; i++)
+        if (f && g_popen_files[i] == f) {
+            g_popen_files[i] = NULL;
+            fclose(f);
+            return 0;
+        }
+    return pclose(f);
 }
 
 static int rt_posix_spawn(pid_t *pid, const char *path, const void *fa, const void *attr, char *const argv[], char *const envp[]) {
@@ -2178,6 +2362,9 @@ void *tl_runtime_lookup(const char *sym) {
         {"_execvp", (void *)rt_execv},
         {"_fork", (void *)rt_fork},
         {"_vfork", (void *)rt_fork},
+        {"_system", (void *)rt_system},
+        {"_popen", (void *)rt_popen},
+        {"_pclose", (void *)rt_pclose},
     };
     for (size_t i = 0; i < sizeof table / sizeof *table; i++)
         if (!strcmp(sym, table[i].name)) return table[i].fn;
@@ -2194,6 +2381,8 @@ void *tl_runtime_lookup(const char *sym) {
     }
     /* Mach bootstrap names: kept inside the app wherever iOS's rules apply (an app may not register services there,
        and only the app itself can reach them anyway). */
+    if (g_host && (g_host->processes_as_threads || g_host->ios_kernel_rules || g_host->no_processes) && !strcmp(sym, "_launch_msg"))
+        return (void *)rt_launch_msg;
     if (g_host && (g_host->processes_as_threads || g_host->ios_kernel_rules)) {
         if (!strcmp(sym, "_bootstrap_check_in")) return (void *)rt_bootstrap_check_in;
         if (!strcmp(sym, "_bootstrap_look_up")) return (void *)rt_bootstrap_look_up;
@@ -2202,7 +2391,7 @@ void *tl_runtime_lookup(const char *sym) {
     if (g_host && g_host->processes_as_threads) {
         static const struct { const char *name; void *fn; } pat[] = {
             {"_getpid", (void *)rt_getpid}, {"_getppid", (void *)rt_getppid}, {"_kill", (void *)rt_kill},
-            {"_waitpid", (void *)rt_waitpid}, {"_exit", (void *)rt_exit}, {"__exit", (void *)rt__exit},
+            {"_waitpid", (void *)rt_waitpid}, {"_waitid", (void *)rt_waitid}, {"_exit", (void *)rt_exit}, {"__exit", (void *)rt__exit},
             {"__Exit", (void *)rt__exit}, {"_bootstrap_check_in", (void *)rt_bootstrap_check_in},
             {"_bootstrap_look_up", (void *)rt_bootstrap_look_up}, {"_bootstrap_register", (void *)rt_bootstrap_register},
             {"_audit_token_to_pid", (void *)rt_audit_token_to_pid},
@@ -2215,6 +2404,11 @@ void *tl_runtime_lookup(const char *sym) {
             {"_malloc_zone_register", (void *)rt_malloc_zone_register},
             {"_malloc_zone_unregister", (void *)rt_malloc_zone_unregister},
         };
+        if (getenv("TL_IPC_TRACE")) {
+            if (!strcmp(sym, "_sem_open")) return (void *)rt_sem_open;
+            if (!strcmp(sym, "_connect")) return (void *)rt_connect;
+            if (!strcmp(sym, "_bind")) return (void *)rt_bind;
+        }
         const char *skip = getenv("TL_PAT_SKIP"); /* a test switch: symbols not to answer here */
         for (size_t i = 0; i < sizeof pat / sizeof *pat; i++)
             if (!strcmp(sym, pat[i].name) && !(skip && strstr(skip, pat[i].name))) return pat[i].fn;
