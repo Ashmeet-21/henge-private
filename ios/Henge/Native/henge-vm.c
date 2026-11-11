@@ -249,9 +249,19 @@ double henge_install_progress(void) { return install_progress; }
 int henge_make_aux(const char *path) {
     static const unsigned char header[24] = {0xa5, 0xd5, 0xb3, 0xfe, 0x97, 0xad, 0x1d, 0x27, 1, 0, 0, 0, 0, 0, 0, 0,
                                              1, 0, 0, 0, 0, 0, 0, 0};
+    /* The initialized vPMU SRAM header a machine carries after its first successful PMU init
+       (magic 0x76504d55, version 1, halfword 0x0004), persisted in the auxiliary storage at
+       device offset 0x1000000. The host opens the aux file with a 0x4000 header offset, so the
+       header sits at file offset 0x1004000. Seed it at creation: with zeros there, macOS 27.2's
+       restore iBSS takes its header-init path, issues a PMU write-back during platform init,
+       and panics (70b7ca7d373f8bb:144) before the service init that would fill the slot the
+       write-back reads. With the header present, PMU init succeeds without a write-back and
+       the restore proceeds. */
+    static const unsigned char vpmu_header[10] = {0x55, 0x4d, 0x50, 0x76, 0x01, 0x00, 0x00, 0x00, 0x04, 0x00};
     int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
     if (fd < 0) return -1;
-    int ok = write(fd, header, sizeof header) == (ssize_t)sizeof header && ftruncate(fd, 33570816) == 0;
+    int ok = write(fd, header, sizeof header) == (ssize_t)sizeof header && ftruncate(fd, 33570816) == 0 &&
+             pwrite(fd, vpmu_header, sizeof vpmu_header, 0x1004000) == (ssize_t)sizeof vpmu_header;
     close(fd);
     return ok ? 0 : -1;
 }
