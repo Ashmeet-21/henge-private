@@ -5,6 +5,7 @@
 #include <dlfcn.h>
 #include <stdatomic.h>
 #include <string.h>
+#include <sys/sysctl.h>
 
 #include "henge-ios-jit.h"
 #include "henge-tl.h"
@@ -145,11 +146,19 @@ int henge_tl_app_load(const char *app_path, char *err, size_t errlen) {
         if (vm == 1 || vm == 3 || vm == 4) return snprintf(err, errlen, "Stop the Mac first: a Mac app and a Mac cannot run at once."), -1;
         HengeDualMapping *jit = henge_ios_jit_get_mapping();
         if (!jit || !jit->rw_addr || !jit->rx_addr) return snprintf(err, errlen, "Turn on JIT first."), -1;
-        if (jit->size < (size_t)400 << 20) return snprintf(err, errlen, "The JIT region is too small (Settings > Performance > Code cache: 1 GB or more)."), -1;
+        /* Under 7 GB (Device.hasLittleMemory) the code cache is fixed at 512 MB and the picker is hidden: say so,
+           not "choose 1 GB", which this device doesn't offer. */
+        uint64_t mem = 0;
+        size_t memlen = sizeof mem;
+        int little = sysctlbyname("hw.memsize", &mem, &memlen, NULL, 0) == 0 && (mem >> 20) < 7000;
+        if (jit->size < (size_t)400 << 20)
+            return snprintf(err, errlen, little ? "The code cache is too small for a Mac app. Quit Henge (swipe it away) and open it again."
+                                                : "The JIT region is too small (Settings > Performance > Code cache: 1 GB or more)."), -1;
         /* Google Chrome runs a renderer and a storage helper beside the browser, each with its own copy of Chrome's
            code (about 250 MB): four copies need the largest code cache. */
         if (is_branded_chrome(@(app_path)) && jit->size < (size_t)1400 << 20)
-            return snprintf(err, errlen, "Google Chrome needs the largest code cache (Settings > Performance > Code cache: 1.5 GB). Chromium runs in less."), -1;
+            return snprintf(err, errlen, little ? "Google Chrome needs a 1.5 GB code cache, more than this device has room for. Chromium runs in less."
+                                                : "Google Chrome needs the largest code cache (Settings > Performance > Code cache: 1.5 GB). Chromium runs in less."), -1;
         HengeTlInfo info;
         if (henge_tl_info(app_path, &info, err, errlen)) return -1;
         static TlHost host;
