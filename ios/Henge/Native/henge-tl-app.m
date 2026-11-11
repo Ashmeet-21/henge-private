@@ -43,7 +43,7 @@ static const char *map_name(const char *name, char *buf, size_t len) {
     static const char *const appkit_loaders[] = {"/AuthenticationServices.framework/", "/ScreenCaptureKit.framework/",
                                                  "/MediaPlayer.framework/", "/SafariServices.framework/",
                                                  "/LocalAuthenticationEmbeddedUI.framework/", "/Accessibility.framework/",
-                                                 "/MetalKit.framework/", "/WebKit.framework/", "/AVKit.framework/", NULL};
+                                                 "/MetalKit.framework/", "/WebKit.framework/", "/AVKit.framework/", "/StoreKit.framework/", NULL};
     for (int i = 0; appkit_loaders[i]; i++)
         if (strstr(name, appkit_loaders[i])) return NULL;
 #endif

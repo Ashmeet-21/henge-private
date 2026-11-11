@@ -31,7 +31,7 @@ static const char *const g_appkit_loaders[] = {"/AuthenticationServices.framewor
                                                "/LocalAuthenticationEmbeddedUI.framework/", "/AppKit.framework/",
                                                "/Cocoa.framework/", "/WebKit.framework/", "/AVKit.framework/",
                                                "/Quartz.framework/", "/QuickLookUI.framework/", "/Accessibility.framework/",
-                                               "/MetalKit.framework/", NULL};
+                                               "/MetalKit.framework/", "/StoreKit.framework/", NULL};
 
 static NSString *leaf_of(const char *install_name) {
     const char *slash = strrchr(install_name, '/');
@@ -368,7 +368,7 @@ int main(int argc, const char **argv, const char **envp) {
             if (tl_adopt_main_bundle(app)) fprintf(stderr, "tlios: %s is not a bundle\n", app);
         }
         for (uint32_t k = 0; k < _dyld_image_count(); k++)
-            if (strstr(_dyld_get_image_name(k), "/AppKit.framework/")) fprintf(stderr, "tlios: THE REAL APPKIT IS LOADED\n");
+            if (strstr(_dyld_get_image_name(k), "/AppKit.framework/")) fprintf(stderr, "tlios: THE REAL APPKIT IS LOADED: %s\n", _dyld_get_image_name(k));
         if (getenv("TLIOS_MSGLOG")) instrumentObjcMessageSends(1);
         return tl_run_main(exe, argc - i, argv + i, envp);
     }
