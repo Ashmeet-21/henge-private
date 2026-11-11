@@ -71,6 +71,11 @@ int tl_run_main(TlImage *exe, int argc, const char **argv, const char **envp);
 void *tl_runtime_lookup(const char *symbol);
 /* Loads a library (and what it links) as dlopen does for the program. NULL with a reason in err. */
 TlImage *tl_load_library(const char *path, char *err, size_t errlen);
+/* While an image's imports are being bound: whether it links AppKit's classes directly (_OBJC_CLASS_$_NS... from
+   AppKit), as Objective-C apps do, rather than finding them by name, as Rust's objc2 does. Hosts route the
+   program's objc_getClass through their AppKit only for the second kind (Chromium breaks when its objc_getClass is
+   not libobjc's own). */
+int tl_binding_links_appkit_classes(void);
 /* The guest image holding addr, or NULL. */
 TlImage *tl_image_containing(const void *addr);
 

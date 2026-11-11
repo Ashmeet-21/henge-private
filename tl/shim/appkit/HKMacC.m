@@ -344,6 +344,26 @@ static CGSize screen_points(void) {
 }
 
 HK_FN(uint32_t, CGMainDisplayID, (void)) { return kMainDisplay; }
+/* The one display's UUID, fixed (winit refuses a display without one); the reverse for the main display only. */
+HK_FN(CFUUIDRef, CGDisplayCreateUUIDFromDisplayID, (uint32_t display)) {
+    return display == kMainDisplay ? CFUUIDCreateFromString(NULL, CFSTR("6E05DE6A-8E1F-4C1E-9D3A-48454E474531")) : NULL;
+}
+HK_FN(uint32_t, CGDisplayGetDisplayIDFromUUID, (CFUUIDRef uuid)) { return uuid ? kMainDisplay : 0; }
+/* The display's place and size: the presenter's screen, in points and in pixels. */
+static CGSize hk_display_points(void) {
+    const HKPresenter *p = hk_presenter();
+    return p && p->screen_size.width > 0 ? p->screen_size : CGSizeMake(1280, 800);
+}
+static CGFloat hk_display_scale(void) {
+    const HKPresenter *p = hk_presenter();
+    return p && p->scale > 0 ? p->scale : 2;
+}
+HK_FN(CGRect, CGDisplayBounds, (uint32_t display)) {
+    CGSize s = hk_display_points();
+    return display == kMainDisplay ? CGRectMake(0, 0, s.width, s.height) : CGRectZero;
+}
+HK_FN(size_t, CGDisplayPixelsWide, (uint32_t display)) { return display == kMainDisplay ? (size_t)(hk_display_points().width * hk_display_scale()) : 0; }
+HK_FN(size_t, CGDisplayPixelsHigh, (uint32_t display)) { return display == kMainDisplay ? (size_t)(hk_display_points().height * hk_display_scale()) : 0; }
 static HKCGError one_display(uint32_t max, uint32_t *displays, uint32_t *count) {
     if (displays && max > 0) displays[0] = kMainDisplay;
     if (count) *count = displays ? (max > 0 ? 1 : 0) : 1;

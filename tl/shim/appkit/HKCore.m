@@ -504,6 +504,22 @@ static NSRect rect_of(NSPoint a, NSPoint b) {
 - (BOOL)canDrawSubviewsIntoLayer { return NO; }
 - (BOOL)inLiveResize { return NO; }
 
+/* The old tracking rects: a tag (never 0) for a tracking area with enter/exit for the owner. */
+- (NSInteger)addTrackingRect:(NSRect)rect owner:(id)owner userData:(void *)data assumeInside:(BOOL)inside {
+    static NSInteger next = 1;
+    NSTrackingArea *a = [[NSTrackingArea alloc] initWithRect:rect options:NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways
+                                                       owner:owner userInfo:nil];
+    NSInteger tag = next++;
+    objc_setAssociatedObject(a, @selector(addTrackingRect:owner:userData:assumeInside:), @(tag), OBJC_ASSOCIATION_RETAIN);
+    [self addTrackingArea:a];
+    return tag;
+}
+- (void)removeTrackingRect:(NSInteger)tag {
+    for (NSTrackingArea *a in [_trackingAreas copy])
+        if ([objc_getAssociatedObject(a, @selector(addTrackingRect:owner:userData:assumeInside:)) integerValue] == tag)
+            [_trackingAreas removeObjectIdenticalTo:a];
+}
+- (void)setWantsBestResolutionOpenGLSurface:(BOOL)flag {}
 - (void)addTrackingArea:(NSTrackingArea *)area { if (area && ![_trackingAreas containsObject:area]) [_trackingAreas addObject:area]; }
 - (void)removeTrackingArea:(NSTrackingArea *)area { [_trackingAreas removeObjectIdenticalTo:area]; }
 - (void)updateTrackingAreas {}
@@ -612,6 +628,8 @@ static SEL delegate_selector(NSString *note, NSString *prefix) {
     if ((self = [super init])) {
         _frame = rect;
         _styleMask = style;
+        _frame = [self constrainFrameRect:rect toScreen:nil];
+        rect = _frame;
         _number = g_next_number++;
         _alphaValue = 1;
         _hasShadow = YES;
@@ -713,10 +731,20 @@ static SEL delegate_selector(NSString *note, NSString *prefix) {
 + (NSRect)contentRectForFrameRect:(NSRect)frame styleMask:(NSWindowStyleMask)style { return frame; }
 + (NSRect)frameRectForContentRect:(NSRect)content styleMask:(NSWindowStyleMask)style { return content; }
 - (NSRect)contentLayoutRect { return (NSRect){NSZeroPoint, _frame.size}; }
-- (NSRect)constrainFrameRect:(NSRect)frame toScreen:(NSScreen *)screen { return frame; }
+/* Normal windows stay on the screen (AppKit keeps a title bar reachable; here the screen is all there is to see). */
+- (NSRect)constrainFrameRect:(NSRect)frame toScreen:(NSScreen *)screen {
+    if (_level != 0 || _parentWindow) return frame;
+    NSSize s = hk_presenter()->screen_size;
+    if (frame.size.width >= s.width) frame.origin.x = 0;
+    else frame.origin.x = MIN(MAX(frame.origin.x, 0), s.width - frame.size.width);
+    if (frame.size.height >= s.height) frame.origin.y = s.height - frame.size.height;
+    else frame.origin.y = MIN(MAX(frame.origin.y, 0), s.height - frame.size.height);
+    return frame;
+}
 
 - (void)setFrame:(NSRect)frame display:(BOOL)display animate:(BOOL)animate { [self setFrame:frame display:display]; }
 - (void)setFrame:(NSRect)frame display:(BOOL)display {
+    frame = [self constrainFrameRect:frame toScreen:nil];
     BOOL moved = !CGPointEqualToPoint(frame.origin, _frame.origin), resized = !CGSizeEqualToSize(frame.size, _frame.size);
     if (!moved && !resized) return;
     _frame = frame;

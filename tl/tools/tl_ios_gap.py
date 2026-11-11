@@ -92,7 +92,8 @@ def analyze(binary, app_dir, report, done):
     by_leaf = {}
     for d in deps: by_leaf.setdefault(leaf(d), d)
     for line in dyld_info(["-arch", arch, "-imports", binary]).splitlines():
-        m = re.match(r"\s+0x[0-9A-F]+\s+(\S+)\s+(?:\[weak-import\]\s+)?\(from (.+)\)", line)
+        # With or without the fixup address in front (dyld_info prints both, depending on the binary's format).
+        m = re.match(r"\s+(?:0x[0-9A-Fa-f]+\s+)?(\S+)\s+(?:\[weak-import\]\s+)?\(from (.+)\)", line)
         if not m: continue
         sym, lib = re.sub(r"\+0x[0-9A-Fa-f]+$", "", m.group(1)), m.group(2)
         name = by_leaf.get(lib, lib)

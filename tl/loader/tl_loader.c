@@ -578,6 +578,8 @@ static void tl_stub_binder(void) { abort(); } /* old binaries name it; every laz
 /* While binding: whether the import being bound is reached through the image's call stubs (1, a function), never
    (2, data or a function taken by address), or unknown (0). Soft missing symbols use it to pick a stand-in. */
 static int g_bind_kind;
+static int g_binding_static_appkit;
+int tl_binding_links_appkit_classes(void) { return g_binding_static_appkit; }
 
 static int resolve_import(TlImage *im, int ordinal, const char *sym, int weak, uint64_t *out, char *err, size_t errlen) {
     if (!strcmp(sym, "dyld_stub_binder")) { *out = (uint64_t)&tl_stub_binder; return 0; }
@@ -671,6 +673,22 @@ static int fixup_chained(TlImage *im, char *err, size_t errlen) {
     const char *syms = (const char *)data + h->symbols_offset;
     const uint8_t *imp = data + h->imports_offset;
     uint8_t *called = g_host->soft_missing ? called_imports(im, h, data) : NULL;
+    g_binding_static_appkit = 0;
+    for (uint32_t i = 0; i < h->imports_count && !g_binding_static_appkit; i++) {
+        int ordinal;
+        uint32_t name_off;
+        if (h->imports_format == DYLD_CHAINED_IMPORT) {
+            const struct dyld_chained_import *x = (const void *)(imp + 4 * i);
+            ordinal = x->lib_ordinal, name_off = x->name_offset;
+        } else if (h->imports_format == DYLD_CHAINED_IMPORT_ADDEND) {
+            const struct dyld_chained_import_addend *x = (const void *)(imp + 8 * i);
+            ordinal = x->lib_ordinal, name_off = x->name_offset;
+        } else break;
+        const char *name = syms + name_off;
+        if (ordinal >= 1 && ordinal <= im->ndeps && !strncmp(name, "_OBJC_CLASS_$_NS", 16) &&
+            (strstr(im->deps[ordinal - 1].install_name, "/AppKit.framework/") || strstr(im->deps[ordinal - 1].install_name, "/Cocoa.framework/")))
+            g_binding_static_appkit = 1;
+    }
     for (uint32_t i = 0; i < h->imports_count; i++) {
         int ordinal, weak;
         uint32_t name_off;

@@ -145,6 +145,13 @@ static const char *map_name(const char *name, char *buf, size_t len) {
 
 static void *shim_lookup(const char *install_name, const char *symbol) {
     @autoreleasepool {
+        /* Finding classes by name goes through Henge's AppKit wherever it is imported from (as on iOS). */
+        if (!strcmp(symbol, "_objc_getClass") || !strcmp(symbol, "_objc_lookUpClass") || !strcmp(symbol, "_objc_getRequiredClass") ||
+            !strcmp(symbol, "_objc_getMetaClass") || !strcmp(symbol, "_NSClassFromString")) {
+            const char *skip = getenv("TLIOS_NO_BYNAME"); /* a test switch: names not to route */
+            if (skip && strstr(skip, symbol)) return NULL;
+            return hk_lookup(install_name, symbol);
+        }
         if (install_name && *install_name) {
             NSString *alias = g_deny[deny_key(install_name, symbol)];
             if (alias.length) {

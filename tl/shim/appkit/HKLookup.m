@@ -3,6 +3,7 @@
    has classes of its own named NSColor and NSFont, so never by name); then, by name, the classes UIFoundation has on
    both systems (NSParagraphStyle, NSShadow...), never one from a Mac-only library loaded in the Mac test runner. */
 #import "HKShim.h"
+#include "../../loader/tl_loader.h"
 #import <objc/runtime.h>
 #include <dlfcn.h>
 #include <string.h>
@@ -23,19 +24,55 @@ static int class_allowed(Class c) {
     return (own && !strcmp(img, own)) || strstr(img, "/UIFoundation.framework/") != NULL;
 }
 
+static const char *const g_renamed[][2] = {
+    {"_OBJC_CLASS_$_NSColor", "_OBJC_CLASS_$_HKColor"}, {"_OBJC_METACLASS_$_NSColor", "_OBJC_METACLASS_$_HKColor"},
+    {"_OBJC_CLASS_$_NSFont", "_OBJC_CLASS_$_HKFont"}, {"_OBJC_METACLASS_$_NSFont", "_OBJC_METACLASS_$_HKFont"},
+    {"_OBJC_CLASS_$_NSFontDescriptor", "_OBJC_CLASS_$_HKFontDescriptor"},
+    {"_OBJC_METACLASS_$_NSFontDescriptor", "_OBJC_METACLASS_$_HKFontDescriptor"},
+};
+
+static void *own_symbol(const char *symbol) {
+    for (size_t i = 0; i < sizeof g_renamed / sizeof *g_renamed; i++)
+        if (!strcmp(symbol, g_renamed[i][0])) symbol = g_renamed[i][1];
+    for (int i = 0; i < hk_nsymbols; i++)
+        if (!strcmp(hk_symbols[i].name, symbol)) return hk_symbols[i].address;
+    return NULL;
+}
+
+/* This AppKit's class of that name, if it has one. */
+static Class own_class(const char *name) {
+    if (!name) return Nil;
+    char sym[300];
+    snprintf(sym, sizeof sym, "_OBJC_CLASS_$_%s", name);
+    return (__bridge Class)own_symbol(sym);
+}
+
+/* A program that finds classes by name (Rust's objc2 does for all of AppKit) gets this AppKit's: on iOS the runtime
+   has other classes called NSColor and NSFont. */
+static Class hk_objc_getClass(const char *name) {
+    Class own = own_class(name);
+    if (own && getenv("HK_LOG_BYNAME")) hk_log("objc_getClass(%s): Henge's", name);
+    return own ?: objc_getClass(name);
+}
+static Class hk_objc_lookUpClass(const char *name) { return own_class(name) ?: objc_lookUpClass(name); }
+static Class hk_objc_getRequiredClass(const char *name) { return own_class(name) ?: objc_getRequiredClass(name); }
+static Class hk_objc_getMetaClass(const char *name) {
+    Class c = own_class(name);
+    return c ? object_getClass(c) : (Class)objc_getMetaClass(name);
+}
+static Class hk_NSClassFromString(NSString *name) { return own_class(name.UTF8String) ?: NSClassFromString(name); }
+
 void *hk_lookup(const char *install_name, const char *symbol) {
     if (!symbol || symbol[0] != '_') return NULL;
-    /* Classes that go by another runtime name here, since iOS has its own of the same name (HKShim.h). */
-    static const char *const renamed[][2] = {
-        {"_OBJC_CLASS_$_NSColor", "_OBJC_CLASS_$_HKColor"}, {"_OBJC_METACLASS_$_NSColor", "_OBJC_METACLASS_$_HKColor"},
-        {"_OBJC_CLASS_$_NSFont", "_OBJC_CLASS_$_HKFont"}, {"_OBJC_METACLASS_$_NSFont", "_OBJC_METACLASS_$_HKFont"},
-        {"_OBJC_CLASS_$_NSFontDescriptor", "_OBJC_CLASS_$_HKFontDescriptor"},
-        {"_OBJC_METACLASS_$_NSFontDescriptor", "_OBJC_METACLASS_$_HKFontDescriptor"},
+    static const struct { const char *name; void *fn; } by_name[] = {
+        {"_objc_getClass", (void *)hk_objc_getClass}, {"_objc_lookUpClass", (void *)hk_objc_lookUpClass},
+        {"_objc_getRequiredClass", (void *)hk_objc_getRequiredClass}, {"_objc_getMetaClass", (void *)hk_objc_getMetaClass},
+        {"_NSClassFromString", (void *)hk_NSClassFromString},
     };
-    for (size_t i = 0; i < sizeof renamed / sizeof *renamed; i++)
-        if (!strcmp(symbol, renamed[i][0])) symbol = renamed[i][1];
-    for (int i = 0; i < hk_nsymbols; i++) /* this image's own definitions first, classes included */
-        if (!strcmp(hk_symbols[i].name, symbol)) return hk_symbols[i].address;
+    for (size_t i = 0; i < sizeof by_name / sizeof *by_name; i++)
+        if (!strcmp(symbol, by_name[i].name)) return tl_binding_links_appkit_classes() ? NULL : by_name[i].fn;
+    void *own = own_symbol(symbol); /* this image's own definitions first, classes included */
+    if (own) return own;
     if (!strncmp(symbol, "_OBJC_CLASS_$_", 14) || !strncmp(symbol, "_OBJC_METACLASS_$_", 18)) {
         int meta = symbol[6] == 'M';
         Class c = objc_getClass(symbol + (meta ? 18 : 14));
