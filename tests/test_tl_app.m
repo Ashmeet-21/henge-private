@@ -105,8 +105,17 @@ int main(int argc, char **argv) {
         dlopen("/System/Library/PrivateFrameworks/UIFoundation.framework/UIFoundation", RTLD_LAZY);
         henge_tl_app_set_screen(1180, 680, 2);
         henge_tl_app_on_change(changed);
-        char err[512] = "";
-        if (henge_tl_app_load(argv[1], err, sizeof err)) {
+        /* Loaded on another thread, as the app does (MacAppScreen loads off the main thread). */
+        static char err[512] = "";
+        __block int rc = 0;
+        const char *app = argv[1];
+        dispatch_semaphore_t done = dispatch_semaphore_create(0);
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            rc = henge_tl_app_load(app, err, sizeof err);
+            dispatch_semaphore_signal(done);
+        });
+        dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+        if (rc) {
             fprintf(stderr, "test_tl_app: %s\n", err);
             return 1;
         }

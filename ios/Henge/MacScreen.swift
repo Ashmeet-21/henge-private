@@ -250,7 +250,8 @@ struct MacAppScreen: View {
     private func start() async {
         guard !started else { return }
         started = true
-        henge_tl_app_set_screen(screen.width, screen.height, UIScreen.main.scale)
+        // 2x at most: the Mac's screen is shown scaled down to fit, and the app draws in software
+        henge_tl_app_set_screen(screen.width, screen.height, min(UIScreen.main.scale, 2))
         henge_tl_app_on_change { MacScreenHub.shared.view?.refresh() }
         let path = app.url.path
         HengeLog.log("macapps", "opening \(app.name) with windows (\(path))")

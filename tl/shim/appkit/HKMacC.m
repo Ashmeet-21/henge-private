@@ -749,10 +749,19 @@ HK_FN(OSStatus, AuthorizationRightSet, (void *authorization, const char *right, 
 
 /* ================================================================ SystemConfiguration: no dynamic store */
 
-HK_FN(void *, SCDynamicStoreCreate, (CFAllocatorRef allocator, CFStringRef name, void *callout, void *context)) { return NULL; }
+/* The dynamic store: a quiet one that holds nothing and never reports a change. Failing makes Chromium retry it
+   every second for good. */
+HK_FN(void *, SCDynamicStoreCreate, (CFAllocatorRef allocator, CFStringRef name, void *callout, void *context)) {
+    return (void *)CFDataCreate(allocator, (const UInt8 *)"hk", 2);
+}
 HK_FN(CFPropertyListRef, SCDynamicStoreCopyValue, (void *store, CFStringRef key)) { return NULL; }
-HK_FN(CFRunLoopSourceRef, SCDynamicStoreCreateRunLoopSource, (CFAllocatorRef allocator, void *store, CFIndex order)) { return NULL; }
-HK_FN(Boolean, SCDynamicStoreSetNotificationKeys, (void *store, CFArrayRef keys, CFArrayRef patterns)) { return false; }
+static void hk_quiet_source(void *info) {}
+HK_FN(CFRunLoopSourceRef, SCDynamicStoreCreateRunLoopSource, (CFAllocatorRef allocator, void *store, CFIndex order)) {
+    CFRunLoopSourceContext ctx = {0};
+    ctx.perform = hk_quiet_source;
+    return CFRunLoopSourceCreate(allocator, order, &ctx);
+}
+HK_FN(Boolean, SCDynamicStoreSetNotificationKeys, (void *store, CFArrayRef keys, CFArrayRef patterns)) { return store != NULL; }
 HK_FN(int, SCError, (void)) { return 0; }
 
 /* ================================================================ CoreServices: Apple events, LaunchServices, Spotlight */
