@@ -309,6 +309,7 @@ int main(int argc, const char **argv, const char **envp) {
         host.image_linked = image_linked;
         host.soft_missing = 1;
         host.no_processes = 1;
+        host.ios_kernel_rules = 1;
         static HKPresenter presenter = {{1280, 800}, 2, window_changed};
         double every = 0;
         const char *input = NULL;

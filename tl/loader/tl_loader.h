@@ -43,6 +43,9 @@ typedef struct TlHost {
     /* 1 when the host library must not answer this symbol although it has it (a Mac test runner refusing what
        iOS lacks); install_name is "" for lookups without one. Asked after shim_lookup. */
     int (*host_lacks)(const char *install_name, const char *symbol);
+    /* iOS's kernel rules for the program: no new executable memory (mmap or mprotect with PROT_EXEC fail), no Mach
+       service registration (bootstrap_check_in/register refused). For Mac runners shaped like iOS. */
+    int ios_kernel_rules;
     /* Called for each image once it is fixed up, before its initializers run (app-specific adjustments). */
     void (*image_linked)(TlImage *image);
 } TlHost;

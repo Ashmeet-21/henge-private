@@ -1395,9 +1395,72 @@ static pid_t rt_fork(void) {
     return rt_refuse();
 }
 
+/* TL_MAX_MAP_GB=N (a test switch for Mac runs): the program's single mappings and VM allocations larger than N GB
+   fail, to find how little address space it needs (iOS gives much less than a Mac). */
+#include <mach/mach_vm.h>
+static uint64_t max_map_bytes(void) {
+    static uint64_t v = (uint64_t)-1;
+    if (v == (uint64_t)-1) {
+        const char *e = getenv("TL_MAX_MAP_GB");
+        v = e ? (uint64_t)atoll(e) << 30 : 0;
+    }
+    return v;
+}
+static void *rt_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
+    if (g_host && g_host->ios_kernel_rules && (prot & PROT_EXEC)) {
+        tl_log("refused an executable mapping (iOS)");
+        errno = EPERM;
+        return MAP_FAILED;
+    }
+    uint64_t max = max_map_bytes();
+    if (max && len > max) {
+        tl_log("refused a %llu GB mapping (TL_MAX_MAP_GB)", (unsigned long long)(len >> 30));
+        errno = ENOMEM;
+        return MAP_FAILED;
+    }
+    return mmap(addr, len, prot, flags, fd, off);
+}
+static kern_return_t rt_mach_vm_allocate(vm_map_t map, mach_vm_address_t *addr, mach_vm_size_t size, int flags) {
+    uint64_t max = max_map_bytes();
+    if (max && size > max) {
+        tl_log("refused a %llu GB VM allocation (TL_MAX_MAP_GB)", (unsigned long long)(size >> 30));
+        return KERN_NO_SPACE;
+    }
+    return mach_vm_allocate(map, addr, size, flags);
+}
+static kern_return_t rt_mach_vm_map(vm_map_t map, mach_vm_address_t *addr, mach_vm_size_t size, mach_vm_offset_t mask, int flags,
+                                    mem_entry_name_port_t obj, memory_object_offset_t off, boolean_t copy, vm_prot_t cur, vm_prot_t max_prot,
+                                    vm_inherit_t inh) {
+    uint64_t max = max_map_bytes();
+    if (max && size > max) {
+        tl_log("refused a %llu GB VM map (TL_MAX_MAP_GB)", (unsigned long long)(size >> 30));
+        return KERN_NO_SPACE;
+    }
+    return mach_vm_map(map, addr, size, mask, flags, obj, off, copy, cur, max_prot, inh);
+}
+
+static int rt_mprotect(void *addr, size_t len, int prot) {
+    if (g_host && g_host->ios_kernel_rules && (prot & PROT_EXEC)) {
+        tl_log("refused making memory executable (iOS)");
+        errno = EPERM;
+        return -1;
+    }
+    return mprotect(addr, len, prot);
+}
+
+/* bootstrap_check_in, bootstrap_register, bootstrap_register2: an app on iOS may not offer Mach services. */
+static kern_return_t rt_bootstrap_refused(void) {
+    tl_log("refused a Mach service registration (iOS)");
+    return 1100; /* BOOTSTRAP_NOT_PRIVILEGED */
+}
+
 void *tl_runtime_lookup(const char *sym) {
     static const struct { const char *name; void *fn; } table[] = {
         {"_dlopen", (void *)rt_dlopen},
+        {"_mmap", (void *)rt_mmap},
+        {"_mprotect", (void *)rt_mprotect},
+        {"_mach_vm_allocate", (void *)rt_mach_vm_allocate},
+        {"_mach_vm_map", (void *)rt_mach_vm_map},
         {"_dlclose", (void *)rt_dlclose},
         {"_dlsym", (void *)rt_dlsym},
         {"_dladdr", (void *)rt_dladdr},
@@ -1422,6 +1485,9 @@ void *tl_runtime_lookup(const char *sym) {
     };
     for (size_t i = 0; i < sizeof table / sizeof *table; i++)
         if (!strcmp(sym, table[i].name)) return table[i].fn;
+    if (g_host && g_host->ios_kernel_rules &&
+        (!strcmp(sym, "_bootstrap_check_in") || !strcmp(sym, "_bootstrap_register") || !strcmp(sym, "_bootstrap_register2")))
+        return (void *)rt_bootstrap_refused;
     if (g_host && g_host->no_processes)
         for (size_t i = 0; i < sizeof procs / sizeof *procs; i++)
             if (!strcmp(sym, procs[i].name)) return procs[i].fn;
