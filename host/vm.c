@@ -390,8 +390,7 @@ void hv_vm_set_hot(int hot) {
     if (getenv("HV_QOS")) return;
     int want = hot ? QOS_CLASS_USER_INITIATED : QOS_CLASS_USER_INTERACTIVE;
     if (atomic_exchange(&hv_qos_wanted, want) != want)
-        fprintf(stderr, "henge: vCPU thread QoS -> %s (device %s)
-", hot ? "USER_INITIATED" : "USER_INTERACTIVE", hot ? "hot" : "cool");
+        fprintf(stderr, "henge: vCPU thread QoS -> %s (device %s)\n", hot ? "USER_INITIATED" : "USER_INTERACTIVE", hot ? "hot" : "cool");
 #else
     (void)hot;
 #endif
