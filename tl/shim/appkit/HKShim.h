@@ -432,6 +432,9 @@ int NSApplicationMain(int argc, const char *argv[]);
 - (NSRect)convertRectToBacking:(NSRect)rect;
 @end
 
+/* The app's bundle (the loader adopts it for the app's own code only): what Henge's AppKit reads for the app. */
+NSBundle *hk_app_bundle(void);
+
 /* ---- the presenter: who shows the windows and feeds input (iOS app, or the Mac runner) ---- */
 typedef struct HKPresenter {
     /* The screen in points, and its scale. */

@@ -501,8 +501,11 @@ static NSFontDescriptor *own_desc(CTFontDescriptorRef d) { return d ? hk_font_ad
 @interface HKFontMethods : NSObject
 @end
 @implementation HKFontMethods
-/* UIFoundation's string drawing on the Mac asks AppKit's fonts for the variant for the current appearance. */
+#if TARGET_OS_OSX
+/* Mac test runners only: macOS's UIFoundation measures text the AppKit way and asks AppKit's fonts for these. iOS's
+   is UIKit's, and its fonts are UIKit's own, which have what it needs. */
 - (id)_fontForCurrentAppearance { return self; }
+#endif
 #define FONT_ONLY(...) \
     if (!is_ct_font(self)) { \
         [self doesNotRecognizeSelector:_cmd]; \
@@ -707,9 +710,8 @@ static CTFontRef with_weight(CTFontRef base, CGFloat weight) {
 static BOOL same_name(NSString *a, NSString *b) { return a && b && [a caseInsensitiveCompare:b] == NSOrderedSame; }
 
 @implementation NSFont
-+ (void)load {
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ hk_font_adopt(nil); });
-}
+/* No warm-up at load: the font methods go onto the system's font classes only once a Mac app is loaded (the hosts
+   call hk_font_adopt(nil) then), never in a launch that runs none. */
 + (void)initialize {
     if (self == [NSFont class]) hk_font_adopt(nil);
 }
@@ -1673,9 +1675,9 @@ static NSImage *blank_image(NSString *description) {
     os_unfair_lock_unlock(&g_named_lock);
     if (img) return img;
     if ([name isEqualToString:@"NSApplicationIcon"] && NSApp.applicationIconImage) return NSApp.applicationIconImage;
-    NSString *path = name.pathExtension.length ? [[NSBundle mainBundle] pathForResource:name ofType:nil] : nil;
+    NSString *path = name.pathExtension.length ? [hk_app_bundle() pathForResource:name ofType:nil] : nil;
     for (NSString *ext in @[ @"png", @"tiff", @"icns", @"jpg", @"gif" ])
-        if (!path) path = [[NSBundle mainBundle] pathForResource:name ofType:ext];
+        if (!path) path = [hk_app_bundle() pathForResource:name ofType:ext];
     if (path && (img = [[self alloc] initWithContentsOfFile:path])) {
         img.name = name;
         return img;

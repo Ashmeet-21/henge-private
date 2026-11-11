@@ -110,12 +110,21 @@ int henge_tl_app_load(const char *app_path, char *err, size_t errlen) {
         host.no_processes = 1;
         g_presenter.window_changed = window_changed;
         hk_set_presenter(&g_presenter);
+#if !TARGET_OS_OSX
+        /* AppKit's font methods onto UIKit's font class (only those it lacks), now that a Mac app runs. Not on a Mac:
+           there CoreText fonts are plain CF objects, and macOS's UIFoundation would take them for AppKit's. */
+        hk_font_adopt(nil);
+#endif
         atomic_store(&henge_tl_ran, 1);
         henge_tl_mark_ran();
         fprintf(stderr, "henge: tl: loading the app %s\n", info.executable);
         g_exe = tl_load(&host, info.executable, err, errlen);
         if (!g_exe) return -1;
         g_app = @(app_path);
+#if TARGET_OS_OSX
+        tl_main_bundle_for_everyone(); /* the Mac test only: see tl_loader.h */
+#endif
+        /* The app's code sees its bundle as the main bundle; Henge keeps its own (tl_bundle.m). */
         if (tl_adopt_main_bundle(app_path)) fprintf(stderr, "henge: tl: %s has no bundle identifier\n", app_path);
         g_args = arguments_for(g_app, @(info.executable));
         fprintf(stderr, "henge: tl: loaded %zu MB at %p\n", tl_image_size(g_exe) >> 20, tl_image_base(g_exe));

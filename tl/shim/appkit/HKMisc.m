@@ -827,11 +827,11 @@ static NSDate *g_launch_date;
 }
 + (void)terminateAutomaticallyTerminableApplications {}
 - (pid_t)processIdentifier { return getpid(); }
-- (NSString *)bundleIdentifier { return NSBundle.mainBundle.bundleIdentifier; }
-- (NSURL *)bundleURL { return NSBundle.mainBundle.bundleURL; }
-- (NSURL *)executableURL { return NSBundle.mainBundle.executableURL; }
+- (NSString *)bundleIdentifier { return hk_app_bundle().bundleIdentifier; }
+- (NSURL *)bundleURL { return hk_app_bundle().bundleURL; }
+- (NSURL *)executableURL { return hk_app_bundle().executableURL; }
 - (NSString *)localizedName {
-    NSDictionary *info = NSBundle.mainBundle.infoDictionary;
+    NSDictionary *info = hk_app_bundle().infoDictionary;
     return info[@"CFBundleDisplayName"] ?: info[@"CFBundleName"] ?: NSProcessInfo.processInfo.processName;
 }
 - (NSImage *)icon { return NSApp.applicationIconImage; }

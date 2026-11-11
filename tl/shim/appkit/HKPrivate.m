@@ -28,7 +28,7 @@
     return YES;
 }
 + (BOOL)loadNibNamed:(NSString *)name owner:(id)owner {
-    return [[NSBundle mainBundle] loadNibNamed:name owner:owner topLevelObjects:NULL];
+    return [hk_app_bundle() loadNibNamed:name owner:owner topLevelObjects:NULL];
 }
 @end
 

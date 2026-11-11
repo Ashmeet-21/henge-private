@@ -328,6 +328,8 @@ int main(int argc, const char **argv, const char **envp) {
             return 121;
         }
         hk_set_presenter(&presenter);
+        /* No early hk_font_adopt(nil) here, unlike the iOS app: on a Mac CoreText fonts are plain CF objects, and
+           macOS's UIFoundation takes them for AppKit's fonts once they answer AppKit's font methods. */
         /* NSParagraphStyle, NSShadow and friends: UIFoundation, which iOS has as well. */
         dlopen("/System/Library/PrivateFrameworks/UIFoundation.framework/UIFoundation", RTLD_LAZY);
         if (g_snap_dir) {
@@ -354,6 +356,7 @@ int main(int argc, const char **argv, const char **envp) {
         if (macos) {
             char app[4096];
             snprintf(app, sizeof app, "%.*s", (int)(macos - path + 4), path);
+            tl_main_bundle_for_everyone(); /* see tl_loader.h: the Mac's UIFoundation needs it, iOS's doesn't */
             if (tl_adopt_main_bundle(app)) fprintf(stderr, "tlios: %s is not a bundle\n", app);
         }
         for (uint32_t k = 0; k < _dyld_image_count(); k++)

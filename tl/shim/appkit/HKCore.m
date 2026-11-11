@@ -2,6 +2,7 @@
    Windows are layer trees handed to the presenter; the run loop is the thread's CFRunLoop (on iOS the main thread's,
    shared with UIKit), with an event queue the presenter feeds. */
 #import "HKShim.h"
+#include "../../loader/tl_loader.h"
 #import <objc/message.h>
 #import <objc/runtime.h>
 #include <mach/mach_time.h>
@@ -1473,9 +1474,13 @@ static void wake_perform(void *info) {}
 - (void)abortModal {}
 @end
 
+/* The app's bundle (adopted by the loader), not the host's: what Henge's AppKit reads for the app. */
+NSBundle *hk_app_bundle(void) { return (__bridge NSBundle *)tl_main_bundle() ?: [NSBundle mainBundle]; }
+
 int NSApplicationMain(int argc, const char *argv[]) {
     @autoreleasepool {
-        Class principal = NSClassFromString([NSBundle mainBundle].infoDictionary[@"NSPrincipalClass"] ?: @"NSApplication");
+        NSBundle *app = hk_app_bundle();
+        Class principal = NSClassFromString(app.infoDictionary[@"NSPrincipalClass"] ?: @"NSApplication");
         if (!principal) principal = [NSApplication class];
         [principal sharedApplication];
         [NSApp run];
