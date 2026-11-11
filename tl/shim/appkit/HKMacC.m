@@ -383,6 +383,37 @@ HK_FN(double, CGDisplayModeGetRefreshRate, (CFTypeRef mode)) { return 60; }
 HK_FN(void, CGDisplayModeRelease, (CFTypeRef mode)) {
     if (mode) CFRelease(mode);
 }
+HK_FN(CFTypeRef, CGDisplayModeRetain, (CFTypeRef mode)) { return mode ? CFRetain(mode) : NULL; }
+HK_FN(size_t, CGDisplayModeGetPixelWidth, (CFTypeRef mode)) { return (size_t)(screen_points().width * hk_display_scale()); }
+HK_FN(size_t, CGDisplayModeGetPixelHeight, (CFTypeRef mode)) { return (size_t)(screen_points().height * hk_display_scale()); }
+HK_FN(int32_t, CGDisplayModeGetIODisplayModeID, (CFTypeRef mode)) { return 1; }
+HK_FN(uint32_t, CGDisplayModeGetIOFlags, (CFTypeRef mode)) { return 0x7; /* valid, safe, default */ }
+HK_FN(bool, CGDisplayModeIsUsableForDesktopGUI, (CFTypeRef mode)) { return true; }
+HK_FN(CFStringRef, CGDisplayModeCopyPixelEncoding, (CFTypeRef mode)) { return CFSTR("--------RRRRRRRRGGGGGGGGBBBBBBBB"); }
+/* Every mode the display has: its one. */
+HK_FN(CFArrayRef, CGDisplayCopyAllDisplayModes, (uint32_t display, CFDictionaryRef options)) {
+    if (display != kMainDisplay) return NULL;
+    CFTypeRef mode = hk_CGDisplayCopyDisplayMode(display);
+    CFArrayRef modes = CFArrayCreate(NULL, &mode, 1, &kCFTypeArrayCallBacks);
+    CFRelease(mode);
+    return modes;
+}
+HK_FN(uint32_t, CGDisplayIsMain, (uint32_t display)) { return display == kMainDisplay; }
+HK_FN(uint32_t, CGDisplayIsActive, (uint32_t display)) { return display == kMainDisplay; }
+HK_FN(uint32_t, CGDisplayIsOnline, (uint32_t display)) { return display == kMainDisplay; }
+HK_FN(uint32_t, CGDisplayIsAsleep, (uint32_t display)) { return 0; }
+/* The display's physical size in millimetres, at a Mac's 110 points per inch. */
+HK_FN(CGSize, CGDisplayScreenSize, (uint32_t display)) {
+    CGSize s = hk_display_points();
+    return display == kMainDisplay ? CGSizeMake(s.width * 25.4 / 110, s.height * 25.4 / 110) : CGSizeZero;
+}
+HK_FN(uint32_t, CGDisplayVendorNumber, (uint32_t display)) { return 0x610; /* Apple */ }
+HK_FN(uint32_t, CGDisplayModelNumber, (uint32_t display)) { return 1; }
+HK_FN(uint32_t, CGDisplaySerialNumber, (uint32_t display)) { return 1; }
+HK_FN(uint32_t, CGDisplayUnitNumber, (uint32_t display)) { return 0; }
+/* The pointer is the finger's (or the trackpad's): hiding it is the screen's business. */
+HK_FN(HKCGError, CGDisplayHideCursor, (uint32_t display)) { return 0; }
+HK_FN(HKCGError, CGDisplayShowCursor, (uint32_t display)) { return 0; }
 HK_FN(uint32_t, CGDisplayIsBuiltin, (uint32_t display)) { return 1; }
 HK_FN(double, CGDisplayRotation, (uint32_t display)) { return 0; }
 HK_FN(uint32_t, CGDisplayMirrorsDisplay, (uint32_t display)) { return 0; /* kCGNullDirectDisplay */ }

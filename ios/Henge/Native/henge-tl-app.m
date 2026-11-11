@@ -79,8 +79,11 @@ static NSArray<NSString *> *arguments_for(NSString *app, NSString *exe) {
     NSArray *names = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:fw error:nil];
     BOOL chromium = NO, branded = NO;
     for (NSString *n in names) {
-        if ([n hasSuffix:@"Chromium Framework.framework"] || [n hasSuffix:@"Chrome Framework.framework"] ||
-            [n isEqualToString:@"Chromium Embedded Framework.framework"] || [n isEqualToString:@"Electron Framework.framework"])
+        /* Chromium-based browsers ship "<Name> Framework.framework" with Chromium's helper apps inside (Chrome,
+           Chromium, Helium, Brave, Edge...); CEF and Electron apps carry their framework by name. */
+        NSString *helpers = [fw stringByAppendingPathComponent:[n stringByAppendingPathComponent:@"Versions/Current/Helpers"]];
+        if ([n isEqualToString:@"Chromium Embedded Framework.framework"] || [n isEqualToString:@"Electron Framework.framework"] ||
+            ([n hasSuffix:@" Framework.framework"] && [[NSFileManager defaultManager] fileExistsAtPath:helpers]))
             chromium = YES;
         if ([n isEqualToString:@"Google Chrome Framework.framework"] || [n hasPrefix:@"Google Chrome for Testing"]) branded = YES;
     }

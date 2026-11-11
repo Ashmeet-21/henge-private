@@ -228,6 +228,14 @@ PASS_UP(magnifyWithEvent)
 - (NSRect)frame { return _frame; }
 - (NSRect)bounds { return _bounds; }
 - (NSView *)superview { return _superview; }
+
+/* A view going away leaves its subviews without a superview (they only point back at it, unretained), and its layer
+   without it as delegate, as AppKit does: a subview later removed from its superview must not message a freed one. */
+- (void)dealloc {
+    for (NSView *v in _subviews)
+        if (v->_superview == self) v->_superview = nil;
+    if (_layer.delegate == (id)self) _layer.delegate = nil;
+}
 - (NSWindow *)window { return _window; }
 - (NSArray<NSView *> *)subviews { return [_subviews copy]; }
 - (NSArray<NSTrackingArea *> *)trackingAreas { return [_trackingAreas copy]; }

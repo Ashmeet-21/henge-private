@@ -49,13 +49,17 @@ static Class own_class(const char *name) {
 
 /* A program that finds classes by name (Rust's objc2 does for all of AppKit) gets this AppKit's: on iOS the runtime
    has other classes called NSColor and NSFont. */
-static Class hk_objc_getClass(const char *name) {
+/* They return void *, not Class: ARC would retain and autorelease a returned Class, and a root class that answers no
+   messages (Chromium's CrZombie) takes that retain for a message to a freed object and stops the program. */
+static void *hk_objc_getClass(const char *name) {
     Class own = own_class(name);
     if (own && getenv("HK_LOG_BYNAME")) hk_log("objc_getClass(%s): Henge's", name);
-    return own ?: objc_getClass(name);
+    return (__bridge void *)(own ?: objc_getClass(name));
 }
-static Class hk_objc_lookUpClass(const char *name) { return own_class(name) ?: objc_lookUpClass(name); }
-static Class hk_objc_getRequiredClass(const char *name) { return own_class(name) ?: objc_getRequiredClass(name); }
+static void *hk_objc_lookUpClass(const char *name) { return (__bridge void *)(own_class(name) ?: objc_lookUpClass(name)); }
+static void *hk_objc_getRequiredClass(const char *name) {
+    return (__bridge void *)(own_class(name) ?: objc_getRequiredClass(name));
+}
 static Class hk_objc_getMetaClass(const char *name) {
     Class c = own_class(name);
     return c ? object_getClass(c) : (Class)objc_getMetaClass(name);

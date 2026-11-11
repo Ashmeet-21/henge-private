@@ -339,3 +339,7 @@ NSString *_NSYankFromKillRing(void) {
 }
 void _NSNewKillRingSequence(void) { g_kill_new_sequence = YES; }
 void _NSSetKillRingToYankedState(void) { g_kill_new_sequence = YES; }
+
+/* NSFont's identity matrix (fontWithName:matrix:): AppKit exports a pointer to it. */
+static const CGFloat hk_font_identity[6] = {1, 0, 0, 1, 0, 0};
+const CGFloat *NSFontIdentityMatrix = hk_font_identity;

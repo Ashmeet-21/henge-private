@@ -11,6 +11,7 @@
 #include <mach-o/loader.h>
 #include <mach/mach.h>
 #include <pthread.h>
+#include <sys/sysctl.h>
 #include <dispatch/dispatch.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -92,6 +93,8 @@ typedef struct TlProc {
     int nexit_watchers;
 } TlProc;
 static TlProc *g_procs[TL_MAX_NS];
+static int g_main_argc; /* the program's own arguments (not its host's), once its main runs */
+static char **g_main_argv;
 static TlImage *g_order[1024]; /* every image, in the order it was loaded */
 static _Atomic int g_norder;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -526,6 +529,7 @@ static TlExport trie_find(const uint8_t *start, uint32_t size, const char *sym) 
 }
 
 static uint64_t resolve_in_dep(TlImage *im, int ordinal, const char *sym, int *found);
+static void *guest_override(const char *install_name, const char *sym);
 
 /* An exported symbol of a guest image, following re-exports. */
 static uint64_t image_export(TlImage *im, const char *sym, int *found) {
@@ -592,7 +596,14 @@ static uint64_t resolve_in_dep(TlImage *im, int ordinal, const char *sym, int *f
     }
     if (ordinal < 1 || ordinal > im->ndeps) return 0;
     TlDep *dep = &im->deps[ordinal - 1];
-    if (dep->tl) return image_export(dep->tl, sym, found);
+    if (dep->tl) {
+        void *over = guest_override(dep->install_name, sym);
+        if (over) {
+            *found = 1;
+            return (uint64_t)over;
+        }
+        return image_export(dep->tl, sym, found);
+    }
     return host_symbol(dep->handle, dep->install_name, sym, found);
 }
 
@@ -1153,6 +1164,11 @@ static TlImage *load_one(const char *path, char *err, size_t errlen) {
    and globals, under the program that already uses them. Such a category's class is cleared, which the runtime
    skips (as for a weak class that is missing); the copy's calls reach the program's copy of the same methods. */
 static void keep_own_categories(TlImage *im) {
+    /* Another copy of this library (an earlier process's) has added its categories to the system's classes already:
+       those stay the first copy's. A library only this process loads (Steam's web helper's CEF) adds its own. */
+    int earlier_copy = 0;
+    for (int i = 0; i < g_norder && !earlier_copy; i++)
+        earlier_copy = g_order[i] != im && g_order[i]->ns != im->ns && !strcmp(g_order[i]->path, im->path);
     static const char *const lists[] = {"__objc_catlist", "__objc_catlist2", "__objc_nlcatlist"};
     static const char *const segs[] = {"__DATA_CONST", "__DATA"};
     for (int l = 0; l < 3; l++)
@@ -1165,7 +1181,7 @@ static void keep_own_categories(TlImage *im) {
                 if (!cat) continue;
                 void *cls = (void *)cat[1]; /* category_t: name, cls, ... */
                 TlImage *owner = cls ? tl_image_containing(cls) : NULL;
-                if (owner && owner->ns == im->ns) continue;
+                if (owner ? owner->ns == im->ns : !earlier_copy) continue;
                 cat[1] = 0;
             }
         }
@@ -1227,6 +1243,7 @@ static TlImage *load_library_in(const char *path, int ns, char *err, size_t errl
 
 int tl_run_main(TlImage *exe, int argc, const char **argv, const char **envp) {
     if (!exe->has_main) return -1;
+    if (exe->ns == 0 && !g_main_argv) g_main_argc = argc, g_main_argv = (char **)argv; /* _NSGetArgv's answer */
     int (*entry)(int, const char **, const char **, const char **) = (void *)(exe->base + exe->entryoff);
     const char *apple[] = {NULL};
     return entry(argc, argv, envp, apple);
@@ -1379,7 +1396,21 @@ static void *rt_dlsym(void *handle, const char *name) {
             rt_set_dlerror("%s: symbol not found", name);
             return NULL;
         }
-        return dlsym(RTLD_DEFAULT, name);
+        /* A symbol of the app's own code in another process (Steam's web helper asks for its launcher's
+           GetBootstrapperVersion): that process is not this one, and the system has none. */
+        for (int i = 0; i < n; i++) {
+            if (g_order[i]->ns == ns) continue;
+            image_export(g_order[i], sym, &found);
+            if (found) {
+                rt_set_dlerror("%s: symbol not found", name);
+                return NULL;
+            }
+        }
+        if (getenv("TL_DLSYM_TRACE")) tl_log("dlsym(RTLD_DEFAULT, %s) from namespace %d: the system's", name, ns);
+        double t0 = getenv("TL_DLSYM_TRACE") ? (double)clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
+        void *v = dlsym(RTLD_DEFAULT, name);
+        if (t0) tl_log("  ... %s in %.1f ms", v ? "found" : "not found", ((double)clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6);
+        return v;
     }
     return dlsym(handle, name);
 }
@@ -1485,16 +1516,27 @@ static char **copy_strings(char *const *v, int *count) {
     return out;
 }
 
-/* A program of the app's own (inside its bundle, or beside a bare program): one we start as a process here. */
+/* A program of the app's own: one we start as a process here. Inside its bundle (or beside a bare program), or a
+   Mach-O in the app's home (Steam's client, which its launcher installs in Library/Application Support). */
 static int is_guest_program(const char *path) {
     if (!path || is_system_path(path) || !strncmp(path, "/usr/", 5) || !strncmp(path, "/bin/", 5) || !strncmp(path, "/sbin/", 6) ||
-        !strncmp(path, "/Library/Apple/", 15))
+        !strncmp(path, "/Library/Apple/", 15) || !strncmp(path, "/System/", 8))
         return 0;
     TlImage *exe = main_of(0);
     if (!exe) return 0;
     const char *app = strstr(exe->path, ".app/");
     size_t root = app ? (size_t)(app - exe->path + 5) : strlen(exe->dir) + 1;
-    return !strncmp(path, exe->path, root);
+    if (!strncmp(path, exe->path, root)) return 1;
+    char home[PATH_MAX], real[PATH_MAX];
+    if (!getenv("HOME") || !realpath(getenv("HOME"), home) || !realpath(path, real)) return 0;
+    size_t h = strlen(home);
+    if (strncmp(real, home, h) || real[h] != '/') return 0;
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    uint32_t magic = 0;
+    ssize_t n = read(fd, &magic, sizeof magic);
+    close(fd);
+    return n == sizeof magic && (magic == MH_MAGIC_64 || magic == FAT_CIGAM || magic == FAT_MAGIC);
 }
 
 static void proc_finish(TlProc *p, int status) {
@@ -1509,6 +1551,7 @@ static void proc_finish(TlProc *p, int status) {
         dispatch_source_merge_data((dispatch_source_t)p->exit_watchers[i], DISPATCH_PROC_EXIT);
         dispatch_release((dispatch_source_t)p->exit_watchers[i]);
     }
+    kill(getpid(), SIGCHLD); /* as the kernel tells a parent (libuv reaps its children on it) */
 }
 
 /* A process started here has no kernel pid: the kernel would report a watch on it as "already exited" at once (so
@@ -1548,7 +1591,7 @@ static void *proc_thread(void *arg) {
 }
 
 /* Loads path as a new process (namespace) started by the namespace parent_ns. NULL with errno set. */
-static TlProc *proc_load(const char *path, int parent_ns, char *const argv[], char *const envp[]) {
+static TlProc *proc_new(int parent_ns, char *const argv[], char *const envp[]) {
     pthread_mutex_lock(&g_proc_lock);
     int ns = g_next_ns < TL_MAX_NS ? g_next_ns++ : 0;
     pthread_mutex_unlock(&g_proc_lock);
@@ -1558,6 +1601,13 @@ static TlProc *proc_load(const char *path, int parent_ns, char *const argv[], ch
     p->argv = copy_strings(argv, &p->argc);
     p->envp = copy_strings(envp, NULL);
     g_procs[ns] = p; /* before loading: its initializers and _NSGetArgv see its own arguments */
+    return p;
+}
+
+static TlProc *proc_load(const char *path, int parent_ns, char *const argv[], char *const envp[]) {
+    TlProc *p = proc_new(parent_ns, argv, envp);
+    if (!p) return NULL;
+    int ns = p->ns;
     char err[1024] = "";
     TlImage *exe = load_library_in(path, ns, err, sizeof err);
     if (!exe) {
@@ -1571,8 +1621,28 @@ static TlProc *proc_load(const char *path, int parent_ns, char *const argv[], ch
     return p;
 }
 
-static int spawn_in_process(pid_t *pid, const char *path, int parent_ns, char *const argv[], char *const envp[]) {
+/* A Chromium helper's switches for running inside the app: its sandbox policy would come through an inherited file
+   descriptor (--seatbelt-client=N), which an in-app child does not get, and iOS sandboxes the whole app anyway, so
+   it runs with --no-sandbox instead. Other programs' arguments are passed as they are. */
+static char **child_argv(char *const argv[]) {
+    int n = 0, helper = 0, unsandboxed = 0;
+    while (argv && argv[n]) {
+        if (!strncmp(argv[n], "--type=", 7)) helper = 1;
+        if (!strcmp(argv[n], "--no-sandbox")) unsandboxed = 1;
+        n++;
+    }
+    char **out = calloc((size_t)n + 2, sizeof *out);
+    int k = 0;
+    for (int i = 0; i < n; i++)
+        if (!helper || strncmp(argv[i], "--seatbelt-client", 17)) out[k++] = argv[i];
+    if (helper && !unsandboxed) out[k++] = "--no-sandbox";
+    return out;
+}
+
+static int spawn_in_process(pid_t *pid, const char *path, int parent_ns, char *const argv_in[], char *const envp[]) {
+    char **argv = child_argv(argv_in);
     TlProc *p = proc_load(path, parent_ns, argv, envp);
+    free(argv); /* proc_new copies the strings */
     if (!p) return errno ? errno : ENOEXEC;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
@@ -1641,9 +1711,14 @@ static int wanted_process(char *const argv[]) {
        refused as on iOS, and Chromium copes. */
     static const char *const utilities[] = {"storage.mojom.StorageService", "network.mojom.NetworkService",
                                             "audio.mojom.AudioService", NULL};
-    int utility = 0;
+    int utility = 0, helper = 0;
     const char *sub = NULL;
+    const char *base = argv && argv[0] ? strrchr(argv[0], '/') : NULL;
+    base = base ? base + 1 : argv && argv[0] ? argv[0] : "";
+    if (strstr(base, "crashpad") || strstr(base, "crash_handler") || strstr(base, "crashhandler"))
+        return 0; /* crash reporters watch the process from outside: in it they would catch its signals */
     for (int i = 1; argv && argv[i]; i++) {
+        if (!strncmp(argv[i], "--type=", 7)) helper = 1;
         if (!strcmp(argv[i], "--type=renderer") || !strcmp(argv[i], "--type=gpu-process")) return 1;
         if (!strcmp(argv[i], "--type=utility")) utility = 1;
         if (!strncmp(argv[i], "--utility-sub-type=", 19)) sub = argv[i] + 19;
@@ -1651,19 +1726,19 @@ static int wanted_process(char *const argv[]) {
     if (utility && sub)
         for (int i = 0; utilities[i]; i++)
             if (!strcmp(sub, utilities[i])) return 1;
-    return 0;
+    return !helper; /* a program of the app's own (Steam's web helper), not a Chromium helper */
 }
 
 /* A started process's own command line and environment (its libraries read them through _NSGetArgv). */
 static int *rt__NSGetArgc(void) {
     int ns = ns_of(__builtin_return_address(0));
     TlProc *p = ns > 0 && ns < TL_MAX_NS ? g_procs[ns] : NULL;
-    return p ? &p->argc : _NSGetArgc();
+    return p ? &p->argc : g_main_argv ? &g_main_argc : _NSGetArgc();
 }
 static char ***rt__NSGetArgv(void) {
     int ns = ns_of(__builtin_return_address(0));
     TlProc *p = ns > 0 && ns < TL_MAX_NS ? g_procs[ns] : NULL;
-    return p ? &p->argv : _NSGetArgv();
+    return p ? &p->argv : g_main_argv ? &g_main_argv : _NSGetArgv();
 }
 static char ***rt__NSGetEnviron(void) {
     int ns = ns_of(__builtin_return_address(0));
@@ -1803,6 +1878,12 @@ static kern_return_t rt_bootstrap_look_up(mach_port_t bp, const char *name, mach
         *sp = port;
         return KERN_SUCCESS;
     }
+    /* iOS's sandbox lets an app reach Apple's services, not other programs' (a Mac runner shaped like iOS must not
+       reach the Mac's own apps either: a second Steam would hand over to the user's). */
+    if (g_host->ios_kernel_rules && strncmp(name, "com.apple.", 10)) {
+        if (g_host->verbose || getenv("TL_BOOT_TRACE")) tl_log("bootstrap_look_up %s refused (not Apple's)", name);
+        return 1102; /* BOOTSTRAP_UNKNOWN_SERVICE */
+    }
     return bootstrap_look_up(bp, name, sp);
 }
 
@@ -1818,13 +1899,86 @@ static pid_t rt_audit_token_to_pid(audit_token_t token) {
     return pid;
 }
 
+/* A program's crash reporter (Breakpad, Crashpad) taking the task's exception ports would take every thread's
+   faults, Henge's included, and freeze the app writing its dump. The program's own threads may set theirs. */
+static kern_return_t rt_task_set_exception_ports(mach_port_t task, unsigned mask, mach_port_t port, int behavior, int flavor) {
+    static int said;
+    if (!said++) tl_log("the program asked for the app's exception ports (ignored)");
+    return KERN_SUCCESS;
+}
+static kern_return_t rt_task_swap_exception_ports(mach_port_t task, unsigned mask, mach_port_t port, int behavior, int flavor,
+                                                  unsigned *masks, unsigned *count, mach_port_t *ports, int *behaviors,
+                                                  int *flavors) {
+    if (count) *count = 0;
+    return rt_task_set_exception_ports(task, mask, port, behavior, flavor);
+}
+
 static int rt_refuse(void) {
     errno = EPERM;
     return -1;
 }
 
+/* What a program's spawn file actions make of the child's standard output and error (dup2 onto 1 and 2), for the
+   system tools answered here. */
+typedef struct { const void *fa; int to[3]; } TlSpawnFds;
+static TlSpawnFds g_spawn_fds[32];
+static pthread_mutex_t g_spawn_fds_lock = PTHREAD_MUTEX_INITIALIZER;
+static TlSpawnFds *spawn_fds(const void *fa, int create) {
+    TlSpawnFds *free_slot = NULL;
+    for (int i = 0; i < 32; i++) {
+        if (g_spawn_fds[i].fa == fa) return &g_spawn_fds[i];
+        if (!g_spawn_fds[i].fa && !free_slot) free_slot = &g_spawn_fds[i];
+    }
+    if (create && free_slot) *free_slot = (TlSpawnFds){fa, {-1, -1, -1}};
+    return create ? free_slot : NULL;
+}
+static int rt_posix_spawn_file_actions_adddup2(posix_spawn_file_actions_t *fa, int fd, int newfd) {
+    if (newfd >= 0 && newfd < 3) {
+        pthread_mutex_lock(&g_spawn_fds_lock);
+        TlSpawnFds *f = spawn_fds(fa ? *fa : NULL, 1);
+        if (f) f->to[newfd] = fd;
+        pthread_mutex_unlock(&g_spawn_fds_lock);
+    }
+    return posix_spawn_file_actions_adddup2(fa, fd, newfd);
+}
+static int rt_posix_spawn_file_actions_destroy(posix_spawn_file_actions_t *fa) {
+    pthread_mutex_lock(&g_spawn_fds_lock);
+    TlSpawnFds *f = spawn_fds(fa ? *fa : NULL, 0);
+    if (f) f->fa = NULL;
+    pthread_mutex_unlock(&g_spawn_fds_lock);
+    return posix_spawn_file_actions_destroy(fa);
+}
+
+/* System tools a program runs for a line of facts, answered here (iOS runs no tools): sw_vers. The output goes to
+   where the program pointed the tool's standard output; the "process" has ended by the time it is returned. */
+static int builtin_tool(pid_t *pid, const char *path, const void *fa, int parent_ns, char *const argv[], char *const envp[]) {
+    if (!path || strcmp(path, "/usr/bin/sw_vers")) return -1;
+    char version[64] = "15.0", build[64] = "24A335";
+    size_t n = sizeof version;
+    sysctlbyname("kern.osproductversion", version, &n, NULL, 0);
+    n = sizeof build;
+    sysctlbyname("kern.osversion", build, &n, NULL, 0);
+    char out[256];
+    const char *arg = argv && argv[0] && argv[1] ? argv[1] : "";
+    if (!strcmp(arg, "-productVersion") || !strcmp(arg, "--productVersion")) snprintf(out, sizeof out, "%s\n", version);
+    else if (!strcmp(arg, "-buildVersion") || !strcmp(arg, "--buildVersion")) snprintf(out, sizeof out, "%s\n", build);
+    else if (!strcmp(arg, "-productName") || !strcmp(arg, "--productName")) snprintf(out, sizeof out, "macOS\n");
+    else snprintf(out, sizeof out, "ProductName:\t\tmacOS\nProductVersion:\t\t%s\nBuildVersion:\t\t%s\n", version, build);
+    pthread_mutex_lock(&g_spawn_fds_lock);
+    TlSpawnFds *f = fa ? spawn_fds(*(const void *const *)fa, 0) : NULL;
+    int fd = f && f->to[1] >= 0 ? f->to[1] : -1;
+    pthread_mutex_unlock(&g_spawn_fds_lock);
+    if (fd >= 0) (void)!write(fd, out, strlen(out));
+    TlProc *p = proc_new(parent_ns, argv, envp);
+    if (!p) return EAGAIN;
+    tl_log("answered %s here", path);
+    if (pid) *pid = p->pid;
+    proc_finish(p, 0);
+    return 0;
+}
+
 static int rt_posix_spawn(pid_t *pid, const char *path, const void *fa, const void *attr, char *const argv[], char *const envp[]) {
-    (void)fa, (void)attr;
+    (void)attr;
     if (getenv("TL_SPAWN_TRACE")) {
         tl_log("posix_spawn %s", path ? path : "?");
         for (int i = 0; argv && argv[i] && i < 6; i++) tl_log("  argv[%d] %.120s", i, argv[i]);
@@ -1833,15 +1987,56 @@ static int rt_posix_spawn(pid_t *pid, const char *path, const void *fa, const vo
     }
     if (g_host->processes_as_threads && !getenv("TL_NO_SPAWN_PATH") && is_guest_program(path) && wanted_process(argv))
         return spawn_in_process(pid, path, ns_of(__builtin_return_address(0)), argv, envp);
+    if (g_host->processes_as_threads) {
+        int rc = builtin_tool(pid, path, fa, ns_of(__builtin_return_address(0)), argv, envp);
+        if (rc >= 0) return rc;
+    }
     tl_log("the program tried to start another process: %s (refused, as on iOS)", path ? path : "?");
     return EPERM;
 }
 
+/* Valve's tier0 (Steam) starts every child through CreateSimpleProcess(command, flags, env, dir): fork, then in the
+   child setsid, chdir and exec (flags 8: execv of an argv, 16: execvp, 4: a shell command, none: system()). Fork
+   cannot be had here, so the whole call is answered: an argv naming a program of the app's own starts it as a
+   process inside the app (the shared working directory stays as it is); anything else is refused, as a failed fork
+   (0). */
+static pid_t rt_CreateSimpleProcess(void *command, unsigned flags, char **env, const char *dir) {
+    if (flags & 0x20) return 0;
+    if (flags & (8 | 16)) {
+        char **argv = command;
+        const char *path = argv && argv[0] ? argv[0] : NULL;
+        if (getenv("TL_SPAWN_TRACE")) {
+            tl_log("CreateSimpleProcess %s (flags %#x, dir %s)", path ? path : "?", flags, dir ? dir : "-");
+            for (int i = 1; argv && argv[i] && i < 8; i++) tl_log("  argv[%d] %.120s", i, argv[i]);
+        }
+        if (path && g_host->processes_as_threads && is_guest_program(path) && wanted_process(argv)) {
+            pid_t pid = 0;
+            extern char **environ;
+            int rc = spawn_in_process(&pid, path, ns_of(__builtin_return_address(0)), argv, env ? env : environ);
+            if (!rc) return pid;
+            tl_log("CreateSimpleProcess %s: %s", path, strerror(rc));
+            return 0;
+        }
+        tl_log("the program tried to start another process: %s (refused, as on iOS)", path ? path : "?");
+        return 0;
+    }
+    tl_log("the program tried to run a shell command: %.200s (refused, as on iOS)", command ? (const char *)command : "?");
+    return 0;
+}
+
+/* Functions of an app's own libraries answered here instead (imports from other libraries only). */
+static void *guest_override(const char *install_name, const char *sym) {
+    if (!g_host || !g_host->processes_as_threads || !install_name) return NULL;
+    size_t n = strlen(install_name);
+    if (n >= 16 && !strcmp(install_name + n - 16, "libtier0_s.dylib") && !strcmp(sym, "_CreateSimpleProcess"))
+        return (void *)rt_CreateSimpleProcess;
+    return NULL;
+}
+
 /* exec of the program's own Mach-O: the new program is loaded as a process of its own and runs on this thread; this
    one's code is never returned to. */
-static int rt_execve(const char *path, char *const argv[], char *const envp[]) {
+static int exec_in(int ns, const char *path, char *const argv[], char *const envp[]) {
     if (g_host->processes_as_threads && is_guest_program(path)) {
-        int ns = ns_of(__builtin_return_address(0));
         TlProc *p = proc_load(path, ns, argv, envp);
         if (!p) return rt_refuse();
         tl_log("exec %s as process %d on this thread", path, p->ns);
@@ -1853,6 +2048,13 @@ static int rt_execve(const char *path, char *const argv[], char *const envp[]) {
     }
     tl_log("the program tried to exec %s (refused, as on iOS)", path ? path : "?");
     return rt_refuse();
+}
+static int rt_execve(const char *path, char *const argv[], char *const envp[]) {
+    return exec_in(ns_of(__builtin_return_address(0)), path, argv, envp);
+}
+extern char **environ;
+static int rt_execv(const char *path, char *const argv[]) { /* execv and execvp: the current environment */
+    return exec_in(ns_of(__builtin_return_address(0)), path, argv, environ);
 }
 
 static pid_t rt_fork(void) {
@@ -1950,8 +2152,8 @@ void *tl_runtime_lookup(const char *sym) {
         {"_posix_spawn", (void *)rt_posix_spawn},
         {"_posix_spawnp", (void *)rt_posix_spawn},
         {"_execve", (void *)rt_execve},
-        {"_execv", (void *)rt_execve},
-        {"_execvp", (void *)rt_execve},
+        {"_execv", (void *)rt_execv},
+        {"_execvp", (void *)rt_execv},
         {"_fork", (void *)rt_fork},
         {"_vfork", (void *)rt_fork},
     };
@@ -1983,6 +2185,10 @@ void *tl_runtime_lookup(const char *sym) {
             {"_bootstrap_look_up", (void *)rt_bootstrap_look_up}, {"_bootstrap_register", (void *)rt_bootstrap_register},
             {"_audit_token_to_pid", (void *)rt_audit_token_to_pid},
             {"_dispatch_source_create", (void *)rt_dispatch_source_create},
+            {"_task_set_exception_ports", (void *)rt_task_set_exception_ports},
+            {"_posix_spawn_file_actions_adddup2", (void *)rt_posix_spawn_file_actions_adddup2},
+            {"_posix_spawn_file_actions_destroy", (void *)rt_posix_spawn_file_actions_destroy},
+            {"_task_swap_exception_ports", (void *)rt_task_swap_exception_ports},
             {"_malloc_get_all_zones", (void *)rt_malloc_get_all_zones},
             {"_malloc_zone_register", (void *)rt_malloc_zone_register},
             {"_malloc_zone_unregister", (void *)rt_malloc_zone_unregister},
