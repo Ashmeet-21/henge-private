@@ -1,6 +1,7 @@
 /* Mac apps without macOS (experimental): importing, describing and running them through the translation layer. */
 #include "henge-tl.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <libkern/OSByteOrder.h>
@@ -114,26 +115,13 @@ static void scan_slice(int fd, uint64_t off, HengeTlInfo *info, int *appkit, int
     free(cmds);
 }
 
-int henge_tl_info(const char *path, HengeTlInfo *info, char *err, size_t errlen) {
-    memset(info, 0, sizeof *info);
-    TlAppInfo ai;
-    if (tl_app_info(path, &ai, err, errlen) != 0) return -1;
-    struct stat st;
-    if (stat(path, &st) != 0) return snprintf(err, errlen, "%s", strerror(errno)), -1;
-    if (S_ISDIR(st.st_mode)) snprintf(info->executable, sizeof info->executable, "%s/Contents/MacOS/%s", path, ai.executable);
-    else snprintf(info->executable, sizeof info->executable, "%s", path);
-    const char *base = strrchr(path, '/');
-    snprintf(info->name, sizeof info->name, "%s", ai.name[0] ? ai.name : base ? base + 1 : path);
-    snprintf(info->identifier, sizeof info->identifier, "%s", ai.identifier);
-    snprintf(info->min_macos, sizeof info->min_macos, "%s", ai.min_macos[0] ? ai.min_macos : ai.build_min_macos);
-    info->arm64 = ai.has_arm64 || ai.has_arm64e;
-    info->x86_64 = ai.has_x86_64;
-    int appkit = 0, swiftui = 0, catalyst = 0;
-    int fd = open(info->executable, O_RDONLY);
+/* One Mach-O file's arm64 code (the whole file, or its slice of a universal one): see scan_slice. */
+static void scan_file(const char *path, HengeTlInfo *info, int *appkit, int *swiftui, int *catalyst) {
+    int fd = open(path, O_RDONLY);
     if (fd >= 0) {
         uint32_t magic = 0;
         if (pread(fd, &magic, 4, 0) == 4) {
-            if (magic == MH_MAGIC_64) scan_slice(fd, 0, info, &appkit, &swiftui, &catalyst);
+            if (magic == MH_MAGIC_64) scan_slice(fd, 0, info, appkit, swiftui, catalyst);
             else if (magic == FAT_CIGAM || magic == FAT_CIGAM_64) { /* universal: big-endian table */
                 struct fat_header fh;
                 if (pread(fd, &fh, sizeof fh, 0) == sizeof fh) {
@@ -152,7 +140,7 @@ int henge_tl_info(const char *path, HengeTlInfo *info, char *err, size_t errlen)
                             cpu = (int32_t)OSSwapBigToHostInt32((uint32_t)a.cputype), off = OSSwapBigToHostInt32(a.offset);
                         }
                         if (cpu == CPU_TYPE_ARM64) {
-                            scan_slice(fd, off, info, &appkit, &swiftui, &catalyst);
+                            scan_slice(fd, off, info, appkit, swiftui, catalyst);
                             break;
                         }
                     }
@@ -161,6 +149,50 @@ int henge_tl_info(const char *path, HengeTlInfo *info, char *err, size_t errlen)
         }
         close(fd);
     }
+}
+
+/* An app's own frameworks and libraries (Contents/Frameworks): a Chromium or Electron app's program links only
+   libSystem and loads its framework, which is where AppKit shows. */
+static void scan_frameworks(const char *app, int *appkit, int *swiftui, int *catalyst) {
+    char dir[1100];
+    snprintf(dir, sizeof dir, "%s/Contents/Frameworks", app);
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        size_t n = strlen(e->d_name);
+        char bin[2400];
+        HengeTlInfo scratch;
+        memset(&scratch, 0, sizeof scratch);
+        if (n > 10 && !strcmp(e->d_name + n - 10, ".framework")) {
+            snprintf(bin, sizeof bin, "%s/%s/%.*s", dir, e->d_name, (int)(n - 10), e->d_name);
+            struct stat st;
+            if (stat(bin, &st) != 0) snprintf(bin, sizeof bin, "%s/%s/Versions/Current/%.*s", dir, e->d_name, (int)(n - 10), e->d_name);
+        } else if (n > 6 && !strcmp(e->d_name + n - 6, ".dylib")) {
+            snprintf(bin, sizeof bin, "%s/%s", dir, e->d_name);
+        } else continue;
+        scan_file(bin, &scratch, appkit, swiftui, catalyst);
+    }
+    closedir(d);
+}
+
+int henge_tl_info(const char *path, HengeTlInfo *info, char *err, size_t errlen) {
+    memset(info, 0, sizeof *info);
+    TlAppInfo ai;
+    if (tl_app_info(path, &ai, err, errlen) != 0) return -1;
+    struct stat st;
+    if (stat(path, &st) != 0) return snprintf(err, errlen, "%s", strerror(errno)), -1;
+    if (S_ISDIR(st.st_mode)) snprintf(info->executable, sizeof info->executable, "%s/Contents/MacOS/%s", path, ai.executable);
+    else snprintf(info->executable, sizeof info->executable, "%s", path);
+    const char *base = strrchr(path, '/');
+    snprintf(info->name, sizeof info->name, "%s", ai.name[0] ? ai.name : base ? base + 1 : path);
+    snprintf(info->identifier, sizeof info->identifier, "%s", ai.identifier);
+    snprintf(info->min_macos, sizeof info->min_macos, "%s", ai.min_macos[0] ? ai.min_macos : ai.build_min_macos);
+    info->arm64 = ai.has_arm64 || ai.has_arm64e;
+    info->x86_64 = ai.has_x86_64;
+    int appkit = 0, swiftui = 0, catalyst = 0;
+    scan_file(info->executable, info, &appkit, &swiftui, &catalyst);
+    if (S_ISDIR(st.st_mode)) scan_frameworks(path, &appkit, &swiftui, &catalyst);
     info->kind = !info->arm64 ? HENGE_TL_INTEL : catalyst ? HENGE_TL_CATALYST : appkit ? HENGE_TL_APPKIT
                : swiftui ? HENGE_TL_SWIFTUI : HENGE_TL_PROGRAM;
     return 0;
@@ -206,6 +238,7 @@ static void *run_thread(void *opaque) {
    a program registered, so a second one cannot reuse the region (nor, with the same classes, share the runtimes). */
 static _Atomic int runs;
 int henge_tl_ran_program(void) { return atomic_load(&runs); }
+void henge_tl_mark_ran(void) { atomic_store(&runs, 1); }
 
 int henge_tl_run(const char *path, const char *out_path, char *err, size_t errlen) {
     if (atomic_load(&runs)) return snprintf(err, errlen, "One program per launch: quit Henge (swipe it away) and open it again to run another."), -1;

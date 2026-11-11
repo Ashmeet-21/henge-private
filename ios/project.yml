@@ -77,6 +77,8 @@ targets:
           - "-lresolv"
           - "-lcompression"
           - "-lhengetl"
+          # Henge's AppKit is found by name at run time (objc_getClass): keep every Objective-C class it has.
+          - "-ObjC"
           - "-lbz2"
           # On-device pairing for Built-in StikJIT (from Husk's src/rppairing-ios).
           - "-lhusk_rppairing"
@@ -97,6 +99,15 @@ targets:
           - "CoreMedia"
           - "-framework"
           - "VideoToolbox"
+          # Henge's AppKit for Mac apps (upstream 4580ff0): drawing, text, images, file types.
+          - "-framework"
+          - "QuartzCore"
+          - "-framework"
+          - "CoreText"
+          - "-framework"
+          - "ImageIO"
+          - "-framework"
+          - "UniformTypeIdentifiers"
     dependencies:
       # Built-in StikJIT's debugger process. Embedded into PlugIns/.
       - target: HengeJITHelper

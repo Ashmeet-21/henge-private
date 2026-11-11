@@ -4,13 +4,13 @@ B = build
 CC = xcrun clang
 CFLAGS = -O2 -g -Wall -Wextra -Wno-unused-parameter -fblocks
 GUEST = -target arm64-apple-macos13
-LOADER = loader/tl_loader.c loader/tl_tlv.S loader/tl_bundle.m
+LOADER = loader/tl_loader.c loader/tl_tlv.S loader/tl_bundle.m loader/tl_stubs.m
 
 TESTS = $(B)/hello $(B)/hello-opcodes $(B)/fnd $(B)/fnd-opcodes $(B)/swifty $(B)/cxx $(B)/FW.app/Contents/MacOS/fwapp
 
 DMG = dmg/udif.c dmg/volume.c dmg/hfsplus.c dmg/apfs.c dmg/appinfo.c
 
-all: $(B)/tlrun $(B)/tlrun-mini $(B)/tldmg $(TESTS)
+all: $(B)/tlrun $(B)/tlrun-mini $(B)/tldmg $(B)/tlios $(TESTS)
 
 $(B):
 	mkdir -p $(B)
@@ -20,6 +20,19 @@ $(B)/tlrun: tools/tlrun.c $(LOADER) loader/tl_loader.h | $(B)
 # With the toy AppKit (shim/appkit_mini.m) standing in for the real one.
 $(B)/tlrun-mini: tools/tlrun.c $(LOADER) loader/tl_loader.h shim/appkit_mini.m shim/appkit_mini.h | $(B)
 	$(CC) $(CFLAGS) -fobjc-arc -DTL_APPKIT_MINI tools/tlrun.c $(LOADER) shim/appkit_mini.m -framework Foundation -framework CoreText -framework CoreGraphics -framework ImageIO -o $@
+
+# Henge's AppKit (shim/appkit) and tlios, which runs a Mac app the way it would run on iOS (see tools/tlios.m).
+SHIM = $(wildcard shim/appkit/*.m)
+SHIM_OBJ = $(patsubst shim/appkit/%.m,$(B)/shim/%.o,$(SHIM))
+$(B)/shim/%.o: shim/appkit/%.m shim/appkit/HKShim.h | $(B)
+	@mkdir -p $(B)/shim
+	$(CC) $(CFLAGS) -fobjc-arc -target arm64-apple-macos13 -Ishim/appkit -c $< -o $@
+$(B)/shim/hk_symbols.c: $(SHIM_OBJ) shim/tools/hk_symbols.sh
+	shim/tools/hk_symbols.sh $@ $(SHIM_OBJ)
+$(B)/tlios: tools/tlios.m $(LOADER) loader/tl_loader.h $(SHIM_OBJ) $(B)/shim/hk_symbols.c
+	$(CC) $(CFLAGS) -fobjc-arc -Ishim/appkit tools/tlios.m $(LOADER) $(SHIM_OBJ) $(B)/shim/hk_symbols.c \
+	  -framework Foundation -framework QuartzCore -framework Metal -framework CoreGraphics -framework CoreText \
+	  -framework ImageIO -framework IOSurface -framework CoreVideo -framework UniformTypeIdentifiers -o $@
 
 $(B)/tldmg: tools/tldmg.c $(DMG) dmg/tl_dmg.h dmg/tl_dmg_private.h | $(B)
 	$(CC) $(CFLAGS) tools/tldmg.c $(DMG) -framework CoreFoundation -lz -lbz2 -lcompression -o $@
@@ -78,8 +91,8 @@ test-apps: all apps
 	  if echo "$$out" | grep -q '^PASS HelloAppKit' && echo "$$out" | grep -q 'was never loaded'; then echo "ok   HelloAppKit on the toy AppKit, no real AppKit: $$(echo "$$out" | grep '^window')"; \
 	  else echo "FAIL HelloAppKit on the toy AppKit"; echo "$$out" | sed 's/^/  /'; fi
 
-$(B)/map_names: tests/map_names.c loader/tl_loader.c loader/tl_tlv.S loader/tl_loader.h | $(B)
-	$(CC) $(CFLAGS) tests/map_names.c loader/tl_loader.c loader/tl_tlv.S -o $@
+$(B)/map_names: tests/map_names.c loader/tl_loader.c loader/tl_tlv.S loader/tl_stubs.m loader/tl_loader.h | $(B)
+	$(CC) $(CFLAGS) -fobjc-arc tests/map_names.c loader/tl_loader.c loader/tl_tlv.S loader/tl_stubs.m -framework Foundation -o $@
 
 test: all $(B)/map_names
 	@$(B)/map_names | sed 's/^PASS/ok  /'

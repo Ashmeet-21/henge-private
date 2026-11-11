@@ -34,6 +34,8 @@ struct MacApp: Identifiable, Hashable {
     }
 
     var canRun: Bool { kind == Int32(HENGE_TL_PROGRAM.rawValue) }
+    /// An AppKit app opens against Henge's own AppKit (experimental: browsers built on Chromium are what it is made for).
+    var canOpenWindowed: Bool { kind == Int32(HENGE_TL_APPKIT.rawValue) && arm64 }
 
     var verdict: (title: String, detail: String) {
         switch UInt32(kind) {
@@ -47,8 +49,8 @@ struct MacApp: Identifiable, Hashable {
             return ("Not yet: a Mac Catalyst app",
                     "It's built from an iPad app's code, so most of what it calls exists on iOS, but starting it inside Henge isn't done yet. It runs in a Mac.")
         case HENGE_TL_APPKIT.rawValue:
-            return ("Not yet: an AppKit app",
-                    "It draws its windows with AppKit, which iOS doesn't have. It runs in a Mac.")
+            return ("Experimental: an AppKit app",
+                    "It draws its windows with AppKit, which iOS doesn't have; Henge stands in its own. Made for browsers built on Chromium (Chromium, apps built with Electron or CEF); others may stop early.")
         default:
             return ("Intel only",
                     "It has no Apple silicon code. A Mac with Rosetta runs it; Henge can't yet.")
@@ -216,6 +218,7 @@ struct MacAppRunView: View {
     @State private var output = ""
     @State private var result: String?
     @State private var confirmDelete = false
+    @State private var showScreen = false
 
     var body: some View {
         ScrollView {
@@ -250,12 +253,19 @@ struct MacAppRunView: View {
                         .padding(17).deskCard()
                     }
                 }
+                if app.canOpenWindowed {
+                    Button("Open (experimental)") { showScreen = true }
+                        .buttonStyle(DeskButtonStyle()).disabled(henge_tl_ran_program() != 0).padding(.top, 16)
+                    Text("It runs inside Henge, one app per launch, without a Mac. Tap to click, scroll with one finger, drag with two, hold for a right click; the keyboard button brings up the keyboard. Quit Henge (swipe it away) to stop it.")
+                        .font(.system(size: 13)).foregroundStyle(Desk.dim).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
+                }
                 Button("Delete", role: .destructive) { confirmDelete = true }.padding(.top, 24)
             }
             .padding(.horizontal, 16).padding(.vertical, 12).deskColumn()
         }
         .background(Desk.page)
         .navigationTitle(app.name)
+        .fullScreenCover(isPresented: $showScreen) { MacAppScreen(app: app) }
         .confirmationDialog("Delete \(app.name)?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete", role: .destructive) { store.delete(app); dismiss() }
         }

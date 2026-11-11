@@ -35,4 +35,28 @@ int henge_tl_run(const char *path, const char *out_path, char *err, size_t errle
 int henge_tl_used(void);
 int henge_tl_ran_program(void);
 
+/* ---- Mac apps with windows (experimental; henge-tl-app.m): an AppKit app runs on the main thread against Henge's
+   AppKit, one per launch, and no Mac can start after it. ---- */
+/* The screen the app sees, in points, and its scale. Before henge_tl_app_load. */
+void henge_tl_app_set_screen(double width, double height, double scale);
+/* Called on the main thread whenever a window appears, goes, or changes. */
+void henge_tl_app_on_change(void (*callback)(void));
+/* Loads the app (any thread; it takes a while for a big one). 0, or -1 with a reason in err. */
+int henge_tl_app_load(const char *app_path, char *err, size_t errlen);
+/* Runs the app's main on the calling thread, which must be the main thread; returns when the app quits. */
+int henge_tl_app_run(void);
+/* The same, entered from a run-loop timer on the main thread shortly (see henge-tl-app.m); finished gets main's result. */
+void henge_tl_app_run_soon(void (*finished)(int));
+/* The app's windows on screen, back to front: count, the layer to show (a CALayer *), and the frame in screen points
+   (origin at the bottom left, as the app sees it). */
+int henge_tl_app_window_count(void);
+void *henge_tl_app_window_layer(int index);
+int henge_tl_app_window_frame(int index, double *x, double *y, double *w, double *h);
+double henge_tl_app_screen_height(void);
+/* Input in screen points, origin at the bottom left. type is AppKit's NSEventType (1 left down, 2 left up, 5 moved,
+   6 left dragged, 3/4 right down/up); phase is NSEventPhase; flags AppKit's modifier flags. */
+void henge_tl_app_mouse(int type, double x, double y, int clicks, unsigned long flags);
+void henge_tl_app_scroll(double x, double y, double dx, double dy, int phase);
+void henge_tl_app_key(int down, unsigned short keycode, const char *chars, unsigned long flags);
+
 #endif
