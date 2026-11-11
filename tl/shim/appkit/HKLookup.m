@@ -80,6 +80,9 @@ void *hk_lookup(const char *install_name, const char *symbol) {
         if (!strcmp(symbol, by_name[i].name)) return tl_binding_links_appkit_classes() ? NULL : by_name[i].fn;
     void *own = own_symbol(symbol); /* this image's own definitions first, classes included */
     if (own) return own;
+    /* Foundation's NSTask would start real processes: the app gets Henge's (HKTask.m). */
+    if (!strcmp(symbol, "_OBJC_CLASS_$_NSTask")) return (__bridge void *)objc_getClass("HKTask");
+    if (!strcmp(symbol, "_OBJC_METACLASS_$_NSTask")) return (__bridge void *)object_getClass(objc_getClass("HKTask"));
     /* MediaPlayer's centers when the process has no MediaPlayer (HKPrivate.m). */
     static const char *const media[][3] = {{"MPRemoteCommandCenter", "HKRemoteCommandCenter"},
                                            {"MPNowPlayingInfoCenter", "HKNowPlayingInfoCenter"}};

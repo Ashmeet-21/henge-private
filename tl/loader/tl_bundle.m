@@ -48,22 +48,3 @@ int tl_adopt_main_bundle(const char *app_path) {
         return 0;
     }
 }
-
-/* A launchd job file's program and arguments (for launchctl load, answered inside the app). argv gets up to max-1
-   strings (strdup'd), NULL-terminated; returns their count, or -1. */
-int tl_plist_job(const char *path, char **argv, int max) {
-    @autoreleasepool {
-        NSDictionary *job = [NSDictionary dictionaryWithContentsOfFile:@(path)];
-        if (![job isKindOfClass:[NSDictionary class]]) return -1;
-        NSArray *args = job[@"ProgramArguments"];
-        NSString *program = job[@"Program"] ?: ([args isKindOfClass:[NSArray class]] ? args.firstObject : nil);
-        if (![program isKindOfClass:[NSString class]]) return -1;
-        int n = 0;
-        argv[n++] = strdup(program.fileSystemRepresentation);
-        if ([args isKindOfClass:[NSArray class]])
-            for (NSUInteger i = 1; i < args.count && n < max - 1; i++)
-                if ([args[i] isKindOfClass:[NSString class]]) argv[n++] = strdup([args[i] UTF8String]);
-        argv[n] = NULL;
-        return n;
-    }
-}

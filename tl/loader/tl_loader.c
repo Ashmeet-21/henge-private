@@ -2183,6 +2183,32 @@ static int rt_pclose(FILE *f) {
     return pclose(f);
 }
 
+/* For the host's NSTask (Henge's AppKit): a tool answered here writes its output to out_fd and ends at once (0);
+   a program of the app's own starts as a process inside (its pid); anything else is refused (-1). */
+pid_t tl_task_launch(const char *path, char *const argv[], int out_fd, const void *caller) {
+    char out[256];
+    int ns = ns_of(caller);
+    if (!builtin_output(path, argv, out, sizeof out)) {
+        if (out_fd >= 0) (void)!write(out_fd, out, strlen(out));
+        tl_log("answered %s here (NSTask)", path);
+        return 0;
+    }
+    pid_t pid = 0;
+    extern char **environ;
+    if (g_host && g_host->processes_as_threads && is_guest_program(path) && wanted_process(argv) &&
+        !spawn_in_process(&pid, path, ns, argv, environ))
+        return pid;
+    tl_log("the program tried to start another process: %s (NSTask; refused, as on iOS)", path ? path : "?");
+    return -1;
+}
+/* Whether an in-app process has ended, and how (for NSTask). */
+int tl_task_status(pid_t pid, int *status) {
+    TlProc *p = proc_of_pid(pid);
+    if (!p) return 1;
+    if (status) *status = p->status;
+    return p->done != 0;
+}
+
 static int rt_posix_spawn(pid_t *pid, const char *path, const void *fa, const void *attr, char *const argv[], char *const envp[]) {
     (void)attr;
     if (getenv("TL_SPAWN_TRACE")) {
