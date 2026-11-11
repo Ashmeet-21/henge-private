@@ -2567,7 +2567,7 @@ static void *room_place(size_t len) {
     size_t slack = 0;
     if (len > ((size_t)4 << 30)) {
         size_t core = len + TL_PAGE - ((size_t)4 << 30);
-        if (core >= ((size_t)4 << 30) && !(core & (core - 1))) slack = len - core, len = core;
+        if (core >= ((size_t)64 << 20) && !(core & (core - 1))) slack = len - core, len = core; /* 4 GB alignment */
     }
     size_t align = (size_t)1 << 32; /* at least 4 GB */
     while (align * 2 <= len && align < ((size_t)32 << 30)) align *= 2;
@@ -2607,6 +2607,22 @@ static void *room_place(size_t len) {
             }
     }
     pthread_mutex_unlock(&g_room_lock);
+    if (!at && slack) {
+        /* The held room is full: an aligned address the system confirms free, from the bottom of the high space up
+           (a hint, never MAP_FIXED: nothing in use is touched). */
+        for (uint8_t *c = (uint8_t *)(((uintptr_t)lo + align - 1) & ~(uintptr_t)(align - 1)); c + len <= hi + ((size_t)8 << 30); c += align) {
+            void *r = mmap(c, len, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+            if (r == c) {
+                tl_log("a %.2f GB reservation at %p, free space past the held room (its alignment slack left out): placed",
+                       (double)len / (1 << 30), c);
+                pthread_mutex_lock(&g_room_lock);
+                if (g_room_nslack < 16) g_room_slack[g_room_nslack++] = (TlRoomUse){c + len, slack};
+                pthread_mutex_unlock(&g_room_lock);
+                return c;
+            }
+            if (r != MAP_FAILED) munmap(r, len);
+        }
+    }
     if (!at) {
         tl_log("a %.1f GB reservation does not fit the held room", (double)len / (1 << 30));
         return NULL;
