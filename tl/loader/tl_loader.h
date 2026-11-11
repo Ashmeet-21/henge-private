@@ -46,6 +46,10 @@ void tl_host_init_region(TlHost *host, void *rx, void *rw, size_t bytes);
    bundle's frameworks, fixes them up, registers them, and runs their
    initializers. NULL with a reason in err. */
 TlImage *tl_load(TlHost *host, const char *path, char *err, size_t errlen);
+/* Make NSBundle.mainBundle the guest app's bundle (the folder holding
+   Contents/MacOS/<executable>). The process then belongs to that app: Henge
+   hands it the process, as LiveContainer does. 0, or -1. */
+int tl_adopt_main_bundle(const char *app_path);
 /* Calls the executable's main. */
 int tl_run_main(TlImage *exe, int argc, const char **argv, const char **envp);
 

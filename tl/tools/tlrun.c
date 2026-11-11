@@ -54,5 +54,12 @@ int main(int argc, const char **argv, const char **envp) {
         fprintf(stderr, "tlrun: %s at %p, %zu bytes, %d missing symbols; not in dyld's %u images\n", path,
                 tl_image_base(exe), tl_image_size(exe), tl_missing_count(), _dyld_image_count());
     for (int k = 0; k < tl_missing_count(); k++) fprintf(stderr, "tlrun: missing %s\n", tl_missing_name(k));
+    /* An executable inside an app bundle runs as that app. */
+    const char *macos = strstr(path, ".app/Contents/MacOS/");
+    if (macos) {
+        char app[4096];
+        snprintf(app, sizeof app, "%.*s", (int)(macos - path + 4), path);
+        if (tl_adopt_main_bundle(app)) fprintf(stderr, "tlrun: %s is not a bundle\n", app);
+    }
     return tl_run_main(exe, argc - i, argv + i, envp);
 }

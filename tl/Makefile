@@ -4,17 +4,22 @@ B = build
 CC = xcrun clang
 CFLAGS = -O2 -g -Wall -Wextra -Wno-unused-parameter -fblocks
 GUEST = -target arm64-apple-macos13
-LOADER = loader/tl_loader.c loader/tl_tlv.S
+LOADER = loader/tl_loader.c loader/tl_tlv.S loader/tl_bundle.m
 
 TESTS = $(B)/hello $(B)/hello-opcodes $(B)/fnd $(B)/fnd-opcodes $(B)/swifty $(B)/cxx $(B)/FW.app/Contents/MacOS/fwapp
 
-all: $(B)/tlrun $(TESTS)
+DMG = dmg/udif.c dmg/volume.c dmg/hfsplus.c dmg/apfs.c dmg/appinfo.c
+
+all: $(B)/tlrun $(B)/tldmg $(TESTS)
 
 $(B):
 	mkdir -p $(B)
 
 $(B)/tlrun: tools/tlrun.c $(LOADER) loader/tl_loader.h | $(B)
-	$(CC) $(CFLAGS) tools/tlrun.c $(LOADER) -o $@
+	$(CC) $(CFLAGS) -fobjc-arc tools/tlrun.c $(LOADER) -framework Foundation -o $@
+
+$(B)/tldmg: tools/tldmg.c $(DMG) dmg/tl_dmg.h dmg/tl_dmg_private.h | $(B)
+	$(CC) $(CFLAGS) tools/tldmg.c $(DMG) -framework CoreFoundation -lz -lbz2 -lcompression -o $@
 
 $(B)/hello: tests/hello.c | $(B)
 	$(CC) $(GUEST) -O1 $< -o $@
@@ -34,6 +39,26 @@ $(B)/FW.app/Contents/MacOS/fwapp: tests/fwapp.m tests/fw.m | $(B)
 	mkdir -p $(B)/FW.app/Contents/MacOS $(B)/FW.app/Contents/Frameworks
 	$(CC) $(GUEST) -O1 -fobjc-arc -dynamiclib -install_name @rpath/libtlfw.dylib -framework Foundation tests/fw.m -o $(B)/FW.app/Contents/Frameworks/libtlfw.dylib
 	$(CC) $(GUEST) -O1 -fobjc-arc -framework Foundation -rpath @executable_path/../Frameworks tests/fwapp.m $(B)/FW.app/Contents/Frameworks/libtlfw.dylib -o $@
+	printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleExecutable</key><string>fwapp</string><key>CFBundleIdentifier</key><string>dev.henge.tl.fwapp</string><key>CFBundleName</key><string>FW</string><key>LSMinimumSystemVersion</key><string>13.0</string></dict></plist>\n' > $(B)/FW.app/Contents/Info.plist
+
+# Window apps, for sizing what iOS lacks (they cannot be proven on the Mac, where AppKit is real).
+SWIFTUI_APP = $(B)/HelloSwiftUI.app/Contents/MacOS/HelloSwiftUI
+APPKIT_APP = $(B)/HelloAppKit.app/Contents/MacOS/HelloAppKit
+apps: $(SWIFTUI_APP) $(APPKIT_APP)
+$(SWIFTUI_APP): tests/apps/HelloSwiftUI.swift | $(B)
+	mkdir -p $(B)/HelloSwiftUI.app/Contents/MacOS
+	xcrun swiftc -target arm64-apple-macos14 -O -parse-as-library $< -o $@
+	printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleExecutable</key><string>HelloSwiftUI</string><key>CFBundleIdentifier</key><string>dev.henge.tl.swiftui</string><key>CFBundleName</key><string>HelloSwiftUI</string><key>LSMinimumSystemVersion</key><string>14.0</string></dict></plist>\n' > $(B)/HelloSwiftUI.app/Contents/Info.plist
+$(APPKIT_APP): tests/apps/HelloAppKit.m | $(B)
+	mkdir -p $(B)/HelloAppKit.app/Contents/MacOS
+	$(CC) $(GUEST) -O1 -fobjc-arc -framework Cocoa $< -o $@
+	printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleExecutable</key><string>HelloAppKit</string><key>CFBundleIdentifier</key><string>dev.henge.tl.appkit</string><key>CFBundleName</key><string>HelloAppKit</string><key>LSMinimumSystemVersion</key><string>13.0</string></dict></plist>\n' > $(B)/HelloAppKit.app/Contents/Info.plist
+
+# Window apps through the loader on this Mac. AppKit and SwiftUI are the Mac's own here, so this
+# proves the loader on real window apps, not that they would run on iOS.
+test-apps: all apps
+	@for a in HelloAppKit HelloSwiftUI; do out=$$(TL_SELFTEST=1 $(B)/tlrun $(B)/$$a.app/Contents/MacOS/$$a 2>&1); \
+	  if echo "$$out" | grep -q "^PASS $$a"; then echo "ok   $$a: $$(echo "$$out" | grep -v PASS | tail -1)"; else echo "FAIL $$a"; echo "$$out" | sed 's/^/  /'; fi; done
 
 test: all
 	@fail=0; for t in $(TESTS); do \
@@ -44,4 +69,4 @@ test: all
 clean:
 	rm -rf $(B)
 
-.PHONY: all test clean
+.PHONY: all test clean apps test-apps

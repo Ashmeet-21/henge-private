@@ -240,7 +240,8 @@ static int pick_slice(TlImage *im, char *err, size_t errlen) {
             }
             if (cpu == CPU_TYPE_X86_64) saw_x86 = 1;
             if (cpu != CPU_TYPE_ARM64) continue;
-            if ((sub & ~CPU_SUBTYPE_MASK) == CPU_SUBTYPE_ARM64E) { saw_arm64e = 1; continue; }
+            /* Plain arm64 is subtype 0 or 1; 2 (and newer values, 12 on macOS 27) are arm64e with pointer authentication. */
+            if ((sub & ~CPU_SUBTYPE_MASK) > CPU_SUBTYPE_ARM64_V8) { saw_arm64e = 1; continue; }
             if (off + size > im->maplen) break;
             im->slice = m + off;
             im->slicelen = size;
@@ -255,7 +256,7 @@ static int pick_slice(TlImage *im, char *err, size_t errlen) {
         return -1;
     }
     const struct mach_header_64 *mh = (const void *)m;
-    if (mh->cputype != CPU_TYPE_ARM64 || (mh->cpusubtype & ~CPU_SUBTYPE_MASK) == CPU_SUBTYPE_ARM64E) {
+    if (mh->cputype != CPU_TYPE_ARM64 || (mh->cpusubtype & ~CPU_SUBTYPE_MASK) > CPU_SUBTYPE_ARM64_V8) {
         set_err(err, errlen, "%s is %s, not arm64", im->path,
                 mh->cputype == CPU_TYPE_X86_64 ? "Intel" : mh->cputype == CPU_TYPE_ARM64 ? "arm64e" : "another CPU's code");
         return -1;
