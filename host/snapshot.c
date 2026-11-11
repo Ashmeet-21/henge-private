@@ -401,36 +401,52 @@ static int chunk_unpack(Slot *s, uint8_t *base, uint64_t size) {
     return k == s->h.stored ? 0 : -1;
 }
 
+static double read_secs, unpack_secs; /* for the log: reading, and decompressing alongside */
+
+/* A batch is read while the one before it is decompressed into RAM on the other cores. */
 static int load_ram(R *r, HvRam *ram) {
     RamHdr rh;
     if (r_section(r, TAG('R', 'A', 'M', ' '), &rh, sizeof rh)) return -1;
     uint32_t nchunks = (uint32_t)((ram->size + CHUNK_BYTES - 1) / CHUNK_BYTES);
     if (rh.pa != ram->pa || rh.size != ram->size || rh.chunk_pages != CHUNK_PAGES || rh.nchunks != nchunks) return r->err = EINVAL, -1;
-    Slot slots[BATCH] = {0};
-    if (slots_alloc(slots, BATCH)) {
-        slots_free(slots, BATCH);
+    Slot set[2][BATCH];
+    memset(set, 0, sizeof set);
+    if (slots_alloc(set[0], BATCH) || slots_alloc(set[1], BATCH)) {
+        slots_free(set[0], BATCH), slots_free(set[1], BATCH);
         return r->err = ENOMEM, -1;
     }
     dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+    dispatch_group_t unpacking = dispatch_group_create();
     __block _Atomic int bad = 0;
-    for (uint32_t first = 0; first < nchunks && !bad; first += BATCH) {
+    __block double unpacked = 0;
+    uint8_t *base = ram->host;
+    uint64_t size = ram->size;
+    int cur = 0;
+    for (uint32_t first = 0; first < nchunks && !bad; first += BATCH, cur ^= 1) {
         uint32_t n = nchunks - first < BATCH ? nchunks - first : BATCH;
+        Slot *sl = set[cur];
+        double t0 = mono();
         for (uint32_t k = 0; k < n; k++) {
-            if (r_raw(r, &slots[k].h, sizeof slots[k].h) || slots[k].h.index != first + k || slots[k].h.bytes > CHUNK_BYTES ||
-                slots[k].h.stored > CHUNK_PAGES || r_raw(r, slots[k].out, slots[k].h.bytes)) {
+            if (r_raw(r, &sl[k].h, sizeof sl[k].h) || sl[k].h.index != first + k || sl[k].h.bytes > CHUNK_BYTES ||
+                sl[k].h.stored > CHUNK_PAGES || r_raw(r, sl[k].out, sl[k].h.bytes)) {
                 bad = 1;
                 break;
             }
         }
+        read_secs += mono() - t0;
+        dispatch_group_wait(unpacking, DISPATCH_TIME_FOREVER); /* the other set is free again */
         if (bad) break;
-        uint8_t *base = ram->host;
-        uint64_t size = ram->size;
-        Slot *sl = slots;
-        dispatch_apply(n, q, ^(size_t k) {
-            if (sl[k].h.stored && chunk_unpack(&sl[k], base, size)) bad = 1;
+        dispatch_group_async(unpacking, q, ^{
+            double t1 = mono();
+            dispatch_apply(n, q, ^(size_t k) {
+                if (sl[k].h.stored && chunk_unpack(&sl[k], base, size)) bad = 1;
+            });
+            unpacked += mono() - t1;
         });
     }
-    slots_free(slots, BATCH);
+    dispatch_group_wait(unpacking, DISPATCH_TIME_FOREVER);
+    unpack_secs += unpacked;
+    slots_free(set[0], BATCH), slots_free(set[1], BATCH);
     if (bad && !r->err) r->err = EINVAL;
     return bad ? -1 : 0;
 }
@@ -704,6 +720,7 @@ int hv_snapshot_restore(const char *path, const char *ident, char *err, size_t e
     void *display = NULL;
     uint64_t display_len = 0;
     if (!bad) bad = load_devices(&r, b, &display, &display_len);
+    read_secs = unpack_secs = 0;
     for (int i = 0; i < m->nram && !bad; i++) bad = load_ram(&r, &m->ram[i]);
     Trailer t;
     if (!bad) bad = r_raw(&r, &t, sizeof t) || t.tag != TAG('E', 'N', 'D', ' ');
@@ -722,7 +739,8 @@ int hv_snapshot_restore(const char *path, const char *ident, char *err, size_t e
     hv_gicv3_update(b->gic);
     if (b->snd) hv_virtio_snd_resume(b->snd);
     clock_gettime(CLOCK_MONOTONIC, &t1);
-    fprintf(stderr, "hengevm: snapshot: restored a Mac saved %lld s ago, in %.2f s\n", (long long)(time(NULL) - h.saved_at),
-            (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9);
+    fprintf(stderr, "hengevm: snapshot: restored a Mac saved %lld s ago, in %.2f s (reading RAM %.2f s, decompressing %.2f s alongside)\n",
+            (long long)(time(NULL) - h.saved_at), (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9,
+            read_secs, unpack_secs);
     return 0;
 }
