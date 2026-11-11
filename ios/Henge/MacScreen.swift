@@ -21,13 +21,35 @@ final class MacScreenUIView: UIView, UIKeyInput {
         let doubleTap = UITapGestureRecognizer(target: self, action: #selector(doubleTapped(_:)))
         doubleTap.numberOfTapsRequired = 2
         tap.require(toFail: doubleTap)
-        // One finger scrolls, as everywhere on iOS; two fingers drag with the mouse button down (select, move).
+        // Fingers: one scrolls, as everywhere on iOS; two drag with the mouse button down (select, move). A mouse's
+        // or trackpad's scrolling (wheel, two fingers on the trackpad) scrolls too.
         let scroll = UIPanGestureRecognizer(target: self, action: #selector(scrolled(_:)))
         scroll.maximumNumberOfTouches = 1
+        scroll.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        scroll.allowedScrollTypesMask = .all
         let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
         pan.minimumNumberOfTouches = 2
+        pan.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
         let press = UILongPressGestureRecognizer(target: self, action: #selector(pressed(_:)))
-        for g in [tap, doubleTap, pan, scroll, press] as [UIGestureRecognizer] { addGestureRecognizer(g) }
+        press.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        // A mouse or trackpad: the pointer moves the Mac's pointer, its button held down drags, its other button
+        // right-clicks.
+        let hover = UIHoverGestureRecognizer(target: self, action: #selector(hovered(_:)))
+        let drag = UIPanGestureRecognizer(target: self, action: #selector(dragged(_:)))
+        drag.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
+        drag.maximumNumberOfTouches = 1
+        let rightClick = UITapGestureRecognizer(target: self, action: #selector(rightClicked(_:)))
+        rightClick.buttonMaskRequired = .secondary
+        for g in [tap, doubleTap, pan, scroll, press, hover, drag, rightClick] as [UIGestureRecognizer] { addGestureRecognizer(g) }
+        inputAssistantItem.leadingBarButtonGroups = [] // no shortcut bar over the Mac's screen
+        inputAssistantItem.trailingBarButtonGroups = []
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        // The screen takes the keyboard from the start (a hardware keyboard types into the app at once); the on-screen
+        // one comes only with the keyboard button.
+        if window != nil { DispatchQueue.main.async { _ = self.becomeFirstResponder() } }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -83,9 +105,15 @@ final class MacScreenUIView: UIView, UIKeyInput {
         mouse(2, p)
     }
 
-    /// The keyboard button: the iOS keyboard comes up as the Mac's keyboard, or goes.
+    /// The keyboard button: the iOS keyboard comes up as the Mac's keyboard, or goes (the screen keeps the hardware
+    /// keyboard either way).
+    private var softKeyboard = false
+    private let noKeyboard = UIView(frame: .zero)
+    override var inputView: UIView? { softKeyboard ? nil : noKeyboard }
     func toggleKeyboard() {
-        if isFirstResponder { resignFirstResponder() } else { becomeFirstResponder() }
+        softKeyboard.toggle()
+        if !isFirstResponder { _ = becomeFirstResponder() }
+        reloadInputViews()
     }
 
     @objc private func doubleTapped(_ g: UITapGestureRecognizer) {
@@ -123,6 +151,26 @@ final class MacScreenUIView: UIView, UIKeyInput {
         mouse(4, p)
     }
 
+    @objc private func hovered(_ g: UIHoverGestureRecognizer) {
+        if g.state == .began || g.state == .changed { mouse(5, g.location(in: self), clicks: 0) }
+    }
+
+    @objc private func dragged(_ g: UIPanGestureRecognizer) {
+        let p = g.location(in: self)
+        switch g.state {
+        case .began: mouse(1, p)
+        case .changed: mouse(6, p)
+        case .ended, .cancelled, .failed: mouse(2, p)
+        default: break
+        }
+    }
+
+    @objc private func rightClicked(_ g: UITapGestureRecognizer) {
+        let p = g.location(in: self)
+        mouse(3, p)
+        mouse(4, p)
+    }
+
     // MARK: the keyboard
 
     override var canBecomeFirstResponder: Bool { true }
@@ -146,26 +194,27 @@ final class MacScreenUIView: UIView, UIKeyInput {
         }
     }
 
+    /// A hardware keyboard: every key with its Mac key code, held as long as it is held, with its modifiers (Command
+    /// shortcuts included). Not passed on, so the text path (insertText) doesn't type it a second time.
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        var handled = false
+        var rest = Set<UIPress>()
         for p in presses {
-            guard let k = p.key, let code = MacKeys.special[k.keyCode] else { continue }
-            let chars = code.1.isEmpty ? k.characters : code.1
-            henge_tl_app_key(1, code.0, chars, MacKeys.flags(k.modifierFlags))
-            handled = true
+            guard let k = p.key, let code = MacKeys.hid(k.keyCode) else { rest.insert(p); continue }
+            henge_tl_app_key(1, code.0, MacKeys.chars(k, code), MacKeys.flags(k.modifierFlags))
         }
-        if !handled { super.pressesBegan(presses, with: event) }
+        if !rest.isEmpty { super.pressesBegan(rest, with: event) }
     }
 
     override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        var handled = false
+        var rest = Set<UIPress>()
         for p in presses {
-            guard let k = p.key, let code = MacKeys.special[k.keyCode] else { continue }
-            henge_tl_app_key(0, code.0, code.1, MacKeys.flags(k.modifierFlags))
-            handled = true
+            guard let k = p.key, let code = MacKeys.hid(k.keyCode) else { rest.insert(p); continue }
+            henge_tl_app_key(0, code.0, MacKeys.chars(k, code), MacKeys.flags(k.modifierFlags))
         }
-        if !handled { super.pressesEnded(presses, with: event) }
+        if !rest.isEmpty { super.pressesEnded(rest, with: event) }
     }
+
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) { pressesEnded(presses, with: event) }
 }
 
 /// The Mac's key codes (Carbon's kVK_ values) for what the iOS keyboard types.
@@ -188,12 +237,45 @@ enum MacKeys {
         return (0, false)
     }
 
-    /// Hardware-keyboard keys the text path doesn't carry: arrows, escape, return, delete, tab.
+    /// Keys whose characters are not what they print: arrows, escape, return, delete, tab, function and page keys
+    /// (AppKit's NSUpArrowFunctionKey and friends).
     static let special: [UIKeyboardHIDUsage: (UInt16, String)] = [
         .keyboardLeftArrow: (123, "\u{F702}"), .keyboardRightArrow: (124, "\u{F703}"), .keyboardDownArrow: (125, "\u{F701}"),
         .keyboardUpArrow: (126, "\u{F700}"), .keyboardEscape: (53, "\u{1b}"), .keyboardReturnOrEnter: (36, "\r"),
-        .keyboardDeleteOrBackspace: (51, "\u{7f}"), .keyboardTab: (48, "\t"),
+        .keypadEnter: (76, "\u{3}"), .keyboardDeleteOrBackspace: (51, "\u{7f}"), .keyboardTab: (48, "\t"),
+        .keyboardDeleteForward: (117, "\u{F728}"), .keyboardHome: (115, "\u{F729}"), .keyboardEnd: (119, "\u{F72B}"),
+        .keyboardPageUp: (116, "\u{F72C}"), .keyboardPageDown: (121, "\u{F72D}"),
+        .keyboardF1: (122, "\u{F704}"), .keyboardF2: (120, "\u{F705}"), .keyboardF3: (99, "\u{F706}"), .keyboardF4: (118, "\u{F707}"),
+        .keyboardF5: (96, "\u{F708}"), .keyboardF6: (97, "\u{F709}"), .keyboardF7: (98, "\u{F70A}"), .keyboardF8: (100, "\u{F70B}"),
+        .keyboardF9: (101, "\u{F70C}"), .keyboardF10: (109, "\u{F70D}"), .keyboardF11: (103, "\u{F70E}"), .keyboardF12: (111, "\u{F70F}"),
     ]
+
+    /// Printing keys by position (US layout positions, as the Mac's key codes are): letters, digits, punctuation, space.
+    private static let printing: [UIKeyboardHIDUsage: UInt16] = [
+        .keyboardA: 0, .keyboardS: 1, .keyboardD: 2, .keyboardF: 3, .keyboardH: 4, .keyboardG: 5, .keyboardZ: 6, .keyboardX: 7,
+        .keyboardC: 8, .keyboardV: 9, .keyboardB: 11, .keyboardQ: 12, .keyboardW: 13, .keyboardE: 14, .keyboardR: 15,
+        .keyboardY: 16, .keyboardT: 17, .keyboard1: 18, .keyboard2: 19, .keyboard3: 20, .keyboard4: 21, .keyboard6: 22,
+        .keyboard5: 23, .keyboardEqualSign: 24, .keyboard9: 25, .keyboard7: 26, .keyboardHyphen: 27, .keyboard8: 28,
+        .keyboard0: 29, .keyboardCloseBracket: 30, .keyboardO: 31, .keyboardU: 32, .keyboardOpenBracket: 33, .keyboardI: 34,
+        .keyboardP: 35, .keyboardL: 37, .keyboardJ: 38, .keyboardQuote: 39, .keyboardK: 40, .keyboardSemicolon: 41,
+        .keyboardBackslash: 42, .keyboardComma: 43, .keyboardSlash: 44, .keyboardN: 45, .keyboardM: 46, .keyboardPeriod: 47,
+        .keyboardSpacebar: 49, .keyboardGraveAccentAndTilde: 50,
+    ]
+
+    /// A hardware key's Mac key code and fixed characters (empty: the key's own), or nil for keys not passed on
+    /// (modifiers alone, media keys).
+    static func hid(_ usage: UIKeyboardHIDUsage) -> (UInt16, String)? {
+        if let s = special[usage] { return s }
+        if let c = printing[usage] { return (c, "") }
+        return nil
+    }
+
+    static func chars(_ k: UIKey, _ code: (UInt16, String)) -> String {
+        if !code.1.isEmpty { return code.1 }
+        // With Command (or Control) held, the plain character, as AppKit's key equivalents expect.
+        if k.modifierFlags.contains(.command) || k.modifierFlags.contains(.control) { return k.charactersIgnoringModifiers }
+        return k.characters
+    }
 
     static func flags(_ m: UIKeyModifierFlags) -> UInt {
         var f: UInt = 0

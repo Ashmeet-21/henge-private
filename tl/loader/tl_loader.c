@@ -2539,6 +2539,24 @@ static void room_use(uint8_t *at, size_t len) {
     if (g_room_nused < 32) g_room_used[g_room_nused++] = (TlRoomUse){at, len};
 }
 
+/* Whether [at, at + len) is still nothing but inaccessible reservation (the host's hold, or one placed here): never
+   map over anything else. */
+static int room_still_held(uint8_t *at, size_t len) {
+    vm_address_t a = (vm_address_t)at;
+    while (a < (vm_address_t)(at + len)) {
+        vm_address_t r = a;
+        vm_size_t size = 0;
+        natural_t depth = 0;
+        struct vm_region_submap_info_64 info;
+        mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+        if (vm_region_recurse_64(mach_task_self(), &r, &size, &depth, (vm_region_recurse_info_t)&info, &count) != KERN_SUCCESS)
+            return 0;
+        if (r > a || info.protection != VM_PROT_NONE) return 0; /* a hole (someone unmapped it) or something in use */
+        a = r + size;
+    }
+    return 1;
+}
+
 /* Ranges a program will unmap that it never got: the slack of an over-reservation placed exactly (below). */
 static TlRoomUse g_room_slack[16];
 static int g_room_nslack;
@@ -2577,6 +2595,8 @@ static void *room_place(size_t len) {
                 at = c, map = c + len / 2, maplen = len / 2; /* only the upper half: the lower stays for others */
                 room_use(map, maplen);
                 how = " (upper half mapped)";
+                /* Oilpan gives its lower half back at once: that is others' (the hold, the JIT view), not its. */
+                if (g_room_nslack < 16) g_room_slack[g_room_nslack++] = (TlRoomUse){c, len / 2};
             }
         }
     } else {
@@ -2589,6 +2609,10 @@ static void *room_place(size_t len) {
     pthread_mutex_unlock(&g_room_lock);
     if (!at) {
         tl_log("a %.1f GB reservation does not fit the held room", (double)len / (1 << 30));
+        return NULL;
+    }
+    if (!room_still_held(map, maplen)) {
+        tl_log("a %.1f GB reservation: the held room at %p is no longer empty; not placed", (double)len / (1 << 30), map);
         return NULL;
     }
     void *r = mmap(map, maplen, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
