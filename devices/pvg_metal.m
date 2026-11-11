@@ -453,26 +453,33 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
     NSMutableData *lib = [NSMutableData dataWithLength:h.len];
     if (hv_pvg_lite_task_read(lite, task, h.off, lib.mutableBytes, h.len)) return nil;
     /* iOS 17 refuses macOS's libraries as they are (a macOS 15 build, AIR 2.7): relabelled as iOS 17 ones
-       (devices/metallib.c), header first, then the bitcode's target too, it may load them. The stage that
-       worked is tried first from then on. HV_PVG_NO_RELABEL: never. */
-    static int start_stage = -1; /* 0: as sent; 1, 2: relabelled */
+       (devices/metallib.c), header and the bitcode's target, it loads them. Stage 1 (the header alone) is not
+       tried after the library as sent: iOS 17 loads such a library, but every pipeline made from it then fails
+       "Target OS is incompatible", the module still saying macOS (issue 44). The stage that worked is tried first
+       from then on. Stage 3 (the version metadata too) only when asked for: HV_PVG_RELABEL=3. HV_PVG_NO_RELABEL:
+       never. */
+    static int start_stage = -1; /* 0: as sent; 1, 2, 3: relabelled */
     static int no_relabel = -1;
     if (no_relabel < 0) no_relabel = getenv("HV_PVG_NO_RELABEL") != NULL;
     if (start_stage < 0) { /* HV_PVG_RELABEL=N (testing): every library relabelled at stage N from the start */
         const char *f = getenv("HV_PVG_RELABEL");
-        start_stage = f && atoi(f) >= 1 && atoi(f) <= 2 ? atoi(f) : 0;
+        start_stage = f && atoi(f) >= 1 && atoi(f) <= 3 ? atoi(f) : 0;
     }
     NSError *err = nil, *first_err = nil;
     id<MTLLibrary> library = nil;
-    for (int stage = no_relabel ? 0 : start_stage; stage <= (no_relabel ? 0 : 2) && !library; stage++) {
+    int last_stage = no_relabel ? 0 : start_stage >= 3 ? 3 : 2, loaded_at = -1;
+    for (int stage = no_relabel ? 0 : start_stage; stage <= last_stage && !library; stage = stage ? stage + 1 : 2) {
         NSMutableData *try = lib;
         if (stage) {
             try = [lib mutableCopy];
-            if (hv_metallib_relabel(try.mutableBytes, try.length, stage) <= 0) continue;
+            const char *why = NULL;
+            if (hv_metallib_relabel(try.mutableBytes, try.length, stage, &why) <= 0) continue;
+            if (why) [self complain:[NSString stringWithFormat:@"library: relabelled (stage %d) only in part: %s", stage, why]];
         }
         dispatch_data_t data = dispatch_data_create(try.bytes, try.length, NULL, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
         err = nil;
         library = [device newLibraryWithData:data error:&err];
+        if (library) loaded_at = stage;
         if (!library && !first_err) first_err = err;
         if (library && (stage != start_stage || (stage && first_err == nil && !getenv("HV_PVG_RELABEL_QUIET")))) {
             [self complain:[NSString stringWithFormat:@"library: loaded relabelled for iOS 17 (stage %d; as sent: %@)", stage,
@@ -486,9 +493,14 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
         [self complain:[NSString stringWithFormat:@"library: %@", (first_err ?: err).localizedDescription]];
         return nil;
     }
-    {   /* m4 fork: while tracing, keep each library macOS sends, to read its shaders on a Mac */
-        const char *tf = getenv("HV_PVG_TRACE_FILE");
-        if (tf && getenv("HV_SHADER_DUMP") && atoi(getenv("HV_SHADER_DUMP"))) {
+    {   /* m4 fork: while tracing, keep each library macOS sends, to read its shaders on a Mac. Also, unless
+           HV_SHADER_DUMP=0, the first 48 that had to be relabelled (Documents/shaders, as sent): what an OS that
+           refuses them was sent, for relabelling to be checked against on a Mac. */
+        static int relabelled_kept = 0;
+        const char *tf = getenv("HV_PVG_TRACE_FILE"), *sd = getenv("HV_SHADER_DUMP");
+        int keep = sd ? atoi(sd) != 0 : loaded_at > 0 && relabelled_kept < 48;
+        if (keep && !sd) relabelled_kept++;
+        if (tf && keep) {
             NSString *dir = [[[NSString stringWithUTF8String:tf] stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"shaders"];
             [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
             NSString *name = [NSString stringWithFormat:@"%@-%llx.metallib", library.functionNames.firstObject ?: @"lib", (unsigned long long)at];
