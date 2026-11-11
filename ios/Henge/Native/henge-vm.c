@@ -109,14 +109,15 @@ int henge_vm_saved_ok(const char *path, const char *ident, uint64_t *bytes, int6
     return hv_snapshot_check(path, ident, bytes, saved_at);
 }
 
-int henge_vm_suspend(const char *path, const char *ident, char *err, size_t errlen) {
+int henge_vm_pause(char *err, size_t errlen) {
+    if (state == 4) return 0;
     if (!lock_running()) {
         snprintf(err, errlen, "No Mac is running.");
         return -1;
     }
     if (installer_session) {
         pthread_rwlock_unlock(&api_lock);
-        snprintf(err, errlen, "An install cannot be saved.");
+        snprintf(err, errlen, "An install cannot be paused.");
         return -1;
     }
     if (hv_vm_pause() != 0) {
@@ -126,9 +127,27 @@ int henge_vm_suspend(const char *path, const char *ident, char *err, size_t errl
         return -1;
     }
     state = 4;
+    pthread_rwlock_unlock(&api_lock);
+    fprintf(stderr, "henge: the Mac is paused\n");
+    return 0;
+}
+
+int henge_vm_save(const char *path, const char *ident, char *err, size_t errlen) {
+    pthread_rwlock_rdlock(&api_lock);
+    if (state != 4) {
+        pthread_rwlock_unlock(&api_lock);
+        snprintf(err, errlen, "The Mac is not paused.");
+        return -1;
+    }
     int r = hv_snapshot_save(path, ident, err, errlen);
     pthread_rwlock_unlock(&api_lock);
-    fprintf(stderr, "henge: %s\n", r ? err : "the Mac is saved and paused");
+    fprintf(stderr, "henge: %s\n", r ? err : "the paused Mac is saved");
+    return r;
+}
+
+int henge_vm_suspend(const char *path, const char *ident, char *err, size_t errlen) {
+    if (henge_vm_pause(err, errlen) != 0) return -1;
+    int r = henge_vm_save(path, ident, err, errlen);
     if (r) henge_vm_continue();
     return r;
 }

@@ -184,6 +184,7 @@ struct SessionView: View {
             HardwareKeys.releaseAll()
             HardwareMouse.shared.releaseButtons()
             VolumeClicks.shared.releaseButtons()
+            if phase == .inactive { InstantResume.pause() }
             if phase == .background && bootRAM > 0 { InstantResume.suspend(mac, ramMB: bootRAM, cpus: cpus) }
         }
         .onChange(of: showDetails) { showing in

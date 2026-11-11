@@ -42,9 +42,19 @@ enum InstantResume {
         try? FileManager.default.removeItem(at: mac.directory.appendingPathComponent("resume.hsnap.part"))
     }
 
-    /// Henge went to the background with this Mac running: save it and leave it paused.
-    static func suspend(_ mac: VirtualMac, ramMB: UInt64, cpus: Int) {
+    /// Henge stopped being active (the app switcher, a call, Control Center, going home): stop the Mac where it is
+    /// while the GPU is still Henge's, so what only the GPU holds goes back into the Mac's memory.
+    static func pause() {
         guard enabled, henge_vm_state() == 1 else { return }
+        queue.async {
+            var buffer = [CChar](repeating: 0, count: 256)
+            if henge_vm_pause(&buffer, buffer.count) != 0 { HengeLog.log("resume", "not paused: \(String(cString: buffer))") }
+        }
+    }
+
+    /// Henge is in the background: write the paused Mac out, in case iOS closes Henge. It stays paused.
+    static func suspend(_ mac: VirtualMac, ramMB: UInt64, cpus: Int) {
+        guard enabled, henge_vm_state() == 1 || henge_vm_state() == 4 else { return }
         let path = file(for: mac).path, id = ident(for: mac, ramMB: ramMB, cpus: cpus)
         var task = UIBackgroundTaskIdentifier.invalid
         task = UIApplication.shared.beginBackgroundTask(withName: "Henge save") {
@@ -54,7 +64,9 @@ enum InstantResume {
         queue.async {
             let t0 = Date()
             var buffer = [CChar](repeating: 0, count: 256)
-            let rc = henge_vm_suspend(path, id, &buffer, buffer.count)
+            /* Paused already, unless Henge went straight to the background. */
+            var rc = henge_vm_state() == 4 ? 0 : henge_vm_pause(&buffer, buffer.count)
+            if rc == 0 { rc = henge_vm_save(path, id, &buffer, buffer.count) }
             let took = String(format: "%.1f", Date().timeIntervalSince(t0))
             if rc == 0 {
                 let bytes = (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int64) ?? 0
@@ -69,7 +81,8 @@ enum InstantResume {
         }
     }
 
-    /// Back in the foreground before iOS closed Henge: the saved file is out of date the moment the Mac runs on.
+    /// Back in the foreground before iOS closed Henge (or active again after a moment inactive): the saved file, if
+    /// any, is out of date the moment the Mac runs on.
     static func cameBack(_ mac: VirtualMac) {
         queue.async {
             guard henge_vm_state() == 4 else { return }
