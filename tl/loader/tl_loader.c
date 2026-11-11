@@ -2469,6 +2469,43 @@ static uint64_t max_map_bytes(void) {
     }
     return v;
 }
+/* The free stretches of address space of 1 GB or more, logged once a large mapping fails: how much room the
+   system leaves a program's allocator (Chromium's reserves 32 GB at once). */
+static void log_free_address_space(void) {
+    static int said;
+    if (said++) return;
+    vm_address_t addr = 0, prev_end = 0;
+    uint64_t total = 0, largest = 0;
+    for (int i = 0; i < 100000; i++) {
+        vm_size_t size = 0;
+        vm_address_t a = addr;
+        natural_t depth = 0;
+        struct vm_region_submap_info_64 info;
+        mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+        if (vm_region_recurse_64(mach_task_self(), &a, &size, &depth, (vm_region_recurse_info_t)&info, &count) != KERN_SUCCESS) break;
+        if (a > prev_end && a - prev_end >= ((vm_address_t)1 << 30)) {
+            tl_log("  free %#llx-%#llx (%.1f GB)", (unsigned long long)prev_end, (unsigned long long)a, (double)(a - prev_end) / (1 << 30));
+            total += a - prev_end;
+            if (a - prev_end > largest) largest = a - prev_end;
+        }
+        if (size >= ((vm_size_t)4 << 30))
+            tl_log("  used %#llx-%#llx (%.1f GB, prot %d/%d, tag %u)", (unsigned long long)a, (unsigned long long)(a + size),
+                   (double)size / (1 << 30), info.protection, info.max_protection, info.user_tag);
+        if (a + size > prev_end) prev_end = a + size;
+        addr = a + size;
+    }
+    tl_log("  address space ends at %#llx; free stretches of 1 GB or more: %.1f GB, the largest %.1f GB",
+           (unsigned long long)prev_end, (double)total / (1 << 30), (double)largest / (1 << 30));
+    /* And what the system actually grants in one piece (room above the last mapping is not listed above). */
+    for (int gb = 1024; gb >= 1; gb /= 2) {
+        void *p = mmap(NULL, (size_t)gb << 30, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (p == MAP_FAILED) continue;
+        munmap(p, (size_t)gb << 30);
+        tl_log("  the largest single reservation granted: %d GB (at %p)", gb, p);
+        break;
+    }
+}
+
 static void *rt_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
     if (g_host && g_host->ios_kernel_rules && (prot & PROT_EXEC)) {
         tl_log("refused an executable mapping (iOS)");
@@ -2481,7 +2518,17 @@ static void *rt_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t 
         errno = ENOMEM;
         return MAP_FAILED;
     }
-    return mmap(addr, len, prot, flags, fd, off);
+    void *r = mmap(addr, len, prot, flags, fd, off);
+    if (len >= ((size_t)1 << 30)) {
+        if (r == MAP_FAILED) {
+            int e = errno;
+            tl_log("a %.1f GB mapping (prot %d, flags %#x, at %p) failed: %s", (double)len / (1 << 30), prot, flags, addr, strerror(e));
+            log_free_address_space();
+            errno = e;
+        } else if (getenv("TL_MAP_TRACE") || len >= ((size_t)8 << 30))
+            tl_log("a %.1f GB mapping at %p", (double)len / (1 << 30), r);
+    }
+    return r;
 }
 #if TARGET_OS_OSX
 static kern_return_t rt_mach_vm_allocate(vm_map_t map, mach_vm_address_t *addr, mach_vm_size_t size, int flags) {
