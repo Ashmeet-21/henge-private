@@ -446,6 +446,36 @@ static int alias_works(void) {
     return ok;
 }
 
+/* The other way when the region's pages cannot be replaced: leave the data in the region, at its place after the
+   code, and make just those pages writable and not executable (vm_protect read-write). Checked once on a page of
+   the region: made read-write, written and read back. */
+static int g_data_inplace = -1;
+static int inplace_writable(uint8_t *p, size_t bytes) {
+    kern_return_t kr = vm_protect(mach_task_self(), (vm_address_t)p, bytes, FALSE, VM_PROT_READ | VM_PROT_WRITE);
+    if (kr != KERN_SUCCESS) { tl_log("data in place: vm_protect rw- %s", mach_error_string(kr)); errno = EPERM; return -1; }
+    return 0;
+}
+static int inplace_works(void) {
+    uint8_t *p = region_take(TL_PAGE);
+    if (!p || inplace_writable(p, TL_PAGE)) return 0;
+    struct sigaction sa, ob, os;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = alias_fault;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGBUS, &sa, &ob), sigaction(SIGSEGV, &sa, &os);
+    int ok = 0;
+    g_alias_probing = 1;
+    if (!sigsetjmp(g_alias_jump, 1)) {
+        volatile uint32_t *w = (volatile uint32_t *)(p + 64);
+        *w = 0x5a5a1234u;
+        ok = *w == 0x5a5a1234u && *(volatile uint32_t *)(p + 64 + g_host->rw_diff) == 0x5a5a1234u;
+    }
+    g_alias_probing = 0;
+    sigaction(SIGBUS, &ob, NULL), sigaction(SIGSEGV, &os, NULL);
+    tl_log("data in place test: %s", ok ? "writable" : "faults");
+    return ok;
+}
+
 static int map_segments_aliased(TlImage *im, char *err, size_t errlen) {
     uint8_t *base = mmap(NULL, im->vmsize, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (base == MAP_FAILED) { set_err(err, errlen, "%s: no address space (%s)", im->path, strerror(errno)); return -1; }
@@ -475,6 +505,7 @@ static int map_segments_aliased(TlImage *im, char *err, size_t errlen) {
 
 static int map_segments(TlImage *im, char *err, size_t errlen) {
     if (g_code_alias < 0 && getenv("TL_CODE_ALIAS")) g_code_alias = alias_works() ? 1 : 0;
+    if (g_data_inplace < 0 && getenv("TL_DATA_INPLACE")) g_data_inplace = inplace_works() ? 1 : 0;
     if (g_code_alias == 1) return map_segments_aliased(im, err, errlen);
     uint8_t *base = region_take(im->vmsize);
     if (!base) { set_err(err, errlen, "%s: the executable region is full", im->path); return -1; }
@@ -491,12 +522,26 @@ static int map_segments(TlImage *im, char *err, size_t errlen) {
             code_write(dst, im->slice + g->fileoff, copy); /* the rest of the region is still zero: it is never reused */
             code_finish(dst, span);
         } else {
+            if (g_data_inplace == 1) {
+                /* The region's own pages, made writable; the debugger's marks and old contents cleared. */
+                if (inplace_writable(dst, span)) { set_err(err, errlen, "%s: cannot make segment %s writable", im->path, g->name); return -1; }
+                memset(dst, 0, span);
+                memcpy(dst, im->slice + g->fileoff, copy);
+                continue;
+            }
             /* Ordinary memory in place of these pages of the region, at the file's distance from the code. */
             void *p = mmap(dst, span, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
-            if (p != dst && g_code_alias < 0 && (errno == EPERM || errno == EACCES)) {
-                /* The region's pages cannot be replaced here (iOS 26's debugger-made JIT region): code aliases, if
-                   code runs through them; this image again that way (its region pages so far are left unused). */
-                tl_log("data over the executable region refused (%s): trying code aliases", strerror(errno));
+            if (p != dst && g_code_alias < 0 && g_data_inplace < 0 && (errno == EPERM || errno == EACCES)) {
+                /* The region's pages cannot be replaced here (iOS 26's debugger-made JIT region): the data stays in
+                   the region with its pages made writable, if the system allows that; else code aliases, if code
+                   runs through them. This segment (and the rest of this image) again that way. */
+                tl_log("data over the executable region refused (%s): trying data in place", strerror(errno));
+                g_data_inplace = inplace_works() ? 1 : 0;
+                if (g_data_inplace == 1) {
+                    i--;
+                    continue;
+                }
+                tl_log("trying code aliases");
                 g_code_alias = alias_works() ? 1 : 0;
                 if (g_code_alias == 1) return map_segments_aliased(im, err, errlen);
                 errno = EPERM;
