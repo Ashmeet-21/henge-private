@@ -360,7 +360,7 @@ void hv_vm_cpu_qos(void) {
     /* HV_QOS=ui|init|default (testing): the class the guest's CPUs run at. */
     const char *q = getenv("HV_QOS");
 #if TARGET_OS_IPHONE
-    qos_class_t c = QOS_CLASS_USER_INITIATED;
+    qos_class_t c = QOS_CLASS_USER_INTERACTIVE;
 #else
     qos_class_t c = QOS_CLASS_DEFAULT;
 #endif
@@ -368,6 +368,13 @@ void hv_vm_cpu_qos(void) {
     else if (q && !strcmp(q, "init")) c = QOS_CLASS_USER_INITIATED;
     else if (q && !strcmp(q, "default")) c = QOS_CLASS_DEFAULT;
     if (c != QOS_CLASS_DEFAULT) pthread_set_qos_class_self_np(c, 0);
+    static int qos_logged;
+    if (!__atomic_load_n(&qos_logged, __ATOMIC_RELAXED)) {
+        __atomic_store_n(&qos_logged, 1, __ATOMIC_RELAXED);
+        fprintf(stderr, "henge: vCPU thread QoS: %s (from %s)\n",
+                c == QOS_CLASS_USER_INTERACTIVE ? "USER_INTERACTIVE" : c == QOS_CLASS_USER_INITIATED ? "USER_INITIATED" : "DEFAULT",
+                q ? "HV_QOS" : "default");
+    }
 }
 
 /* CPUs 1 and up: run whenever PSCI CPU_ON starts them; the machine stops with CPU 0. */
