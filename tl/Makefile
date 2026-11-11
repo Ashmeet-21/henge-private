@@ -4,7 +4,7 @@ B = build
 CC = xcrun clang
 CFLAGS = -O2 -g -Wall -Wextra -Wno-unused-parameter -fblocks
 GUEST = -target arm64-apple-macos13
-LOADER = loader/tl_loader.c loader/tl_tlv.S loader/tl_bundle.m
+LOADER = loader/tl_loader.c loader/tl_tlv.S loader/tl_bundle.m loader/tl_stubs.m
 
 TESTS = $(B)/hello $(B)/hello-opcodes $(B)/fnd $(B)/fnd-opcodes $(B)/swifty $(B)/cxx $(B)/FW.app/Contents/MacOS/fwapp
 
@@ -78,8 +78,8 @@ test-apps: all apps
 	  if echo "$$out" | grep -q '^PASS HelloAppKit' && echo "$$out" | grep -q 'was never loaded'; then echo "ok   HelloAppKit on the toy AppKit, no real AppKit: $$(echo "$$out" | grep '^window')"; \
 	  else echo "FAIL HelloAppKit on the toy AppKit"; echo "$$out" | sed 's/^/  /'; fi
 
-$(B)/map_names: tests/map_names.c loader/tl_loader.c loader/tl_tlv.S loader/tl_loader.h | $(B)
-	$(CC) $(CFLAGS) tests/map_names.c loader/tl_loader.c loader/tl_tlv.S -o $@
+$(B)/map_names: tests/map_names.c loader/tl_loader.c loader/tl_tlv.S loader/tl_stubs.m loader/tl_loader.h | $(B)
+	$(CC) $(CFLAGS) -fobjc-arc tests/map_names.c loader/tl_loader.c loader/tl_tlv.S loader/tl_stubs.m -framework Foundation -o $@
 
 test: all $(B)/map_names
 	@$(B)/map_names | sed 's/^PASS/ok  /'

@@ -34,6 +34,14 @@ typedef struct TlHost {
        reports it if it is ever called (0). */
     int strict;
     int verbose;
+    /* A missing function returns 0 when called, logged once, instead of stopping the program; a missing class or
+       constant gets a stand-in (a class answering nil to everything, a string named after the constant). For
+       bringing up big apps, where most of what is missing is never needed. */
+    int soft_missing;
+    /* The program may not start other processes (fork, posix_spawn, exec fail with EPERM), as on iOS. */
+    int no_processes;
+    /* Called for each image once it is fixed up, before its initializers run (app-specific adjustments). */
+    void (*image_linked)(TlImage *image);
 } TlHost;
 
 /* A region shaped like iOS's (an RX mapping plus an RW alias of the same
@@ -52,6 +60,16 @@ TlImage *tl_load(TlHost *host, const char *path, char *err, size_t errlen);
 int tl_adopt_main_bundle(const char *app_path);
 /* Calls the executable's main. */
 int tl_run_main(TlImage *exe, int argc, const char **argv, const char **envp);
+
+/* The libSystem calls through which a program finds and loads code while it runs (dlopen, dlsym, dladdr, dlerror,
+   _NSGetExecutablePath, the _dyld_* list of images) answered by this loader, so code the program loads itself is
+   loaded here, never by dyld; and, with no_processes, fork/posix_spawn/exec refused. A host's shim_lookup asks this
+   first for libSystem's symbols ("_dlopen"); NULL when it is not one of them. */
+void *tl_runtime_lookup(const char *symbol);
+/* Loads a library (and what it links) as dlopen does for the program. NULL with a reason in err. */
+TlImage *tl_load_library(const char *path, char *err, size_t errlen);
+/* The guest image holding addr, or NULL. */
+TlImage *tl_image_containing(const void *addr);
 
 /* What was loaded, for the host and tests. */
 void *tl_image_base(const TlImage *image);

@@ -68,7 +68,11 @@ struct TlImage {
 };
 
 static TlHost *g_host;
+uint64_t tl_missing_data(const char *sym); /* tl_stubs.m */
+void *tl_runtime_lookup(const char *symbol);
 static TlImage *g_images, *g_main;
+static TlImage *g_order[1024]; /* every image, in the order it was loaded */
+static _Atomic int g_norder;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* ---- messages ---- */
@@ -81,6 +85,15 @@ static void tl_log(const char *fmt, ...) {
     va_end(ap);
     if (g_host && g_host->log) g_host->log(line);
     else fprintf(stderr, "tl: %s\n", line);
+}
+
+void tl_log_line(const char *fmt, ...) {
+    char line[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof line, fmt, ap);
+    va_end(ap);
+    tl_log("%s", line);
 }
 
 static void set_err(char *err, size_t len, const char *fmt, ...) {
@@ -151,22 +164,32 @@ static void code_finish(void *rx, size_t bytes) {
 
 /* ---- missing symbols ---- */
 
-static char *g_missing[4096];
+static char *g_missing[16384];
 static int g_nmissing;
 
 int tl_missing_count(void) { return g_nmissing; }
 const char *tl_missing_name(int i) { return i >= 0 && i < g_nmissing ? g_missing[i] : NULL; }
 
-static void tl_missing_called(const char *name) {
-    tl_log("called a missing symbol: %s", name);
+typedef struct TlMissing {
+    const char *name;
+    int called;
+} TlMissing;
+
+/* Reached through a missing symbol's stub: stops the program, or (soft_missing) returns 0, said once per symbol. */
+static uint64_t tl_missing_called(TlMissing *m) {
+    if (!__atomic_exchange_n(&m->called, 1, __ATOMIC_RELAXED))
+        tl_log("called a missing symbol: %s%s", m->name, g_host && g_host->soft_missing ? " (returns 0)" : "");
+    if (g_host && g_host->soft_missing) return 0;
     fflush(NULL);
     abort();
 }
 
-/* ldr x0, name; ldr x16, handler; br x16; nop; then the two literals. */
+/* ldr x0, record; ldr x16, handler; br x16; nop; then the two literals. */
 static uint64_t missing_stub(const char *name) {
     char *copy = strdup(name);
     if (g_nmissing < (int)(sizeof g_missing / sizeof *g_missing)) g_missing[g_nmissing++] = copy;
+    TlMissing *rec = calloc(1, sizeof *rec);
+    rec->name = copy;
     uint32_t *p = stub_alloc(32);
     if (!p) return 0;
     uint32_t code[8];
@@ -174,8 +197,8 @@ static uint64_t missing_stub(const char *name) {
     code[1] = 0x58000000u | (5u << 5) | 16; /* ldr x16, [pc + 20] -> code[6..7] */
     code[2] = 0xd61f0200u;                  /* br x16 */
     code[3] = 0xd503201fu;                  /* nop */
-    uint64_t name_addr = (uint64_t)copy, handler = (uint64_t)&tl_missing_called;
-    memcpy(&code[4], &name_addr, 8);
+    uint64_t rec_addr = (uint64_t)rec, handler = (uint64_t)&tl_missing_called;
+    memcpy(&code[4], &rec_addr, 8);
     memcpy(&code[6], &handler, 8);
     code_write(p, code, sizeof code);
     code_finish(p, sizeof code);
@@ -510,6 +533,10 @@ static uint64_t image_export(TlImage *im, const char *sym, int *found) {
 
 static uint64_t host_symbol(void *handle, const char *install_name, const char *sym, int *found) {
     *found = 0;
+    if (!install_name || strstr(install_name, "libSystem") || !strncmp(install_name, "/usr/lib/system/", 16)) {
+        void *s = tl_runtime_lookup(sym);
+        if (s) { *found = 1; return (uint64_t)s; }
+    }
     if (g_host->shim_lookup && install_name) {
         void *s = g_host->shim_lookup(install_name, sym);
         if (s) { *found = 1; return (uint64_t)s; }
@@ -558,6 +585,14 @@ static int resolve_import(TlImage *im, int ordinal, const char *sym, int weak, u
         return -1;
     }
     if (g_host->verbose) tl_log("%s: %s missing from %s, bound to a stub", im->path, sym, lib);
+    if (g_host->soft_missing) {
+        uint64_t data = tl_missing_data(sym); /* tl_stubs.m: a class or constant gets a stand-in */
+        if (data) {
+            if (g_nmissing < (int)(sizeof g_missing / sizeof *g_missing)) g_missing[g_nmissing++] = strdup(sym);
+            *out = data;
+            return 0;
+        }
+    }
     *out = missing_stub(sym);
     return 0;
 }
@@ -993,15 +1028,16 @@ static TlImage *load_one(const char *path, char *err, size_t errlen) {
     /* Listed before its libraries load, so a cycle finds it. */
     im->next = g_images;
     g_images = im;
+    if (g_norder < (int)(sizeof g_order / sizeof *g_order)) { g_order[g_norder] = im; g_norder++; }
     if (g_npending < (int)(sizeof g_pending / sizeof *g_pending)) g_pending[g_npending++] = im;
     if (g_host->verbose) tl_log("mapped %s at %p (%#llx bytes)", path, im->base, (unsigned long long)im->vmsize);
     if (load_deps(im, err, errlen)) return NULL;
     return im;
 }
 
-TlImage *tl_load(TlHost *host, const char *path, char *err, size_t errlen) {
+/* Loads path and what it links; fixes up, registers and initializes whatever was new. Takes g_lock itself. */
+static TlImage *load_and_link(const char *path, char *err, size_t errlen) {
     pthread_mutex_lock(&g_lock);
-    g_host = host;
     g_npending = 0;
     char real[PATH_MAX];
     if (!realpath(path, real)) {
@@ -1017,6 +1053,8 @@ TlImage *tl_load(TlHost *host, const char *path, char *err, size_t errlen) {
     for (int i = 0; i < n; i++)
         if (fixup(batch[i], err, errlen) || setup_tlv(batch[i], err, errlen)) { pthread_mutex_unlock(&g_lock); return NULL; }
     register_unwinder();
+    if (g_host->image_linked)
+        for (int i = 0; i < n; i++) g_host->image_linked(batch[i]);
     for (int i = 0; i < n; i++) register_swift(batch[i]);
     const struct mach_header *mhs[512];
     const char *paths[512];
@@ -1033,6 +1071,16 @@ TlImage *tl_load(TlHost *host, const char *path, char *err, size_t errlen) {
     return exe;
 }
 
+TlImage *tl_load(TlHost *host, const char *path, char *err, size_t errlen) {
+    g_host = host;
+    return load_and_link(path, err, errlen);
+}
+
+TlImage *tl_load_library(const char *path, char *err, size_t errlen) {
+    if (!g_host) { set_err(err, errlen, "nothing loaded yet"); return NULL; }
+    return load_and_link(path, err, errlen);
+}
+
 int tl_run_main(TlImage *exe, int argc, const char **argv, const char **envp) {
     if (!exe->has_main) return -1;
     int (*entry)(int, const char **, const char **, const char **) = (void *)(exe->base + exe->entryoff);
@@ -1047,6 +1095,247 @@ void *tl_image_symbol(TlImage *im, const char *sym) {
     int found = 0;
     uint64_t v = image_export(im, sym, &found);
     return found ? (void *)v : NULL;
+}
+
+/* ---- the program's view of dyld ---- */
+
+#include <mach-o/dyld.h>
+#include <spawn.h>
+
+TlImage *tl_image_containing(const void *addr) {
+    uintptr_t a = (uintptr_t)addr;
+    int n = g_norder;
+    for (int i = 0; i < n; i++) {
+        TlImage *im = g_order[i];
+        if (a >= (uintptr_t)im->base && a < (uintptr_t)im->base + im->vmsize) return im;
+    }
+    return NULL;
+}
+
+static TlImage *as_image(void *handle) {
+    int n = g_norder;
+    for (int i = 0; i < n; i++)
+        if ((void *)g_order[i] == handle) return g_order[i];
+    return NULL;
+}
+
+static __thread char g_dlerror[1024];
+static __thread int g_dlerror_set;
+
+static void rt_set_dlerror(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(g_dlerror, sizeof g_dlerror, fmt, ap);
+    va_end(ap);
+    g_dlerror_set = 1;
+}
+
+static char *rt_dlerror(void) {
+    if (!g_dlerror_set) {
+        char *host = dlerror();
+        return host;
+    }
+    g_dlerror_set = 0;
+    return g_dlerror;
+}
+
+static int is_system_path(const char *p) {
+    return !strncmp(p, "/usr/lib/", 9) || !strncmp(p, "/System/", 8);
+}
+
+static void *rt_dlopen(const char *path, int mode) {
+    if (!path) return g_main ? (void *)g_main : dlopen(NULL, mode);
+    char expanded[PATH_MAX];
+    if (path[0] == '@' && g_main) {
+        if (!expand_path(g_main, path, expanded, sizeof expanded)) { rt_set_dlerror("cannot find %s", path); return NULL; }
+        path = expanded;
+    }
+    if (!is_system_path(path)) {
+        struct stat st;
+        if (stat(path, &st) == 0) {
+            char err[1024] = "";
+            TlImage *im = tl_load_library(path, err, sizeof err);
+            if (!im) { rt_set_dlerror("%s", err); tl_log("dlopen %s: %s", path, err); return NULL; }
+            if (g_host->verbose) tl_log("dlopen %s: loaded here", path);
+            return im;
+        }
+        /* A bare name ("libfoo.dylib"): look beside the program, as dyld's fallback paths would. */
+        if (!strchr(path, '/') && g_main) {
+            char beside[PATH_MAX];
+            snprintf(beside, sizeof beside, "%s/%s", g_main->dir, path);
+            if (stat(beside, &st) == 0) return rt_dlopen(beside, mode);
+        }
+    }
+    char buf[PATH_MAX];
+    const char *host_path = g_host->map_install_name ? g_host->map_install_name(path, buf, sizeof buf) : path;
+    if (!host_path) {
+        rt_set_dlerror("%s is not on this system", path);
+        if (g_host->verbose) tl_log("dlopen %s: not on this system", path);
+        return NULL;
+    }
+    void *h = dlopen(host_path, mode);
+    if (!h && g_host->verbose) tl_log("dlopen %s: %s", path, dlerror());
+    return h;
+}
+
+static int rt_dlclose(void *handle) {
+    if (as_image(handle)) return 0;
+    return dlclose(handle);
+}
+
+static uint64_t image_lookup_deep(TlImage *im, const char *sym, int *found) {
+    uint64_t v = image_export(im, sym, found);
+    if (*found) return v;
+    for (int i = 0; i < im->ndeps; i++) {
+        v = resolve_in_dep(im, i + 1, sym, found);
+        if (*found) return v;
+    }
+    return 0;
+}
+
+static void *rt_dlsym(void *handle, const char *name) {
+    char sym[1024];
+    snprintf(sym, sizeof sym, "_%s", name);
+    int found = 0;
+    TlImage *im = as_image(handle);
+    if (im) {
+        uint64_t v = image_lookup_deep(im, sym, &found);
+        if (found) return (void *)v;
+        rt_set_dlerror("%s: symbol not found", name);
+        return NULL;
+    }
+    if (handle == RTLD_DEFAULT || handle == RTLD_NEXT || handle == RTLD_SELF || handle == RTLD_MAIN_ONLY) {
+        int n = g_norder;
+        for (int i = 0; i < n; i++) {
+            uint64_t v = image_export(g_order[i], sym, &found);
+            if (found) return (void *)v;
+        }
+        if (handle == RTLD_MAIN_ONLY) return NULL;
+        if (g_host->shim_lookup) {
+            void *s = g_host->shim_lookup("", sym);
+            if (s) return s;
+        }
+        return dlsym(RTLD_DEFAULT, name);
+    }
+    return dlsym(handle, name);
+}
+
+static int rt_dladdr(const void *addr, Dl_info *info) {
+    TlImage *im = tl_image_containing(addr);
+    if (!im) return dladdr(addr, info);
+    info->dli_fname = im->path;
+    info->dli_fbase = im->base;
+    info->dli_sname = NULL;
+    info->dli_saddr = NULL;
+    return 1;
+}
+
+static int rt_NSGetExecutablePath(char *buf, uint32_t *size) {
+    if (!g_main) return _NSGetExecutablePath(buf, size);
+    uint32_t need = (uint32_t)strlen(g_main->path) + 1;
+    if (*size < need) { *size = need; return -1; }
+    memcpy(buf, g_main->path, need);
+    return 0;
+}
+
+static const struct mach_header *rt_NSGetMachExecuteHeader(void) {
+    return g_main ? (const void *)g_main->base : (const void *)_dyld_get_image_header(0);
+}
+
+/* The image list: the program in place of the host's main executable, then the host's libraries, then the
+   program's own libraries in load order. */
+static uint32_t rt_dyld_image_count(void) {
+    int guests = g_norder;
+    return _dyld_image_count() + (uint32_t)(guests > 0 ? guests - 1 : 0);
+}
+
+static TlImage *guest_at(uint32_t i) {
+    uint32_t host = _dyld_image_count();
+    if (i == 0) return g_main;
+    if (i < host) return NULL;
+    uint32_t k = i - host + 1; /* g_order[0] is the main program */
+    return k < (uint32_t)g_norder ? g_order[k] : NULL;
+}
+
+static const struct mach_header *rt_dyld_get_image_header(uint32_t i) {
+    TlImage *im = guest_at(i);
+    if (im) return (const void *)im->base;
+    return i < _dyld_image_count() ? _dyld_get_image_header(i) : NULL;
+}
+
+static const char *rt_dyld_get_image_name(uint32_t i) {
+    TlImage *im = guest_at(i);
+    if (im) return im->path;
+    return i < _dyld_image_count() ? _dyld_get_image_name(i) : NULL;
+}
+
+static intptr_t rt_dyld_get_image_vmaddr_slide(uint32_t i) {
+    TlImage *im = guest_at(i);
+    if (im) return (intptr_t)im->slide;
+    return i < _dyld_image_count() ? _dyld_get_image_vmaddr_slide(i) : 0;
+}
+
+static void rt_dyld_register_func_for_add_image(void (*fn)(const struct mach_header *, intptr_t)) {
+    _dyld_register_func_for_add_image(fn);
+    int n = g_norder;
+    for (int i = 0; i < n; i++) fn((const void *)g_order[i]->base, (intptr_t)g_order[i]->slide);
+}
+
+static void rt_dyld_register_func_for_remove_image(void (*fn)(const struct mach_header *, intptr_t)) {
+    _dyld_register_func_for_remove_image(fn);
+}
+
+static int rt_refuse(void) {
+    errno = EPERM;
+    return -1;
+}
+
+static int rt_posix_spawn(pid_t *pid, const char *path, const void *fa, const void *attr, char *const argv[], char *const envp[]) {
+    tl_log("the program tried to start another process: %s (refused, as on iOS)", path ? path : "?");
+    return EPERM;
+}
+
+static int rt_execve(const char *path, char *const argv[], char *const envp[]) {
+    tl_log("the program tried to exec %s (refused, as on iOS)", path ? path : "?");
+    return rt_refuse();
+}
+
+static pid_t rt_fork(void) {
+    tl_log("the program tried to fork (refused, as on iOS)");
+    return rt_refuse();
+}
+
+void *tl_runtime_lookup(const char *sym) {
+    static const struct { const char *name; void *fn; } table[] = {
+        {"_dlopen", (void *)rt_dlopen},
+        {"_dlclose", (void *)rt_dlclose},
+        {"_dlsym", (void *)rt_dlsym},
+        {"_dladdr", (void *)rt_dladdr},
+        {"_dlerror", (void *)rt_dlerror},
+        {"__NSGetExecutablePath", (void *)rt_NSGetExecutablePath},
+        {"__NSGetMachExecuteHeader", (void *)rt_NSGetMachExecuteHeader},
+        {"__dyld_image_count", (void *)rt_dyld_image_count},
+        {"__dyld_get_image_header", (void *)rt_dyld_get_image_header},
+        {"__dyld_get_image_name", (void *)rt_dyld_get_image_name},
+        {"__dyld_get_image_vmaddr_slide", (void *)rt_dyld_get_image_vmaddr_slide},
+        {"__dyld_register_func_for_add_image", (void *)rt_dyld_register_func_for_add_image},
+        {"__dyld_register_func_for_remove_image", (void *)rt_dyld_register_func_for_remove_image},
+    };
+    static const struct { const char *name; void *fn; } procs[] = {
+        {"_posix_spawn", (void *)rt_posix_spawn},
+        {"_posix_spawnp", (void *)rt_posix_spawn},
+        {"_execve", (void *)rt_execve},
+        {"_execv", (void *)rt_execve},
+        {"_execvp", (void *)rt_execve},
+        {"_fork", (void *)rt_fork},
+        {"_vfork", (void *)rt_fork},
+    };
+    for (size_t i = 0; i < sizeof table / sizeof *table; i++)
+        if (!strcmp(sym, table[i].name)) return table[i].fn;
+    if (g_host && g_host->no_processes)
+        for (size_t i = 0; i < sizeof procs / sizeof *procs; i++)
+            if (!strcmp(sym, procs[i].name)) return procs[i].fn;
+    return NULL;
 }
 
 /* ---- install names on iOS ---- */
