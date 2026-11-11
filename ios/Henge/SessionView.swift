@@ -712,10 +712,23 @@ struct SessionView: View {
         .allowsHitTesting(false)
     }
 
+    /// The size macOS is told its screen is at start. Henge fork: a Mac with no Display profile picked for this
+    /// posture keeps its saved Screen size (mac.screen, as before profiles, never overwritten); a picked profile
+    /// uses upstream's viewport plan.
+    private func bootGuest() -> (width: Int, height: Int, fromProfile: Bool) {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let bounds = (scenes.first { $0.activationState == .foregroundActive } ?? scenes.first)?.coordinateSpace.bounds ?? UIScreen.main.bounds
+        let landscape = bounds.width > bounds.height
+        guard mac.usesProfile(landscape: landscape) else { return (mac.screen.width, mac.screen.height, false) }
+        let plan = ViewportPlan.current { mac.displayProfile(landscape: $0) }
+        HengeLog.log("session", "viewport: \(plan.describe())")
+        return (plan.guestWidth, plan.guestHeight, true)
+    }
+
     /// Keeps the pointer in view: the view moves when the pointer nears its edge.
     private func followPointer() async {
         var tick = 0
-        let guest = ViewportPlan.current { mac.displayProfile(landscape: $0) }.guest // the size this session booted with; it cannot change mid-session
+        let guest = bootGuest() // the size this session booted with; it cannot change mid-session
         while !Task.isCancelled {
             var x: Int32 = 0, y: Int32 = 0
             if henge_vm_pointer(&x, &y) == 0, !kbActive {
@@ -900,18 +913,17 @@ struct SessionView: View {
         // display's native scale. It is worked out now, at start, from the scene the session is
         // starting in (folded, unfolded, portrait or landscape); the display mode is boot-time
         // only, so a fold or rotation mid-session aspect-fits until the next start.
-        let plan = ViewportPlan.current { mac.displayProfile(landscape: $0) }
-        HengeLog.log("session", "viewport: \(plan.describe())")
-        Trackpad.guestScreenWidth = plan.guestWidth
-        Trackpad.guestScreenHeight = plan.guestHeight
+        let guest = bootGuest()
+        Trackpad.guestScreenWidth = guest.width
+        Trackpad.guestScreenHeight = guest.height
         KeyboardSignals.shared.resetSession()
-        henge_vm_set_display(UInt32(plan.guestWidth), UInt32(plan.guestHeight))
+        henge_vm_set_display(UInt32(guest.width), UInt32(guest.height))
         if mac.isRetina {
             henge_vm_set_display_mm(UInt32(Device.retinaMM.width), UInt32(Device.retinaMM.height))
         } else {
             henge_vm_set_display_mm(0, 0)
         }
-        HengeLog.log("session", "screen \(plan.guestWidth)x\(plan.guestHeight) retina \(mac.isRetina)")
+        HengeLog.log("session", "screen \(guest.width)x\(guest.height) retina \(mac.isRetina)")
         henge_vm_set_hot(Self.isHot(ProcessInfo.processInfo.thermalState) ? 1 : 0)
         let rc = henge_vm_boot(mac.rom.path, mac.disk.path, mac.aux.path, mac.ecid, mac.seed, ram, Int32(cpus), &buffer, buffer.count)
         if rc != 0 {
@@ -921,8 +933,7 @@ struct SessionView: View {
         started = Date()
         var used = mac
         used.lastUsed = started
-        used.screenWidth = plan.guestWidth
-        used.screenHeight = plan.guestHeight
+        if guest.fromProfile { (used.screenWidth, used.screenHeight) = (guest.width, guest.height) }
         Machines.shared.update(used)
         var lastBlocks = henge_vm_blocks()
         var lastTime = Date()

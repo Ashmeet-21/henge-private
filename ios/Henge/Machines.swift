@@ -23,6 +23,11 @@ struct VirtualMac: Identifiable, Codable, Hashable {
     var profileLandscape: String?
     var profilePortrait: String?
     /// The remembered profile for a posture class; absent or unrecognised means Full.
+    /// Henge fork: a profile was picked for this posture. Without one the Mac starts at its saved Screen size
+    /// (mac.screen), exactly as before profiles: same pixels, same sharpness, same GPU work.
+    func usesProfile(landscape: Bool) -> Bool {
+        DisplayProfile(rawValue: (landscape ? profileLandscape : profilePortrait) ?? "") != nil
+    }
     func displayProfile(landscape: Bool) -> DisplayProfile {
         DisplayProfile(rawValue: (landscape ? profileLandscape : profilePortrait) ?? "") ?? .full
     }

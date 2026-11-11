@@ -89,19 +89,21 @@ struct MacSettingsView: View {
                 DeskHeading("Display")
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Landscape").font(.system(size: 13)).foregroundStyle(Desk.dim)
-                    Picker("Landscape profile", selection: Binding(get: { mac.displayProfile(landscape: true) }, set: { mac.profileLandscape = $0.rawValue; save() })) {
-                        Text("Full").tag(DisplayProfile.full)
-                        Text("Perf").tag(DisplayProfile.perf)
+                    Picker("Landscape profile", selection: Binding(get: { mac.profileLandscape ?? "" }, set: { mac.profileLandscape = $0.isEmpty ? nil : $0; save() })) {
+                        Text("Screen setting").tag("")
+                        Text("Full").tag(DisplayProfile.full.rawValue)
+                        Text("Perf").tag(DisplayProfile.perf.rawValue)
                     }
                     .pickerStyle(.segmented)
                     Text("Portrait").font(.system(size: 13)).foregroundStyle(Desk.dim)
-                    Picker("Portrait profile", selection: Binding(get: { mac.displayProfile(landscape: false) }, set: { mac.profilePortrait = $0.rawValue; save() })) {
-                        Text("Full").tag(DisplayProfile.full)
-                        Text("Perf").tag(DisplayProfile.perf)
-                        Text("Split-compact").tag(DisplayProfile.splitCompact)
+                    Picker("Portrait profile", selection: Binding(get: { mac.profilePortrait ?? "" }, set: { mac.profilePortrait = $0.isEmpty ? nil : $0; save() })) {
+                        Text("Screen setting").tag("")
+                        Text("Full").tag(DisplayProfile.full.rawValue)
+                        Text("Perf").tag(DisplayProfile.perf.rawValue)
+                        Text("Split-compact").tag(DisplayProfile.splitCompact.rawValue)
                     }
                     .pickerStyle(.segmented)
-                    Text("Changes apply the next time this Mac starts. Perf renders the Mac at 0.75× into the same full-size screen, so it does less work per frame. Split-compact gives the portrait screen the top 42% and leaves more room below it.")
+                    Text("Screen setting uses the Screen size above, as before. Changes apply the next time this Mac starts. Perf renders the Mac at 0.75× into the same full-size screen, so it does less work per frame. Split-compact gives the portrait screen the top 42% and leaves more room below it.")
                         .font(.system(size: 13)).foregroundStyle(Desk.dim)
                 }
                 .padding(17)
