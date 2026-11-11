@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import GameController
+import Metal
 
 /// What this device is, for what the app says and suggests.
 enum Device {
@@ -33,6 +34,14 @@ enum Device {
     static var retinaMM: (width: Int, height: Int) {
         let s = retinaScreen
         return (Int((Double(s.width) / 264 * 25.4).rounded()), Int((Double(s.height) / 264 * 25.4).rounded()))
+    }
+
+    /// The chip's name ("Apple A20 Pro"). iOS has no name for the CPU (machdep.cpu.brand_string is empty on an
+    /// iPhone), but Metal names the GPU after the chip: "Apple A20 Pro GPU".
+    static var chipName: String? {
+        guard var name = MTLCreateSystemDefaultDevice()?.name.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        if name.hasSuffix(" GPU") { name.removeLast(4) }
+        return name.hasPrefix("Apple ") && name.count > 6 ? name : nil
     }
 
     /// How much memory to suggest for a new Mac: what leaves this device room for iOS.
