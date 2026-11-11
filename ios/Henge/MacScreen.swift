@@ -81,7 +81,11 @@ final class MacScreenUIView: UIView, UIKeyInput {
         mouse(5, p, clicks: 0)
         mouse(1, p)
         mouse(2, p)
-        becomeFirstResponder()
+    }
+
+    /// The keyboard button: the iOS keyboard comes up as the Mac's keyboard, or goes.
+    func toggleKeyboard() {
+        if isFirstResponder { resignFirstResponder() } else { becomeFirstResponder() }
     }
 
     @objc private func doubleTapped(_ g: UITapGestureRecognizer) {
@@ -238,6 +242,11 @@ struct MacAppScreen: View {
     var body: some View {
         ZStack(alignment: .topLeading) {
             MacScreenView(screen: screen).ignoresSafeArea()
+            Button { MacScreenHub.shared.view?.toggleKeyboard() } label: {
+                Image(systemName: "keyboard").font(.system(size: 15, weight: .medium)).foregroundStyle(.white.opacity(0.9))
+                    .frame(width: 38, height: 38).background(.black.opacity(0.45), in: Circle())
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing).padding(14)
             if !started || !status.isEmpty {
                 Text(status).font(.system(size: 13, weight: .medium)).foregroundStyle(.white.opacity(0.85))
                     .padding(.horizontal, 12).padding(.vertical, 8)
