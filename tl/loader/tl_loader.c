@@ -1048,3 +1048,31 @@ void *tl_image_symbol(TlImage *im, const char *sym) {
     uint64_t v = image_export(im, sym, &found);
     return found ? (void *)v : NULL;
 }
+
+/* ---- install names on iOS ---- */
+
+static const char *const g_mac_only[] = {
+    "AppKit", "Cocoa", "Carbon", "ApplicationServices", "OpenGL", "AGL", "AppleScriptObjC", "Quartz", "QuickLookUI",
+    "ScreenSaver", "InputMethodKit", "PreferencePanes", "ServiceManagement", "OSAKit", "Automator", "DiskArbitration",
+    "SecurityInterface", "ExceptionHandling", "IOBluetoothUI", "InstallerPlugins", "SyncServices", "DirectoryService",
+};
+
+const char *tl_ios_map_install_name(const char *name, char *buf, size_t len) {
+    if (!strncmp(name, "/System/iOSSupport/", 19)) name += 18; /* keep the leading '/' of /System/Library/... */
+    const char *fw = strstr(name, "/System/Library/Frameworks/");
+    if (fw == name || !strncmp(name, "/System/Library/PrivateFrameworks/", 34)) {
+        /* .../X.framework/Versions/A/X -> .../X.framework/X */
+        const char *dot = strstr(name, ".framework/");
+        if (!dot) return name;
+        const char *start = name;
+        for (const char *p = dot; p > name; p--)
+            if (p[-1] == '/') { start = p; break; }
+        size_t stem = (size_t)(dot - start);
+        for (size_t i = 0; i < sizeof g_mac_only / sizeof *g_mac_only; i++)
+            if (strlen(g_mac_only[i]) == stem && !strncmp(start, g_mac_only[i], stem)) return NULL;
+        const char *leaf = strrchr(name, '/') + 1;
+        if (snprintf(buf, len, "%.*s.framework/%s", (int)(dot - name), name, leaf) >= (int)len) return NULL;
+        return buf;
+    }
+    return name; /* /usr/lib/... is where it is on iOS too */
+}

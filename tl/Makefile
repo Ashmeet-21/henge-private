@@ -10,13 +10,16 @@ TESTS = $(B)/hello $(B)/hello-opcodes $(B)/fnd $(B)/fnd-opcodes $(B)/swifty $(B)
 
 DMG = dmg/udif.c dmg/volume.c dmg/hfsplus.c dmg/apfs.c dmg/appinfo.c
 
-all: $(B)/tlrun $(B)/tldmg $(TESTS)
+all: $(B)/tlrun $(B)/tlrun-mini $(B)/tldmg $(TESTS)
 
 $(B):
 	mkdir -p $(B)
 
 $(B)/tlrun: tools/tlrun.c $(LOADER) loader/tl_loader.h | $(B)
 	$(CC) $(CFLAGS) -fobjc-arc tools/tlrun.c $(LOADER) -framework Foundation -o $@
+# With the toy AppKit (shim/appkit_mini.m) standing in for the real one.
+$(B)/tlrun-mini: tools/tlrun.c $(LOADER) loader/tl_loader.h shim/appkit_mini.m shim/appkit_mini.h | $(B)
+	$(CC) $(CFLAGS) -fobjc-arc -DTL_APPKIT_MINI tools/tlrun.c $(LOADER) shim/appkit_mini.m -framework Foundation -framework CoreText -framework CoreGraphics -framework ImageIO -o $@
 
 $(B)/tldmg: tools/tldmg.c $(DMG) dmg/tl_dmg.h dmg/tl_dmg_private.h | $(B)
 	$(CC) $(CFLAGS) tools/tldmg.c $(DMG) -framework CoreFoundation -lz -lbz2 -lcompression -o $@
@@ -69,16 +72,31 @@ test-dmg: all
 # Window apps through the loader on this Mac. AppKit and SwiftUI are the Mac's own here, so this
 # proves the loader on real window apps, not that they would run on iOS.
 test-apps: all apps
-	@for a in HelloAppKit HelloSwiftUI; do out=$$(TL_SELFTEST=1 $(B)/tlrun $(B)/$$a.app/Contents/MacOS/$$a 2>&1); \
+	@for a in HelloAppKit HelloSwiftUI; do out=$$(TL_SELFTEST=1 timeout 30 $(B)/tlrun $(B)/$$a.app/Contents/MacOS/$$a 2>&1); \
 	  if echo "$$out" | grep -q "^PASS $$a"; then echo "ok   $$a: $$(echo "$$out" | grep -v PASS | tail -1)"; else echo "FAIL $$a"; echo "$$out" | sed 's/^/  /'; fi; done
+	@out=$$(TL_SELFTEST=1 TL_SHIM_PNG=$(B)/appkit-mini.png $(B)/tlrun-mini $(APPKIT_APP) 2>&1); \
+	  if echo "$$out" | grep -q '^PASS HelloAppKit' && echo "$$out" | grep -q 'was never loaded'; then echo "ok   HelloAppKit on the toy AppKit, no real AppKit: $$(echo "$$out" | grep '^window')"; \
+	  else echo "FAIL HelloAppKit on the toy AppKit"; echo "$$out" | sed 's/^/  /'; fi
 
-test: all
+$(B)/map_names: tests/map_names.c loader/tl_loader.c loader/tl_tlv.S loader/tl_loader.h | $(B)
+	$(CC) $(CFLAGS) tests/map_names.c loader/tl_loader.c loader/tl_tlv.S -o $@
+
+test: all $(B)/map_names
+	@$(B)/map_names | sed 's/^PASS/ok  /'
 	@fail=0; for t in $(TESTS); do \
 	  native=$$($$t one two 2>/dev/null); loaded=$$(TLRUN_REPORT=1 $(B)/tlrun $$t one two 2>$(B)/stderr.txt); rc=$$?; \
 	  if [ $$rc -eq 0 ] && [ "$$native" = "$$loaded" ] && echo "$$loaded" | grep -q '^PASS'; then echo "ok   $$t: $$(grep 'not in dyld' $(B)/stderr.txt | sed 's/.*bytes, //')"; \
 	  else echo "FAIL $$t (exit $$rc)"; echo "  native: $$native"; echo "  loaded: $$loaded"; sed 's/^/  /' $(B)/stderr.txt; fail=1; fi; done; exit $$fail
 
+# The loader, the dmg reader and the toy AppKit compiled for iOS 17, into a static library (not run: that needs the phone).
+IOS_CC = xcrun --sdk iphoneos clang -target arm64-apple-ios17.0 -O2 -Wall -Wextra -Wno-unused-parameter -fblocks
+ios-lib: | $(B)
+	mkdir -p $(B)/ios
+	for f in $(LOADER) $(DMG) shim/appkit_mini.m; do $(IOS_CC) -fobjc-arc -c $$f -o $(B)/ios/$$(basename $$f).o || exit 1; done
+	xcrun --sdk iphoneos libtool -static -o $(B)/ios/libhengetl.a $(B)/ios/*.o
+	@echo "ok   $(B)/ios/libhengetl.a"
+
 clean:
 	rm -rf $(B)
 
-.PHONY: all test clean apps test-apps test-dmg
+.PHONY: all test clean apps test-apps test-dmg ios-lib

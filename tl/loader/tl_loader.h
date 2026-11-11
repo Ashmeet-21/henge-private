@@ -63,4 +63,10 @@ void *tl_image_symbol(TlImage *image, const char *symbol);
 int tl_missing_count(void);
 const char *tl_missing_name(int index);
 
+/* The usual TlHost.map_install_name on iOS: a macOS framework path to iOS's
+   (no Versions/X; Mac Catalyst's /System/iOSSupport copies to the originals),
+   or NULL for libraries iOS does not have (AppKit, Carbon and the like), which
+   the host then answers with shims. */
+const char *tl_ios_map_install_name(const char *install_name, char *buf, size_t len);
+
 #endif

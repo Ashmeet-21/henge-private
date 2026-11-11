@@ -8,6 +8,15 @@
 
 #include "../loader/tl_loader.h"
 
+#ifdef TL_APPKIT_MINI
+/* tlrun-mini: the toy AppKit's classes are named as AppKit's, so this build must never meet the real AppKit. */
+#include "../shim/appkit_mini.h"
+
+static void report_appkit(void) {
+    fprintf(stderr, "tlrun: the real AppKit %s loaded in this process\n", tl_appkit_is_real_loaded() ? "WAS" : "was never");
+}
+#endif
+
 static const char *g_shimmed[16];
 static int g_nshimmed;
 
@@ -26,6 +35,13 @@ int main(int argc, const char **argv, const char **envp) {
         return 120;
     }
     host.map_install_name = map_name;
+#ifdef TL_APPKIT_MINI
+    /* AppKit (and Cocoa, which would load it) answered by the toy AppKit, never the real one. */
+    g_shimmed[g_nshimmed++] = "/AppKit.framework/";
+    g_shimmed[g_nshimmed++] = "/Cocoa.framework/";
+    host.shim_lookup = tl_appkit_mini_lookup;
+    atexit(report_appkit);
+#endif
     int i = 1;
     for (; i < argc && argv[i][0] == '-'; i++) {
         if (!strcmp(argv[i], "-v")) host.verbose = 1;
