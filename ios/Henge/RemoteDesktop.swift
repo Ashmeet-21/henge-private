@@ -8,7 +8,9 @@ import QuartzCore
 /// Remote desktop: the Mac's screen through the phone's hardware H.264 encoder to one client on port 5901,
 /// as a raw Annex-B stream, and the client's mouse and keyboard back as 6-byte messages:
 /// [type][a][x: Int16 LE][y: Int16 LE], type 1 move (x, y), 2 button (a, x = down), 3 scroll (x, y), 4 key (a = HID usage, x = down),
-/// 5 the computer's name (a = its length in bytes, which follow the message; shown instead of its address).
+/// 5 the computer's name (a = its length in bytes, which follow the message; shown instead of its address),
+/// 6 absolute move (x, y in the Mac's screen pixels: the pointer goes to the computer's cursor, through the USB tablet).
+/// After a 6, buttons go to the tablet too, until a relative move (1) comes.
 /// The client is tools/henge-remote.py; over USB, `iproxy 15901:5901` on the computer. `ffplay tcp://…` shows the picture alone.
 /// Only USB clients by default. With Wi-Fi allowed, a network client must first send the 6-digit code shown on the phone.
 final class RemoteDesktop: ObservableObject {
@@ -73,6 +75,7 @@ final class RemoteDesktop: ObservableObject {
     private var inbox: [UInt8] = []
     private var heldKeys = Set<UInt8>()
     private var heldButtons = Set<Int32>()
+    private var pointingAbsolute = false // the client's last move was a 6: buttons click where its cursor is
 
     /// A fresh Wi-Fi code; clients already streaming stay connected.
     func renewCode() {
@@ -334,6 +337,7 @@ final class RemoteDesktop: ObservableObject {
             for b in heldButtons { henge_vm_mouse_button(b, 0) }
             heldKeys.removeAll()
             heldButtons.removeAll()
+            pointingAbsolute = false
             inbox.removeAll()
         }
         DispatchQueue.main.async { self.connected = false; self.client = "" }
@@ -478,14 +482,20 @@ final class RemoteDesktop: ObservableObject {
             at += 6
             switch type {
             case 1:
+                pointingAbsolute = false
                 henge_vm_mouse_move(x, y)
+            case 6:
+                pointingAbsolute = true
+                henge_vm_mouse_move_abs(x, y)
             case 2:
                 let b = Int32(a)
-                henge_vm_mouse_use_relative()
+                if !pointingAbsolute { henge_vm_mouse_use_relative() }
                 henge_vm_mouse_button(b, x != 0 ? 1 : 0)
                 if x != 0 { heldButtons.insert(b) } else { heldButtons.remove(b) }
             case 3:
-                henge_vm_mouse_use_relative()
+                // The tablet has no sideways wheel, so scrolling goes through the mouse (the same pointer on the Mac)
+                // unless a button is down on the tablet: switching would let go of a drag.
+                if !pointingAbsolute || heldButtons.isEmpty { henge_vm_mouse_use_relative() }
                 henge_vm_mouse_scroll(x, y)
             case 4:
                 henge_vm_key_hid(a, x != 0 ? 1 : 0)
