@@ -26,6 +26,7 @@
 #include <sys/mount.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/xattr.h>
 #include <sys/time.h>
 #include <sys/un.h>
 #include <time.h>
@@ -86,6 +87,9 @@ typedef struct Request {
     char query[128];
     char destination[PATH_MAX]; /* decoded path */
     char if_header[256];
+    char if_match[160];
+    char if_none_match[160];
+    char if_modified_since[80];
     long long length;
     int chunked, expect_continue, close, overwrite, depth;
     long long range_from, range_to; /* -1: none */
@@ -541,7 +545,50 @@ static int resolved_local_linkfinal(const char *path, char *out, size_t cap) {
 
 /* ---- the folder ---- */
 
-static void add_entry(Text *t, const char *url_path, const char *name, const struct stat *st, int is_root) {
+/* ---- dead properties (PROPPATCH), stored as xattrs on the host file ---- */
+
+/* share.c used to answer every PROPPATCH with success and store nothing: a client that set a
+   property believed it persisted. Now a set property is kept in an xattr on the host file
+   (name: a hash of namespace+name; value: namespace, a newline, then the property's inner
+   XML verbatim) and PROPFIND gives it back. What cannot be parsed or stored is answered with
+   a per-property failure, never a false success. The synthesized prefix in responses is
+   "dp" plus the same hash, so any namespace round-trips without a prefix table. */
+#define DAV_XATTR_PREFIX "henge.dav."
+static void dav_key(const char *ns, const char *name, char *out, size_t cap) {
+    unsigned long h = 5381;
+    for (const char *p = ns; *p; p++) h = h * 33 + (unsigned char)*p;
+    h = h * 33 + '#';
+    for (const char *p = name; *p; p++) h = h * 33 + (unsigned char)*p;
+    snprintf(out, cap, DAV_XATTR_PREFIX "%lx", h);
+}
+
+static void add_dead_props(Text *t, const char *local) {
+    char keys[4096];
+    ssize_t n = listxattr(local, keys, sizeof keys, XATTR_NOFOLLOW);
+    if (n <= 0) return;
+    for (const char *k = keys; k < keys + n; k += strlen(k) + 1) {
+        if (strncmp(k, DAV_XATTR_PREFIX, strlen(DAV_XATTR_PREFIX))) continue;
+        char val[8192];
+        ssize_t v = getxattr(local, k, val, sizeof val - 1, 0, XATTR_NOFOLLOW);
+        if (v < 0) continue;
+        val[v] = 0;
+        char *nl = strchr(val, '\n');
+        if (!nl) continue;
+        *nl = 0;
+        /* The element name is the xattr key's hash; the stored namespace + inner XML are
+           re-emitted under a prefix bound to that namespace. The name itself is recovered
+           from the tail of the value: value = ns "\n" name "\n" inner. */
+        char *nl2 = strchr(nl + 1, '\n');
+        if (!nl2) continue;
+        *nl2 = 0;
+        const char *hash = k + strlen(DAV_XATTR_PREFIX);
+        addf(t, "<dp%s:%s xmlns:dp%s=\"", hash, nl + 1, hash);
+        add_xml(t, val);
+        addf(t, "\">%s</dp%s:%s>", nl2 + 1, hash, nl + 1);
+    }
+}
+
+static void add_entry(Text *t, const char *url_path, const char *name, const struct stat *st, int is_root, const char *local) {
     int dir = S_ISDIR(st->st_mode);
     char modified[64], created[64];
     struct tm tm;
@@ -571,7 +618,31 @@ static void add_entry(Text *t, const char *url_path, const char *name, const str
                  (unsigned long long)fs.f_bavail * fs.f_bsize, (unsigned long long)(fs.f_blocks - fs.f_bfree) * fs.f_bsize);
         }
     }
+    add_dead_props(t, local);
     adds(t, "</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>");
+}
+
+/* The ETag share.c has always sent: size and whole-second mtime. One place makes it, so the
+   conditional-request checks below compare against exactly what clients were given. */
+static void etag_of(const struct stat *st, char *out, size_t cap) {
+    snprintf(out, cap, "\"%llx-%llx\"", (unsigned long long)st->st_size, (unsigned long long)st->st_mtimespec.tv_sec);
+}
+
+/* An HTTP date ("Wed, 21 Oct 2015 07:28:00 GMT") to an epoch, or -1 if it isn't one. */
+static time_t http_date(const char *s) {
+    struct tm tm;
+    memset(&tm, 0, sizeof tm);
+    if (!strptime(s, "%a, %d %b %Y %H:%M:%S GMT", &tm)) return -1;
+    return timegm(&tm);
+}
+
+/* 304 with the validators, so a revalidating client can keep its copy without a body. */
+static int respond_not_modified(Conn *c, Request *r, const struct stat *st) {
+    char etag[64];
+    etag_of(st, etag, sizeof etag);
+    char headers[256];
+    snprintf(headers, sizeof headers, "ETag: %s\r\nCache-Control: no-cache\r\n", etag);
+    return respond(c, r, 304, "Not Modified", headers, NULL, 0);
 }
 
 static int do_propfind(Conn *c, Request *r) {
@@ -583,7 +654,7 @@ static int do_propfind(Conn *c, Request *r) {
     adds(&t, "<?xml version=\"1.0\" encoding=\"utf-8\"?><D:multistatus xmlns:D=\"DAV:\">");
     const char *slash = strrchr(r->path, '/');
     int is_root = strcmp(r->path, "/") == 0;
-    add_entry(&t, r->path, is_root ? "Henge" : (slash && slash[1] ? slash + 1 : r->path), &st, is_root);
+    add_entry(&t, r->path, is_root ? "Henge" : (slash && slash[1] ? slash + 1 : r->path), &st, is_root, local);
     if (S_ISDIR(st.st_mode) && r->depth != 0) {
         DIR *d = opendir(local);
         struct dirent *e;
@@ -595,23 +666,193 @@ static int do_propfind(Conn *c, Request *r) {
             if (snprintf(url, sizeof url, "%s%s%s", r->path, r->path[strlen(r->path) - 1] == '/' ? "" : "/", e->d_name) >= (int)sizeof url) continue;
             if (share_denied(url)) continue; /* device-private names are not listed */
             if (lstat(child, &cs) != 0 || !(S_ISREG(cs.st_mode) || S_ISDIR(cs.st_mode))) continue; /* no links out of the folder */
-            add_entry(&t, url, e->d_name, &cs, 0);
+            add_entry(&t, url, e->d_name, &cs, 0, child);
         }
         if (d) closedir(d);
     }
     adds(&t, "</D:multistatus>");
-    int rc = respond(c, r, 207, "Multi-Status", "Content-Type: application/xml; charset=utf-8\r\n", t.s, t.len);
+    int rc = respond(c, r, 207, "Multi-Status", "Content-Type: application/xml; charset=utf-8\r\nCache-Control: no-cache\r\n", t.s, t.len);
     free(t.s);
     return rc;
 }
 
+/* One property a PROPPATCH asked about. */
+typedef struct DavProp {
+    char qname[128];  /* as written, e.g. "Z:author" */
+    char ns[256];
+    char name[96];    /* local name */
+    int remove;       /* from a <remove>, else a <set> */
+    int status;       /* the HTTP status this property earned */
+} DavProp;
+
+/* The next tag at or after p: returns a pointer into a static buffer holding the tag's
+   interior (between < and >), and sets *after past the >. NULL when no tag remains. */
+static const char *next_tag(const char *p, const char **after) {
+    static char tag[1024];
+    const char *lt = strchr(p, '<');
+    if (!lt) return NULL;
+    if (lt[1] == '!' || lt[1] == '?') { /* comments, declarations, PIs: skip to > */
+        const char *gt = strchr(lt, '>');
+        if (!gt) return NULL;
+        *after = gt + 1;
+        tag[0] = '!';
+        tag[1] = 0;
+        return tag;
+    }
+    const char *gt = strchr(lt, '>');
+    if (!gt) return NULL;
+    size_t n = (size_t)(gt - lt - 1);
+    if (n >= sizeof tag) n = sizeof tag - 1;
+    memcpy(tag, lt + 1, n);
+    tag[n] = 0;
+    *after = gt + 1;
+    return tag;
+}
+
+/* A tag's element name: *closing for </x>, *selfclose for <x/>, qualified name in qname,
+   local name (after any prefix) in local. */
+static void tag_name(const char *tag, char *qname, size_t qcap, char *local, size_t lcap, int *closing, int *selfclose) {
+    const char *p = tag;
+    *closing = *p == '/';
+    if (*closing) p++;
+    size_t n = 0;
+    while (*p && *p != ' ' && *p != '\t' && *p != '/' && n + 1 < qcap) qname[n++] = *p++;
+    qname[n] = 0;
+    *selfclose = tag[strlen(tag) - 1] == '/';
+    const char *colon = strchr(qname, ':');
+    snprintf(local, lcap, "%s", colon ? colon + 1 : qname);
+}
+
+/* Namespace URI for a qualified name, from the body's own xmlns declarations. */
+static void ns_for(const char *body, const char *qname, char *out, size_t cap) {
+    const char *colon = strchr(qname, ':');
+    char pat[160];
+    if (colon) snprintf(pat, sizeof pat, "xmlns:%.*s=\"", (int)(colon - qname), qname);
+    else snprintf(pat, sizeof pat, "xmlns=\"");
+    const char *hit = strstr(body, pat);
+    if (!hit) { snprintf(out, cap, "%s", colon ? "" : "DAV:"); return; }
+    hit += strlen(pat);
+    const char *end = strchr(hit, '"');
+    if (!end || (size_t)(end - hit) >= cap) { snprintf(out, cap, ""); return; }
+    snprintf(out, cap, "%.*s", (int)(end - hit), hit);
+}
+
 static int do_proppatch(Conn *c, Request *r) {
-    if (body_discard(c, r) != 0) return -1;
+    size_t blen = 0;
+    char *body = body_small(c, r, &blen);
+    if (!body) return -1;
+    char local[PATH_MAX];
+    struct stat st;
+    if (local_path(r->path, local, sizeof local) != 0 || stat(local, &st) != 0) {
+        free(body);
+        return respond_empty(c, r, 404, "Not Found");
+    }
+    DavProp props[32];
+    int nprops = 0;
+    const char *cur = body, *after = NULL;
+    const char *tag;
+    int op = -1; /* 0 = set, 1 = remove */
+    int in_prop = 0;
+    while ((tag = next_tag(cur, &after)) != NULL) {
+        cur = after;
+        if (tag[0] == '!') continue;
+        char qname[128], lname[96];
+        int closing, selfclose;
+        tag_name(tag, qname, sizeof qname, lname, sizeof lname, &closing, &selfclose);
+        if (!strcmp(lname, "set") || !strcmp(lname, "remove")) { op = closing ? -1 : (!strcmp(lname, "remove") ? 1 : 0); continue; }
+        if (!strcmp(lname, "prop")) { in_prop = !closing; continue; }
+        if (op < 0 || !in_prop || closing || nprops >= 32) continue;
+        /* A property element: capture it, and for a set, its inner XML. */
+        DavProp *dp = &props[nprops];
+        memset(dp, 0, sizeof *dp);
+        snprintf(dp->qname, sizeof dp->qname, "%s", qname);
+        snprintf(dp->name, sizeof dp->name, "%s", lname);
+        ns_for(body, qname, dp->ns, sizeof dp->ns);
+        dp->remove = op == 1;
+        dp->status = 200;
+        char key[128];
+        dav_key(dp->ns, dp->name, key, sizeof key);
+        if (!strcmp(dp->ns, "DAV:")) {
+            dp->status = 403; /* live properties are the filesystem's, not the client's to set */
+        } else if (dp->remove) {
+            if (removexattr(local, key, XATTR_NOFOLLOW) != 0 && errno != ENOATTR) dp->status = 403;
+        } else {
+            const char *inner_start = after, *inner_end = after;
+            if (!selfclose) { /* find the matching close, counting same-name nesting */
+                int depth = 1;
+                const char *scan = after, *sa = NULL;
+                const char *stag;
+                inner_end = NULL;
+                while ((stag = next_tag(scan, &sa)) != NULL) {
+                    const char *lt = strchr(scan, '<');
+                    scan = sa;
+                    if (stag[0] == '!') continue;
+                    char q2[128], l2[96];
+                    int cl2, sc2;
+                    tag_name(stag, q2, sizeof q2, l2, sizeof l2, &cl2, &sc2);
+                    if (!strcmp(q2, qname)) {
+                        if (cl2) { if (--depth == 0) { inner_end = lt; break; } }
+                        else if (!sc2) depth++;
+                    }
+                }
+                if (!inner_end) { dp->status = 400; nprops++; continue; }
+            }
+            size_t ilen = (size_t)(inner_end - inner_start);
+            size_t vlen = strlen(dp->ns) + 1 + strlen(dp->name) + 1 + ilen + 1;
+            char *val = malloc(vlen);
+            if (!val) { dp->status = 507; nprops++; continue; }
+            snprintf(val, vlen, "%s\n%s\n%.*s", dp->ns, dp->name, (int)ilen, inner_start);
+            if (setxattr(local, key, val, strlen(val), 0, XATTR_NOFOLLOW) != 0)
+                dp->status = errno == ENOSPC ? 507 : 403;
+            free(val);
+            /* Skip the scanner past this element's close so nested markup is not
+               mistaken for further properties. */
+            if (!selfclose && inner_end) {
+                const char *gt = strchr(inner_end, '>');
+                if (gt) cur = gt + 1;
+            }
+        }
+        nprops++;
+    }
+    free(body);
+    if (!nprops) return respond_empty(c, r, 400, "Bad Request");
     Text t = {0};
     adds(&t, "<?xml version=\"1.0\" encoding=\"utf-8\"?><D:multistatus xmlns:D=\"DAV:\"><D:response><D:href>");
     add_url(&t, r->path);
-    adds(&t, "</D:href><D:propstat><D:prop/><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response></D:multistatus>");
-    int rc = respond(c, r, 207, "Multi-Status", "Content-Type: application/xml; charset=utf-8\r\n", t.s, t.len);
+    adds(&t, "</D:href>");
+    /* One propstat per status: propstat groups properties by status, so
+       successes go in one propstat and failures are grouped by their own
+       status, in first-appearance order; a property is never labelled
+       with another property's failure status. */
+    int groups[32];
+    int ngroups = 0;
+    for (int i = 0; i < nprops; i++) if (props[i].status == 200) { groups[ngroups++] = 200; break; }
+    for (int i = 0; i < nprops; i++) {
+        int st = props[i].status;
+        if (st == 200) continue;
+        int seen = 0;
+        for (int g = 0; g < ngroups; g++) if (groups[g] == st) seen = 1;
+        if (!seen) groups[ngroups++] = st;
+    }
+    for (int g = 0; g < ngroups; g++) {
+        int gst = groups[g];
+        adds(&t, "<D:propstat><D:prop>");
+        for (int i = 0; i < nprops; i++) {
+            if (props[i].status != gst) continue;
+            const char *colon = strchr(props[i].qname, ':');
+            if (colon) {
+                addf(&t, "<%s xmlns:%.*s=\"", props[i].qname, (int)(colon - props[i].qname), props[i].qname);
+                add_xml(&t, props[i].ns);
+                addf(&t, "\"/>");
+            } else {
+                addf(&t, "<%s/>", props[i].qname);
+            }
+        }
+        addf(&t, "</D:prop><D:status>HTTP/1.1 %d %s</D:status></D:propstat>", gst,
+             gst == 200 ? "OK" : (gst == 507 ? "Insufficient Storage" : (gst == 400 ? "Bad Request" : "Forbidden")));
+    }
+    adds(&t, "</D:response></D:multistatus>");
+    int rc = respond(c, r, 207, "Multi-Status", "Content-Type: application/xml; charset=utf-8\r\nCache-Control: no-cache\r\n", t.s, t.len);
     free(t.s);
     return rc;
 }
@@ -629,6 +870,25 @@ static int do_get(Conn *c, Request *r) {
     if (S_ISDIR(st.st_mode)) {
         close(fd);
         return respond_empty(c, r, 405, "Method Not Allowed");
+    }
+    /* Conditional requests (RFC 9110): a client revalidating its cache gets a body only if the
+       file actually changed. webdavfs polls with these; honouring them is what turns its
+       freshness check from a full re-read into a 304. If-None-Match wins over If-Modified-Since. */
+    {
+        char etag[64];
+        etag_of(&st, etag, sizeof etag);
+        if (r->if_none_match[0]) {
+            if (!strcmp(r->if_none_match, "*") || strstr(r->if_none_match, etag)) {
+                close(fd);
+                return respond_not_modified(c, r, &st);
+            }
+        } else if (r->if_modified_since[0]) {
+            time_t since = http_date(r->if_modified_since);
+            if (since >= 0 && st.st_mtimespec.tv_sec <= since) {
+                close(fd);
+                return respond_not_modified(c, r, &st);
+            }
+        }
     }
     long long from = 0, to = st.st_size - 1;
     int partial = 0;
@@ -655,7 +915,7 @@ static int do_get(Conn *c, Request *r) {
     char head[1024];
     int n = snprintf(head, sizeof head,
                      "HTTP/1.1 %s\r\nServer: Henge\r\nContent-Length: %lld\r\nContent-Type: application/octet-stream\r\nAccept-Ranges: bytes\r\n"
-                     "Last-Modified: %s\r\nETag: \"%llx-%llx\"\r\n",
+                     "Last-Modified: %s\r\nETag: \"%llx-%llx\"\r\nCache-Control: no-cache\r\n",
                      partial ? "206 Partial Content" : "200 OK", len, modified, (unsigned long long)st.st_size,
                      (unsigned long long)st.st_mtimespec.tv_sec);
     if (partial) n += snprintf(head + n, sizeof head - (size_t)n, "Content-Range: bytes %lld-%lld/%lld\r\n", from, to, (long long)st.st_size);
@@ -688,6 +948,18 @@ static int do_put(Conn *c, Request *r) {
         return respond_empty(c, r, 403, "Forbidden");
     }
     int existed = stat(local, &st) == 0;
+    if (r->if_match[0]) { /* the client named the version it expects to replace */
+        int ok = 0;
+        if (existed && !S_ISDIR(st.st_mode)) {
+            char etag[64];
+            etag_of(&st, etag, sizeof etag);
+            ok = !strcmp(r->if_match, "*") || strstr(r->if_match, etag) != NULL;
+        }
+        if (!ok) {
+            if (body_discard(c, r) != 0) return -1;
+            return respond_empty(c, r, 412, "Precondition Failed");
+        }
+    }
     if (existed && S_ISDIR(st.st_mode)) {
         if (body_discard(c, r) != 0) return -1;
         return respond_empty(c, r, 405, "Method Not Allowed");
@@ -1028,6 +1300,9 @@ static int read_request(Conn *c, Request *r) {
         else if (header_is(line, "Depth", &v)) r->depth = v[0] == '0' ? 0 : 1;
         else if (header_is(line, "Overwrite", &v)) r->overwrite = v[0] != 'F' && v[0] != 'f';
         else if (header_is(line, "If", &v)) snprintf(r->if_header, sizeof r->if_header, "%s", v);
+        else if (header_is(line, "If-Match", &v)) snprintf(r->if_match, sizeof r->if_match, "%s", v);
+        else if (header_is(line, "If-None-Match", &v)) snprintf(r->if_none_match, sizeof r->if_none_match, "%s", v);
+        else if (header_is(line, "If-Modified-Since", &v)) snprintf(r->if_modified_since, sizeof r->if_modified_since, "%s", v);
         else if (header_is(line, "Destination", &v)) {
             const char *p = v;
             if (!strncasecmp(p, "http://", 7) || !strncasecmp(p, "https://", 8)) {
