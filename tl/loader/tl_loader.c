@@ -1864,7 +1864,8 @@ static launch_data_t rt_launch_msg(launch_data_t msg) {
         tl_log("launchd job %s: %s", label ? ld_string(label) : "?", path ? path : "?");
         pid_t pid = 0;
         extern char **environ;
-        if (path && g_host->processes_as_threads && is_guest_program(path) && !spawn_in_process(&pid, path, ns, argv, environ))
+        if (path && g_host->processes_as_threads && is_guest_program(path) && wanted_process(argv) &&
+            !spawn_in_process(&pid, path, ns, argv, environ))
             return ld_errno(0);
         tl_log("  not started (not the app's own program)");
         return ld_errno(EPERM);
@@ -2140,7 +2141,9 @@ static int launchctl_command(const char *command, int ns) {
     if (tl_plist_job(path, argv, 32) < 1) return -1;
     pid_t pid = 0;
     extern char **environ;
-    int rc = g_host->processes_as_threads && is_guest_program(argv[0]) ? spawn_in_process(&pid, argv[0], ns, argv, environ) : -1;
+    int rc = g_host->processes_as_threads && is_guest_program(argv[0]) && wanted_process(argv)
+                 ? spawn_in_process(&pid, argv[0], ns, argv, environ)
+                 : -1;
     tl_log("launchctl load %s: %s", path, rc ? "not started (not the app's own program)" : "started inside the app");
     for (int i = 0; argv[i]; i++) free(argv[i]);
     return rc ? -1 : 0;
@@ -2281,6 +2284,27 @@ static int exec_in(int ns, const char *path, char *const argv[], char *const env
     tl_log("the program tried to exec %s (refused, as on iOS)", path ? path : "?");
     return rt_refuse();
 }
+/* execl, execlp, execle: their arguments gathered, then as execv/execve. */
+static int rt_execl(const char *path, const char *arg0, ...) {
+    char *argv[64] = {(char *)arg0};
+    va_list ap;
+    va_start(ap, arg0);
+    for (int i = 1; i < 63 && argv[i - 1]; i++) argv[i] = va_arg(ap, char *);
+    va_end(ap);
+    extern char **environ;
+    return exec_in(ns_of(__builtin_return_address(0)), path, argv, environ);
+}
+static int rt_execle(const char *path, const char *arg0, ...) {
+    char *argv[64] = {(char *)arg0};
+    va_list ap;
+    va_start(ap, arg0);
+    int i = 1;
+    for (; i < 63 && argv[i - 1]; i++) argv[i] = va_arg(ap, char *);
+    char **envp = argv[i - 1] ? NULL : va_arg(ap, char **);
+    va_end(ap);
+    return exec_in(ns_of(__builtin_return_address(0)), path, argv, envp);
+}
+
 static int rt_execve(const char *path, char *const argv[], char *const envp[]) {
     return exec_in(ns_of(__builtin_return_address(0)), path, argv, envp);
 }
@@ -2386,6 +2410,9 @@ void *tl_runtime_lookup(const char *sym) {
         {"_execve", (void *)rt_execve},
         {"_execv", (void *)rt_execv},
         {"_execvp", (void *)rt_execv},
+        {"_execl", (void *)rt_execl},
+        {"_execlp", (void *)rt_execl},
+        {"_execle", (void *)rt_execle},
         {"_fork", (void *)rt_fork},
         {"_vfork", (void *)rt_fork},
         {"_system", (void *)rt_system},

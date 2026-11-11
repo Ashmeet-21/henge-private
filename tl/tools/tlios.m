@@ -315,7 +315,10 @@ static void *input_thread(void *arg) {
 int main(int argc, const char **argv, const char **envp) {
     @autoreleasepool {
         TlHost host;
-        if (tl_host_init_split(&host, (size_t)3 << 30)) { /* room for an app and the processes it starts */
+        /* Room for an app and the processes it starts; TLIOS_REGION_MB=N tries the phone's size (1520 at its largest
+           code cache). */
+        size_t region = getenv("TLIOS_REGION_MB") ? (size_t)atoi(getenv("TLIOS_REGION_MB")) << 20 : (size_t)3 << 30;
+        if (tl_host_init_split(&host, region)) {
             fprintf(stderr, "tlios: no executable region\n");
             return 120;
         }
