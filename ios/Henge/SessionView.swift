@@ -252,6 +252,7 @@ struct SessionView: View {
         .onChange(of: pointerNeeded) { PointerLock.set(!$0) }
         .onChange(of: scenePhase) { phase in
             guard phase != .active else {
+                Sharing.prepare() // resume/repair: re-serve the root
                 display.refresh()
                 InstantResume.cameBack(mac)
                 return

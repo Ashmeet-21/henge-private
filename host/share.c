@@ -1506,11 +1506,19 @@ static void *connection(void *arg) {
     return NULL;
 }
 
+static volatile int share_stopping;
+static int share_server_fd = -1;
+static pthread_t share_thread;
+static char share_socket[PATH_MAX];
+static char share_root_now[PATH_MAX];
+static char share_agent_now[PATH_MAX];
+
 static void *listener(void *arg) {
     int server = (int)(intptr_t)arg;
     for (;;) {
         int fd = accept(server, NULL, NULL);
         if (fd < 0) {
+            if (share_stopping) break; /* hv_share_stop shut the listener down */
             if (errno == EINTR || errno == ECONNABORTED) continue;
             usleep(100000);
             continue;
@@ -1532,10 +1540,39 @@ static void *listener(void *arg) {
     return NULL;
 }
 
+/* The share server's life, made restartable: the app, the VM,
+   and this server are one process, so nothing here survives suspension; what can be promised
+   is clean repair. hv_share_start may be called again: with the same folder, socket, and agent
+   it is a no-op; with anything changed it stops the old listener and serves the new root.
+   hv_share_stop shuts the listener down and unlinks the socket, so a later start is fresh.
+   In-flight connections are not drained: a restart is expected at prepare/resume time, and a
+   connection caught mid-request by a root swap simply fails and the guest's agent remounts. */
+static int share_started;
+
+void hv_share_stop(void) {
+    if (!share_started) return;
+    share_stopping = 1;
+    if (share_server_fd >= 0) {
+        shutdown(share_server_fd, SHUT_RDWR);
+        close(share_server_fd);
+        share_server_fd = -1;
+    }
+    pthread_join(share_thread, NULL);
+    unlink(share_socket);
+    share_started = 0;
+    share_stopping = 0;
+}
+
 int hv_share_start(const char *folder, const char *socket_path, const char *agent) {
-    static int started;
-    if (started) return 0;
-    if (!realpath(folder, root)) return -1;
+    char resolved[PATH_MAX];
+    if (!realpath(folder, resolved)) return -1;
+    if (share_started && !strcmp(resolved, share_root_now) && !strcmp(socket_path, share_socket) &&
+        !strcmp(agent ? agent : "", share_agent_now))
+        return 0; /* already serving exactly this */
+    if (share_started) hv_share_stop();
+    snprintf(root, sizeof root, "%s", resolved);
+    snprintf(share_root_now, sizeof share_root_now, "%s", resolved);
+    snprintf(share_agent_now, sizeof share_agent_now, "%s", agent ? agent : "");
     if (agent) snprintf(agent_path, sizeof agent_path, "%s", agent);
     struct sockaddr_un addr = {.sun_family = AF_UNIX};
     if (strlen(socket_path) >= sizeof addr.sun_path) {
@@ -1543,6 +1580,7 @@ int hv_share_start(const char *folder, const char *socket_path, const char *agen
         return -1;
     }
     strcpy(addr.sun_path, socket_path);
+    snprintf(share_socket, sizeof share_socket, "%s", socket_path);
     unlink(socket_path);
     int server = socket(AF_UNIX, SOCK_STREAM, 0);
     if (server < 0 || bind(server, (struct sockaddr *)&addr, sizeof addr) != 0 || listen(server, 16) != 0) {
@@ -1551,9 +1589,8 @@ int hv_share_start(const char *folder, const char *socket_path, const char *agen
         return -1;
     }
     chmod(socket_path, 0600);
-    pthread_t t;
-    pthread_create(&t, NULL, listener, (void *)(intptr_t)server);
-    pthread_detach(t);
-    started = 1;
+    share_server_fd = server;
+    pthread_create(&share_thread, NULL, listener, (void *)(intptr_t)server);
+    share_started = 1;
     return 0;
 }

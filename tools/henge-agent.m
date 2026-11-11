@@ -103,13 +103,48 @@ static void checkClipboard(void) {
 
 static NSString *mountPoint(void) { return [NSHomeDirectory() stringByAppendingPathComponent:@"Henge"]; }
 
+// Can the share server still be reached? Its install script is a tiny page it always serves.
+static BOOL serverReachable(void) {
+    int status = 0;
+    NSData *body = request(@"GET", @"/.henge/install", nil, &status, NULL);
+    return body != nil && status == 200;
+}
+
+static void unmount(NSString *point) {
+    NSTask *task = [NSTask new];
+    task.executableURL = [NSURL fileURLWithPath:@"/sbin/umount"];
+    task.arguments = @[ point ];
+    task.standardOutput = NSFileHandle.fileHandleWithNullDevice;
+    task.standardError = NSFileHandle.fileHandleWithNullDevice;
+    [task launchAndReturnError:NULL];
+    [task waitUntilExit];
+    if (task.terminationStatus != 0) { // a busy or wedged mount needs the stronger form
+        NSTask *force = [NSTask new];
+        force.executableURL = [NSURL fileURLWithPath:@"/usr/sbin/diskutil"];
+        force.arguments = @[ @"unmount", @"force", point ];
+        force.standardOutput = NSFileHandle.fileHandleWithNullDevice;
+        force.standardError = NSFileHandle.fileHandleWithNullDevice;
+        [force launchAndReturnError:NULL];
+        [force waitUntilExit];
+    }
+}
+
 // The shared folder, at ~/Henge. mount_webdav needs an empty folder it owns, and is a no-op failure if it is mounted.
 static void keepMounted(void) {
     NSString *point = mountPoint();
     [NSFileManager.defaultManager createDirectoryAtPath:point withIntermediateDirectories:YES attributes:nil error:NULL];
     struct stat folder, parent;
     if (stat(point.fileSystemRepresentation, &folder) != 0 || stat(NSHomeDirectory().fileSystemRepresentation, &parent) != 0) return;
-    if (folder.st_dev != parent.st_dev) return; // already something else's volume: mounted
+    if (folder.st_dev != parent.st_dev) { // something's volume is mounted there
+        // The device side of the share restarts (app resumed, root changed): the mount
+        // can outlive the server it was made against and serve a dead socket forever. If the
+        // server no longer answers, drop the mount; the code below remounts it, and the next
+        // 30 s pass retries if the server is still coming back.
+        if (serverReachable()) return;
+        unmount(point);
+        struct stat after;
+        if (stat(point.fileSystemRepresentation, &after) != 0 || after.st_dev != parent.st_dev) return; // still mounted: leave it
+    }
     NSTask *task = [NSTask new];
     task.executableURL = [NSURL fileURLWithPath:@"/sbin/mount_webdav"];
     task.arguments = @[ @"-S", @"-v", @"Henge", @"http://" HOST "/", point ];
