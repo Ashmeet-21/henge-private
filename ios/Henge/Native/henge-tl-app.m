@@ -77,7 +77,7 @@ static NSArray<NSString *> *arguments_for(NSString *app, NSString *exe) {
     NSMutableArray *args = [NSMutableArray arrayWithObject:exe];
     NSString *fw = [app stringByAppendingPathComponent:@"Contents/Frameworks"];
     NSArray *names = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:fw error:nil];
-    BOOL chromium = NO, branded = NO;
+    BOOL chromium = NO, branded = NO, electron = NO;
     for (NSString *n in names) {
         /* Chromium-based browsers ship "<Name> Framework.framework" with Chromium's helper apps inside (Chrome,
            Chromium, Helium, Brave, Edge...); CEF and Electron apps carry their framework by name. */
@@ -86,13 +86,21 @@ static NSArray<NSString *> *arguments_for(NSString *app, NSString *exe) {
             ([n hasSuffix:@" Framework.framework"] && [[NSFileManager defaultManager] fileExistsAtPath:helpers]))
             chromium = YES;
         if ([n isEqualToString:@"Google Chrome Framework.framework"] || [n hasPrefix:@"Google Chrome for Testing"]) branded = YES;
+        if ([n isEqualToString:@"Electron Framework.framework"]) electron = YES;
     }
     if (chromium) {
         NSString *data = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject
             stringByAppendingPathComponent:[@"Mac Apps/" stringByAppendingString:app.lastPathComponent.stringByDeletingPathExtension]];
         [[NSFileManager defaultManager] createDirectoryAtPath:data withIntermediateDirectories:YES attributes:nil error:nil];
         [args addObject:[@"--user-data-dir=" stringByAppendingString:data]];
-        if (branded)
+        if (electron && !getenv("HENGE_TL_ELECTRON_SINGLE"))
+            /* Electron does not run as one process (its windows wait for a renderer that never comes): its helpers run
+               as processes inside Henge, as few as it allows. */
+            [args addObjectsFromArray:@[
+                @"--in-process-gpu", @"--enable-features=NetworkServiceInProcess2", @"--renderer-process-limit=1",
+                @"--disable-site-isolation-trials", @"--disable-features=RemoteCoreAnimationAPI,SpareRendererForSitePerProcess",
+            ]];
+        else if (branded)
             /* Google builds Chrome without its in-process renderer (content/browser/browser_main_loop.cc), so its
                renderers run as processes inside Henge, as few as Chrome allows: the GPU and network services in
                the browser, one renderer, no site isolation, no extensions, no WebUI toolbar or preloaded WebUI
@@ -115,6 +123,11 @@ static NSArray<NSString *> *arguments_for(NSString *app, NSString *exe) {
             [NSString stringWithFormat:@"--window-size=%d,%d", (int)g_presenter.screen_size.width, (int)g_presenter.screen_size.height],
         ]];
     }
+#if TARGET_OS_OSX
+    if (getenv("HENGE_TL_EXTRA_ARGS")) /* the Mac test only: more switches, space-separated */
+        for (NSString *a in [@(getenv("HENGE_TL_EXTRA_ARGS")) componentsSeparatedByString:@" "])
+            if (a.length) [args addObject:a];
+#endif
     return args;
 }
 

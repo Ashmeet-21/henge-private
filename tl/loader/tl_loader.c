@@ -1551,7 +1551,7 @@ static void proc_finish(TlProc *p, int status) {
         dispatch_source_merge_data((dispatch_source_t)p->exit_watchers[i], DISPATCH_PROC_EXIT);
         dispatch_release((dispatch_source_t)p->exit_watchers[i]);
     }
-    kill(getpid(), SIGCHLD); /* as the kernel tells a parent (libuv reaps its children on it) */
+    if (!getenv("TL_NO_SIGCHLD")) kill(getpid(), SIGCHLD); /* as the kernel tells a parent (libuv reaps its children on it) */
 }
 
 /* A process started here has no kernel pid: the kernel would report a watch on it as "already exited" at once (so
@@ -1710,13 +1710,17 @@ static int wanted_process(char *const argv[]) {
        browser unless it runs as one process), network and audio. Others (unzipping, macOS notifications, ...) are
        refused as on iOS, and Chromium copes. */
     static const char *const utilities[] = {"storage.mojom.StorageService", "network.mojom.NetworkService",
-                                            "audio.mojom.AudioService", NULL};
+                                            "audio.mojom.AudioService", "node.mojom.NodeService" /* Electron's */, NULL};
     int utility = 0, helper = 0;
     const char *sub = NULL;
     const char *base = argv && argv[0] ? strrchr(argv[0], '/') : NULL;
     base = base ? base + 1 : argv && argv[0] ? argv[0] : "";
     if (strstr(base, "crashpad") || strstr(base, "crash_handler") || strstr(base, "crashhandler"))
         return 0; /* crash reporters watch the process from outside: in it they would catch its signals */
+    static const char *const updaters[] = {"ShipIt", "Autoupdate", "Updater", "updater", "Squirrel", "Sparkle", "Installer",
+                                           "installer", NULL};
+    for (int i = 0; updaters[i]; i++)
+        if (strstr(base, updaters[i])) return 0; /* an app's updater replaces the app's files: never from here */
     for (int i = 1; argv && argv[i]; i++) {
         if (!strncmp(argv[i], "--type=", 7)) helper = 1;
         if (!strcmp(argv[i], "--type=renderer") || !strcmp(argv[i], "--type=gpu-process")) return 1;

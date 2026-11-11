@@ -55,7 +55,8 @@ static void no_actions(void (^block)(void)) {
 PASS_UP(mouseDown) PASS_UP(mouseUp) PASS_UP(mouseDragged) PASS_UP(mouseMoved) PASS_UP(mouseEntered) PASS_UP(mouseExited)
 PASS_UP(rightMouseDown) PASS_UP(rightMouseUp) PASS_UP(rightMouseDragged) PASS_UP(otherMouseDown) PASS_UP(otherMouseUp)
 PASS_UP(otherMouseDragged) PASS_UP(scrollWheel) PASS_UP(keyDown) PASS_UP(keyUp) PASS_UP(flagsChanged) PASS_UP(cursorUpdate)
-PASS_UP(magnifyWithEvent)
+PASS_UP(magnifyWithEvent) PASS_UP(swipeWithEvent) PASS_UP(rotateWithEvent) PASS_UP(smartMagnifyWithEvent)
+PASS_UP(pressureChangeWithEvent) PASS_UP(beginGestureWithEvent) PASS_UP(endGestureWithEvent)
 #undef PASS_UP
 - (void)noResponderFor:(SEL)selector {}
 - (BOOL)performKeyEquivalent:(NSEvent *)event { return NO; }
@@ -582,9 +583,16 @@ static NSPoint g_mouse;                               /* screen coordinates */
 static NSUInteger g_buttons;
 static NSEventModifierFlags g_modifiers;
 
+/* The view between a window and its content view (AppKit's NSThemeFrame). */
+@interface HKThemeFrame : NSView
+@end
+@implementation HKThemeFrame
+@end
+
 @interface NSWindow () {
     NSRect _frame;
     NSView *_contentView;
+    NSView *_frameView; /* the content view's superview, as AppKit's theme frame (programs swizzle on its class) */
     CALayer *_root;
     NSInteger _number;
     BOOL _visible;
@@ -710,10 +718,24 @@ static SEL delegate_selector(NSString *note, NSString *prefix) {
             [old->_layer removeFromSuperlayer];
         });
         if (old.nextResponder == self) old.nextResponder = nil;
+        if (old->_superview == _frameView) {
+            old->_superview = nil;
+            [_frameView->_subviews removeObjectIdenticalTo:old];
+        }
     }
     _contentView = view;
     if (!view) return;
     if (view->_superview) [view removeFromSuperview];
+    /* The theme frame: the whole window, unflipped at the origin, so the content view's coordinates are as without
+       it; it draws nothing, and its layer is not shown (the content view's layer hangs from the window's root). */
+    if (!_frameView) {
+        _frameView = [[HKThemeFrame alloc] initWithFrame:(NSRect){NSZeroPoint, _frame.size}];
+        [_frameView hk_setWindow:self];
+        _frameView.nextResponder = self;
+    }
+    view->_superview = _frameView;
+    if (!_frameView->_subviews) _frameView->_subviews = [NSMutableArray array];
+    [_frameView->_subviews addObject:view];
     [view setFrame:(NSRect){NSZeroPoint, _frame.size}];
     CALayer *l = view.layer, *root = _root;
     no_actions(^{
@@ -761,7 +783,10 @@ static SEL delegate_selector(NSString *note, NSString *prefix) {
     no_actions(^{
         root.frame = (CGRect){CGPointZero, frame.size};
     });
-    if (resized) [_contentView setFrameSize:frame.size];
+    if (resized) {
+        [_frameView setFrameSize:frame.size];
+        [_contentView setFrameSize:frame.size];
+    }
     if (moved) [self hk_post:@"NSWindowDidMoveNotification"];
     if (resized) [self hk_post:@"NSWindowDidResizeNotification"];
     [self hk_changed];
@@ -1595,4 +1620,8 @@ void hk_post_key(NSWindow *window, NSEventType type, unsigned short keycode, NSS
     return NSMakeRect(r.origin.x / s, r.origin.y / s, r.size.width / s, r.size.height / s);
 }
 - (BOOL)canRepresentDisplayGamut:(NSInteger)gamut { return gamut <= 1; }
+@end
+
+@implementation NSPanel
+- (BOOL)canBecomeMainWindow { return NO; }
 @end

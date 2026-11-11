@@ -310,6 +310,13 @@ void hk_add_fallback(Class cls);
 - (CALayer *)hk_rootLayer; /* the layer the presenter shows: the content view's layer tree */
 @end
 
+/* A window that floats over others (inspectors, palettes, quick-entry windows). */
+@interface NSPanel : NSWindow
+@property(getter=isFloatingPanel) BOOL floatingPanel;
+@property BOOL becomesKeyOnlyIfNeeded;
+@property BOOL worksWhenModal;
+@end
+
 /* ---- events ---- */
 @interface NSEvent : NSObject <NSCopying>
 @property(readonly) NSEventType type;
