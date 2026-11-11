@@ -22,6 +22,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -300,30 +301,87 @@ static void chunk_pack(Slot *s, const uint8_t *base, uint64_t size, uint32_t ind
     else s->h.raw = 1, s->h.bytes = (uint32_t)raw;
 }
 
+static double pack_secs, write_secs, wait_secs; /* for the log: compressing, writing, and waiting for a batch to be compressed */
+
+static double mono(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec + (double)t.tv_nsec * 1e-9;
+}
+
+/* Chunks are compressed a batch at a time on every core, the next batch while the last one is written. */
 static int save_ram(W *w, HvRam *ram, uint64_t *stored_pages) {
     uint32_t nchunks = (uint32_t)((ram->size + CHUNK_BYTES - 1) / CHUNK_BYTES);
     RamHdr rh = {ram->pa, ram->size, CHUNK_PAGES, nchunks};
     w_raw(w, &(SecHdr){TAG('R', 'A', 'M', ' '), 0, sizeof rh}, sizeof(SecHdr));
     w_raw(w, &rh, sizeof rh);
-    Slot slots[BATCH] = {0};
-    if (slots_alloc(slots, BATCH)) {
-        slots_free(slots, BATCH);
+    Slot set[2][BATCH];
+    memset(set, 0, sizeof set);
+    if (slots_alloc(set[0], BATCH) || slots_alloc(set[1], BATCH)) {
+        slots_free(set[0], BATCH), slots_free(set[1], BATCH);
         return w->err = ENOMEM, -1;
     }
     dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
-    for (uint32_t first = 0; first < nchunks && !w->err; first += BATCH) {
+    dispatch_group_t packing = dispatch_group_create();
+    const uint8_t *base = ram->host;
+    uint64_t size = ram->size;
+    __block double packed = 0;
+    void (^pack)(Slot *, uint32_t, uint32_t) = ^(Slot *sl, uint32_t first, uint32_t n) {
+        dispatch_group_async(packing, q, ^{
+            double t0 = mono();
+            dispatch_apply(n, q, ^(size_t k) { chunk_pack(&sl[k], base, size, first + (uint32_t)k); });
+            packed += mono() - t0;
+        });
+    };
+    uint32_t n0 = nchunks < BATCH ? nchunks : BATCH;
+    if (n0) pack(set[0], 0, n0);
+    int cur = 0;
+    for (uint32_t first = 0; first < nchunks && !w->err; first += BATCH, cur ^= 1) {
         uint32_t n = nchunks - first < BATCH ? nchunks - first : BATCH;
-        const uint8_t *base = ram->host;
-        uint64_t size = ram->size;
-        Slot *sl = slots;
-        dispatch_apply(n, q, ^(size_t k) { chunk_pack(&sl[k], base, size, first + (uint32_t)k); });
+        double t0 = mono();
+        dispatch_group_wait(packing, DISPATCH_TIME_FOREVER);
+        double t1 = mono();
+        uint32_t next = first + BATCH;
+        if (next < nchunks) pack(set[cur ^ 1], next, nchunks - next < BATCH ? nchunks - next : BATCH);
+        Slot *sl = set[cur];
+        /* The batch's chunks at once, each at its own place in the file: past the page cache a write waits for
+           the flash, and one at a time leaves it mostly idle. */
+        w_flush(w);
+        uint64_t at[BATCH], pos = w->total;
         for (uint32_t k = 0; k < n; k++) {
-            w_raw(w, &slots[k].h, sizeof slots[k].h);
-            if (slots[k].h.bytes) w_raw(w, slots[k].h.raw ? slots[k].stage : slots[k].out, slots[k].h.bytes);
-            *stored_pages += slots[k].h.stored;
+            at[k] = pos;
+            pos += sizeof sl[k].h + sl[k].h.bytes;
+            *stored_pages += sl[k].h.stored;
         }
+        __block _Atomic int failed = 0;
+        int fd = w->fd;
+        const uint64_t *atp = at;
+        dispatch_apply(n, q, ^(size_t k) {
+            struct iovec v[2] = {{&sl[k].h, sizeof sl[k].h}, {sl[k].h.raw ? sl[k].stage : sl[k].out, sl[k].h.bytes}};
+            size_t want = v[0].iov_len + v[1].iov_len, done = 0;
+            while (done < want) {
+                ssize_t got = pwritev(fd, v, v[1].iov_len ? 2 : 1, (off_t)(atp[k] + done));
+                if (got < 0 && errno == EINTR) continue;
+                if (got <= 0) {
+                    failed = errno ? errno : EIO;
+                    return;
+                }
+                done += (size_t)got;
+                for (int i = 0; i < 2; i++) { /* what is left of the two pieces */
+                    size_t take = (size_t)got < v[i].iov_len ? (size_t)got : v[i].iov_len;
+                    v[i].iov_base = (uint8_t *)v[i].iov_base + take, v[i].iov_len -= take, got -= (ssize_t)take;
+                }
+            }
+        });
+        if (failed) w->err = failed;
+        w->total = pos;
+        if (lseek(fd, (off_t)pos, SEEK_SET) != (off_t)pos && !w->err) w->err = errno;
+        write_secs += mono() - t1;
+        wait_secs += t1 - t0;
     }
-    slots_free(slots, BATCH);
+    dispatch_group_wait(packing, DISPATCH_TIME_FOREVER);
+    pack_secs += packed;
+    slots_free(set[0], BATCH), slots_free(set[1], BATCH);
     return w->err ? -1 : 0;
 }
 
@@ -557,6 +615,7 @@ int hv_snapshot_save(const char *path, const char *ident, char *err, size_t errl
     }
     save_devices(&w, b);
     uint64_t stored = 0;
+    pack_secs = write_secs = wait_secs = 0;
     for (int i = 0; i < m->nram && !w.err; i++) save_ram(&w, &m->ram[i], &stored);
     Trailer t = {TAG('E', 'N', 'D', ' '), 0, w.total + sizeof(Trailer)};
     w_raw(&w, &t, sizeof t);
@@ -572,8 +631,9 @@ int hv_snapshot_save(const char *path, const char *ident, char *err, size_t errl
     }
     clock_gettime(CLOCK_MONOTONIC, &t1);
     double secs = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9;
-    fprintf(stderr, "hengevm: snapshot: saved %d CPUs and %llu MB of RAM (%llu pages with data) in %llu MB, %.2f s\n", ncpus,
-            (unsigned long long)(b->ram_size >> 20), (unsigned long long)stored, (unsigned long long)(t.total >> 20), secs);
+    fprintf(stderr, "hengevm: snapshot: saved %d CPUs and %llu MB of RAM (%llu pages with data) in %llu MB, %.2f s "
+                    "(compressing %.2f s alongside writing %.2f s; %.2f s waiting for compression)\n", ncpus, (unsigned long long)(b->ram_size >> 20),
+            (unsigned long long)stored, (unsigned long long)(t.total >> 20), secs, pack_secs, write_secs, wait_secs);
     return 0;
 }
 
