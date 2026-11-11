@@ -486,6 +486,7 @@ uint64_t hv_vm_resume_counter(uint64_t counter, int64_t wall_ns) {
     struct timespec now;
     clock_gettime(CLOCK_REALTIME, &now);
     int64_t gone = (int64_t)now.tv_sec * 1000000000 + now.tv_nsec - wall_ns;
+    if (getenv("HV_RESUME_SKEW")) gone += (int64_t)atoll(getenv("HV_RESUME_SKEW")) * 1000000000; /* testing: as if away longer */
     atomic_store(&nudge_after_start, 1);
     return gone > 0 ? counter + (uint64_t)gone / 125 * 3 : counter; /* 24 MHz: 3 ticks every 125 ns */
 }

@@ -272,7 +272,7 @@ static void slots_free(Slot *s, int n) {
 }
 
 /* One chunk into a slot: which pages have something, and those pages compressed. */
-static void chunk_pack(Slot *s, const uint8_t *base, uint64_t size, uint32_t index) {
+static void chunk_pack(Slot *s, const uint8_t *base, uint64_t size, uint32_t index, int use_mincore) {
     uint64_t from = (uint64_t)index * CHUNK_BYTES;
     uint32_t pages = (uint32_t)((size - from < CHUNK_BYTES ? size - from : CHUNK_BYTES) / PAGE);
     memset(&s->h, 0, sizeof s->h);
@@ -280,7 +280,9 @@ static void chunk_pack(Slot *s, const uint8_t *base, uint64_t size, uint32_t ind
     size_t host_page = (size_t)getpagesize();
     size_t vec_n = (size_t)(pages * PAGE + host_page - 1) / host_page;
     char vec[CHUNK_BYTES / 4096];
-    int have_vec = mincore((void *)(base + from), (size_t)pages * PAGE, vec) == 0;
+    /* Untouched anonymous pages are neither resident nor paged out. A file's page can be written back and dropped, and
+       then looks the same while it holds data: file-backed RAM is read whole. */
+    int have_vec = use_mincore && mincore((void *)(base + from), (size_t)pages * PAGE, vec) == 0;
     for (uint32_t i = 0; i < pages; i++) {
         const uint8_t *pg = base + from + (uint64_t)i * PAGE;
         if (have_vec) {
@@ -311,7 +313,7 @@ static double mono(void) {
 }
 
 /* Chunks are compressed a batch at a time on every core, the next batch while the last one is written. */
-static int save_ram(W *w, HvRam *ram, uint64_t *stored_pages) {
+static int save_ram(W *w, HvRam *ram, uint64_t *stored_pages, int file_backed) {
     uint32_t nchunks = (uint32_t)((ram->size + CHUNK_BYTES - 1) / CHUNK_BYTES);
     RamHdr rh = {ram->pa, ram->size, CHUNK_PAGES, nchunks};
     w_raw(w, &(SecHdr){TAG('R', 'A', 'M', ' '), 0, sizeof rh}, sizeof(SecHdr));
@@ -330,7 +332,7 @@ static int save_ram(W *w, HvRam *ram, uint64_t *stored_pages) {
     void (^pack)(Slot *, uint32_t, uint32_t) = ^(Slot *sl, uint32_t first, uint32_t n) {
         dispatch_group_async(packing, q, ^{
             double t0 = mono();
-            dispatch_apply(n, q, ^(size_t k) { chunk_pack(&sl[k], base, size, first + (uint32_t)k); });
+            dispatch_apply(n, q, ^(size_t k) { chunk_pack(&sl[k], base, size, first + (uint32_t)k, !file_backed); });
             packed += mono() - t0;
         });
     };
@@ -632,7 +634,7 @@ int hv_snapshot_save(const char *path, const char *ident, char *err, size_t errl
     save_devices(&w, b);
     uint64_t stored = 0;
     pack_secs = write_secs = wait_secs = 0;
-    for (int i = 0; i < m->nram && !w.err; i++) save_ram(&w, &m->ram[i], &stored);
+    for (int i = 0; i < m->nram && !w.err; i++) save_ram(&w, &m->ram[i], &stored, m->ram[i].host == b->ram && b->ram_fd >= 0);
     Trailer t = {TAG('E', 'N', 'D', ' '), 0, w.total + sizeof(Trailer)};
     w_raw(&w, &t, sizeof t);
     w_flush(&w);
