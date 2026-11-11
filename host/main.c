@@ -622,6 +622,7 @@ static void *input_thread(void *unused) {
                 }
                 fprintf(stderr, "\n");
             }
+            hv_pvg_lite_debug(bd->pvg, stderr);
             HvGic *g = bd->gic;
             fprintf(stderr, "devstate gic ctlr %x; SPIs enabled+pending:", g->ctlr);
             for (int i = 32; i < HV_GIC_NUM_IRQS; i++)
