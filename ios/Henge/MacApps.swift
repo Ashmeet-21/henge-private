@@ -135,8 +135,9 @@ final class MacAppsStore: ObservableObject {
         reload()
     }
 
+    /// What a program printed, beside it (visible in Files, for a run that ended Henge).
     static func output(for app: MacApp) -> URL {
-        folder.appendingPathComponent(".\(app.url.lastPathComponent).output.txt")
+        folder.appendingPathComponent("\(app.url.lastPathComponent) output.txt")
     }
 }
 

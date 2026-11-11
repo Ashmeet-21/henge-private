@@ -71,6 +71,8 @@ int hv_pvg_lite_set_state(HvPvgLite *p, const void *in, size_t len);
 void hv_pvg_lite_quiesce(HvPvgLite *p);
 size_t hv_pvg_lite_display_state(HvPvgLite *p, void *out, size_t cap);
 void hv_pvg_lite_set_display_state(HvPvgLite *p, const void *in, size_t len);
+#include <stdio.h>
+void hv_pvg_lite_debug(HvPvgLite *p, FILE *f);
 void hv_pvg_metal_quiesce(HvPvgMetal *m);
 size_t hv_pvg_metal_display_state(HvPvgMetal *m, void *out, size_t cap);
 void hv_pvg_metal_set_display_state(HvPvgMetal *m, const void *in, size_t len);

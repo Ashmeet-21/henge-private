@@ -46,6 +46,7 @@ typedef struct SnapHeader {
     char ident[1024];
     uint64_t guest_counter; /* the virtual counter when it stopped: it goes on from there */
     int64_t saved_at;       /* host wall clock, seconds */
+    int64_t paused_wall_ns; /* the wall clock when the CPUs stopped */
     uint32_t ncpus, nram;
     uint64_t ram_size;
     char disk[256];         /* hv_vm_disk_identity when saved: the disk has to be exactly that again */
@@ -271,7 +272,7 @@ static void slots_free(Slot *s, int n) {
 }
 
 /* One chunk into a slot: which pages have something, and those pages compressed. */
-static void chunk_pack(Slot *s, const uint8_t *base, uint64_t size, uint32_t index) {
+static void chunk_pack(Slot *s, const uint8_t *base, uint64_t size, uint32_t index, int use_mincore) {
     uint64_t from = (uint64_t)index * CHUNK_BYTES;
     uint32_t pages = (uint32_t)((size - from < CHUNK_BYTES ? size - from : CHUNK_BYTES) / PAGE);
     memset(&s->h, 0, sizeof s->h);
@@ -279,7 +280,9 @@ static void chunk_pack(Slot *s, const uint8_t *base, uint64_t size, uint32_t ind
     size_t host_page = (size_t)getpagesize();
     size_t vec_n = (size_t)(pages * PAGE + host_page - 1) / host_page;
     char vec[CHUNK_BYTES / 4096];
-    int have_vec = mincore((void *)(base + from), (size_t)pages * PAGE, vec) == 0;
+    /* Untouched anonymous pages are neither resident nor paged out. A file's page can be written back and dropped, and
+       then looks the same while it holds data: file-backed RAM is read whole. */
+    int have_vec = use_mincore && mincore((void *)(base + from), (size_t)pages * PAGE, vec) == 0;
     for (uint32_t i = 0; i < pages; i++) {
         const uint8_t *pg = base + from + (uint64_t)i * PAGE;
         if (have_vec) {
@@ -310,7 +313,7 @@ static double mono(void) {
 }
 
 /* Chunks are compressed a batch at a time on every core, the next batch while the last one is written. */
-static int save_ram(W *w, HvRam *ram, uint64_t *stored_pages) {
+static int save_ram(W *w, HvRam *ram, uint64_t *stored_pages, int file_backed) {
     uint32_t nchunks = (uint32_t)((ram->size + CHUNK_BYTES - 1) / CHUNK_BYTES);
     RamHdr rh = {ram->pa, ram->size, CHUNK_PAGES, nchunks};
     w_raw(w, &(SecHdr){TAG('R', 'A', 'M', ' '), 0, sizeof rh}, sizeof(SecHdr));
@@ -329,7 +332,7 @@ static int save_ram(W *w, HvRam *ram, uint64_t *stored_pages) {
     void (^pack)(Slot *, uint32_t, uint32_t) = ^(Slot *sl, uint32_t first, uint32_t n) {
         dispatch_group_async(packing, q, ^{
             double t0 = mono();
-            dispatch_apply(n, q, ^(size_t k) { chunk_pack(&sl[k], base, size, first + (uint32_t)k); });
+            dispatch_apply(n, q, ^(size_t k) { chunk_pack(&sl[k], base, size, first + (uint32_t)k, !file_backed); });
             packed += mono() - t0;
         });
     };
@@ -610,7 +613,8 @@ int hv_snapshot_save(const char *path, const char *ident, char *err, size_t errl
         return fail(err, errlen, "Out of memory.");
     }
     SnapHeader h = {.version = SNAP_VERSION, .header_bytes = sizeof h, .fingerprint = fingerprint(),
-                    .guest_counter = hv_vm_paused_counter(), .saved_at = (int64_t)time(NULL), .ncpus = (uint32_t)ncpus,
+                    .guest_counter = hv_vm_paused_counter(), .saved_at = (int64_t)time(NULL), .paused_wall_ns = hv_vm_paused_wall_ns(),
+                    .ncpus = (uint32_t)ncpus,
                     .nram = (uint32_t)m->nram, .ram_size = b->ram_size};
     memcpy(h.magic, SNAP_MAGIC, 8);
     snprintf(h.ident, sizeof h.ident, "%s", ident ? ident : "");
@@ -630,7 +634,7 @@ int hv_snapshot_save(const char *path, const char *ident, char *err, size_t errl
     save_devices(&w, b);
     uint64_t stored = 0;
     pack_secs = write_secs = wait_secs = 0;
-    for (int i = 0; i < m->nram && !w.err; i++) save_ram(&w, &m->ram[i], &stored);
+    for (int i = 0; i < m->nram && !w.err; i++) save_ram(&w, &m->ram[i], &stored, m->ram[i].host == b->ram && b->ram_fd >= 0);
     Trailer t = {TAG('E', 'N', 'D', ' '), 0, w.total + sizeof(Trailer)};
     w_raw(&w, &t, sizeof t);
     w_flush(&w);
@@ -727,8 +731,8 @@ int hv_snapshot_restore(const char *path, const char *ident, char *err, size_t e
     if (!bad && b->pvg && display_len) hv_pvg_lite_set_display_state(b->pvg, display, (size_t)display_len);
     free(display);
     if (bad) return fail(err, errlen, "The saved Mac could not be read (%s).", strerror(r.err ? r.err : EINVAL));
-    /* The guest's clock goes on from where it stopped, as a Mac's does across sleep. */
-    m->cntvoff = hv_counter() - h.guest_counter;
+    /* The guest's clock goes on as far as the wall clock went since it stopped (see hv_vm_resume_counter). */
+    m->cntvoff = hv_counter() - hv_vm_resume_counter(h.guest_counter, h.paused_wall_ns);
     for (int i = 0; i < ncpus; i++) {
         HvCpu *c = hv_vm_cpu(i);
         cpu_put(c, &cs[i]);

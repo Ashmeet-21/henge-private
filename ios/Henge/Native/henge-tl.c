@@ -193,7 +193,10 @@ typedef struct RunArgs {
 static void *run_thread(void *opaque) {
     RunArgs *a = opaque;
     const char *argv[] = {a->path, NULL};
-    const char *envp[] = {"HOME=/tmp", NULL};
+    static char home[1100];
+    const char *tmp = getenv("TMPDIR");
+    snprintf(home, sizeof home, "HOME=%s", tmp && *tmp ? tmp : "/tmp"); /* the app's own temporary folder on iOS */
+    const char *envp[] = {home, NULL};
     atomic_store(&exit_code, tl_run_main(a->exe, 1, argv, envp));
     fflush(NULL);
     return NULL;
@@ -228,12 +231,9 @@ int henge_tl_run(const char *path, const char *out_path, char *err, size_t errle
         return -1;
     }
     fprintf(stderr, "henge: tl: loaded at %p, %zu bytes, %d missing symbols\n", tl_image_base(exe), tl_image_size(exe), tl_missing_count());
-    const char *macos = strstr(path, ".app/Contents/MacOS/");
-    if (macos) {
-        char app[2048];
-        snprintf(app, sizeof app, "%.*s", (int)(macos - path + 4), path);
-        if (tl_adopt_main_bundle(app) != 0) fprintf(stderr, "henge: tl: %s is not a bundle\n", app);
-    }
+    /* Not tl_adopt_main_bundle: it hands the whole process's main bundle to the program, and Henge reads its own
+       (resources, its build) for the rest of the launch. A program without windows gets by without; an app with
+       windows will need it, with Henge's own reads kept apart first. */
     int out = open(out_path, O_CREAT | O_TRUNC | O_WRONLY, 0644);
     fflush(NULL);
     int saved1 = dup(1), saved2 = dup(2);

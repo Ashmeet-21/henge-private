@@ -39,8 +39,9 @@ enum Device {
     static var suggestedRAMGB: Int {
         let mb = ProcessInfo.processInfo.physicalMemory >> 20
         // m4 fork: an 8 GB iPad (7.4 GB usable) thrashes and kills the Mac at 6 GB: 16 GB devices only.
-        // About 6 GB: a 4 GB Mac ran the phone out of memory once booted (jetsam vm-pageshortage); 3 GB ran.
-        return mb >= 14_000 ? 8 : mb >= 10_000 ? 6 : mb >= 7_000 ? 4 : 3
+        // About 6 GB: a 4 GB Mac ran the phone out of memory once booted (jetsam vm-pageshortage); 3 GB ran (#70 too).
+        // 4 GB devices, 2.
+        return mb >= 14_000 ? 8 : mb >= 10_000 ? 6 : mb >= 7_000 ? 4 : mb >= 5_000 ? 3 : 2
     }
 
     /// A device with about 6 GB (A14, A15 and A16 iPads and iPhones). iOS has no swap on these and gives an app

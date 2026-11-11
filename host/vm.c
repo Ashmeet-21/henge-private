@@ -53,7 +53,9 @@ static pthread_cond_t pause_cv = PTHREAD_COND_INITIALIZER;
 static int pause_state; /* 0 running, 1 pausing, 2 paused, 3 it stopped instead */
 static int pause_clean; /* paused with nothing in flight: it can be saved */
 static int run_ended;   /* CPU 0's thread is on its way out for good: nothing will finish a pause */
-static uint64_t paused_counter; /* the guest's virtual counter when its CPUs stopped: it goes on from there */
+static uint64_t paused_counter; /* the guest's virtual counter when its CPUs stopped */
+static int64_t paused_wall_ns;  /* and the wall clock then */
+static _Atomic int nudge_after_start; /* resumed: tell the guest someone is here as soon as it runs */
 
 HvMachine *hv_vm_machine(void) { return &m; }
 HvVmapple *hv_vm_board(void) { return &board; }
@@ -480,6 +482,9 @@ int hv_vm_finish_pause(void) {
     memset(secondary_started, 0, sizeof secondary_started);
     if (!all_saving()) return -1;
     paused_counter = hv_counter() - m.cntvoff;
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    paused_wall_ns = (int64_t)now.tv_sec * 1000000000 + now.tv_nsec;
     hv_virtio_blk_stop(board.root_blk);
     hv_virtio_blk_stop(board.aux_blk);
     if (sound_on) hv_audio_detach(); /* the host's player stops; the stream's state stays in the device */
@@ -495,7 +500,24 @@ int hv_vm_finish_pause(void) {
 }
 
 int hv_vm_pause_clean(void) { return hv_vm_paused() && pause_clean; }
+
+/* Where the guest's counter goes on from after a pause or a restore: as much later as the wall clock moved meanwhile, so
+   its clock is right at once (macOS then also checks it with the network) -- the counter on a host (an iPhone asleep)
+   stops for longer than the wall clock does. A jump of 10 minutes was seen to do no harm beyond what a Mac left alone
+   that long does (its display goes off for being idle: hv_vm_start nudges the pointer after it). HV_RESUME_CLOCK=
+   continuous: no time passes for the guest at all (its clock is then behind until macOS sets it, which can be hours). */
+uint64_t hv_vm_resume_counter(uint64_t counter, int64_t wall_ns) {
+    const char *how = getenv("HV_RESUME_CLOCK");
+    if (how && !strcmp(how, "continuous")) return counter;
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    int64_t gone = (int64_t)now.tv_sec * 1000000000 + now.tv_nsec - wall_ns;
+    if (getenv("HV_RESUME_SKEW")) gone += (int64_t)atoll(getenv("HV_RESUME_SKEW")) * 1000000000; /* testing: as if away longer */
+    atomic_store(&nudge_after_start, 1);
+    return gone > 0 ? counter + (uint64_t)gone / 125 * 3 : counter; /* 24 MHz: 3 ticks every 125 ns */
+}
 uint64_t hv_vm_paused_counter(void) { return paused_counter; }
+int64_t hv_vm_paused_wall_ns(void) { return paused_wall_ns; }
 
 int hv_vm_pause(void) {
     pthread_mutex_lock(&pause_mu);
@@ -534,10 +556,7 @@ int hv_vm_continue(void) {
         pthread_join(primary_thread, NULL);
         primary_started = 0;
     }
-    /* No time passes for the guest while it is paused, as with a restore: its clock is behind until macOS next sets
-       it from the network (minutes), but nothing in it sees time jump (a jump of minutes or hours could look to its
-       watchdog like hung services). */
-    m.cntvoff = hv_counter() - paused_counter;
+    m.cntvoff = hv_counter() - hv_vm_resume_counter(paused_counter, paused_wall_ns);
     for (int i = 0; i < ncpus; i++) {
         cpus[i].cntvoff = m.cntvoff;
         atomic_store(&cpus[i].halted, HV_HALT_NONE);
@@ -583,6 +602,11 @@ static void *cpu0_thread(void *unused) {
 int hv_vm_start(int cpu0, void (*on_exit)(int reason)) {
     exit_cb = on_exit;
     cpu0_ours = cpu0;
+    if (atomic_exchange(&nudge_after_start, 0)) /* someone is back: macOS counts the time away as idle (display off) */
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            hv_vm_mouse_move(1, 0);
+            hv_vm_mouse_move(-1, 0);
+        });
     pthread_mutex_lock(&pause_mu);
     run_ended = 0;
     pthread_mutex_unlock(&pause_mu);

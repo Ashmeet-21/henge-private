@@ -610,6 +610,71 @@ static void *input_thread(void *unused) {
         else if (!strncmp(line, "save ", 5)) save_now(line + 5, 0);
         else if (!strncmp(line, "saveexit ", 9)) save_now(line + 9, 1);
         else if (!strncmp(line, "linkflap", 8)) hv_vm_link_flap();
+        else if (!strncmp(line, "dis ", 4)) { /* debugging: "dis VA": 64 words of guest code at a kernel VA, through CPU 0's tables */
+            uint64_t va = strtoull(line + 4, NULL, 16);
+            HvCpu *c0 = hv_vm_cpu(0);
+            HvWalk wv;
+            hv_mmu_walk(c0, va, HV_ACC_EXEC, 1, &wv);
+            const uint32_t *w = !wv.fsc ? hv_phys_ptr(hv_vm_machine(), wv.pa, 256) : NULL;
+            fprintf(stderr, "dis %llx pa %llx fsc %u:", (unsigned long long)va, (unsigned long long)wv.pa, (unsigned)wv.fsc);
+            for (int k = 0; w && k < 64; k++) fprintf(stderr, " %08x", w[k]);
+            fprintf(stderr, "\n");
+        }
+        else if (!strncmp(line, "devstate", 8)) { /* debugging: what each device has been asked and not answered */
+            HvVmapple *bd = hv_vm_board();
+            struct { const char *name; HvVirtio *v; } vs[] = {
+                {"root", bd->root_blk ? &bd->root_blk->vio : NULL}, {"aux", bd->aux_blk ? &bd->aux_blk->vio : NULL},
+                {"net", bd->net ? &bd->net->vio : NULL}, {"snd", bd->snd ? &bd->snd->vio : NULL},
+                {"kbd", bd->keyboard ? &bd->keyboard->vio : NULL}, {"mouse", bd->mouse ? &bd->mouse->vio : NULL},
+                {"balloon", bd->balloon ? &bd->balloon->vio : NULL}};
+            for (unsigned k = 0; k < sizeof vs / sizeof vs[0]; k++) {
+                HvVirtio *v = vs[k].v;
+                if (!v) continue;
+                fprintf(stderr, "devstate %s: status %x isr %x intx %d features %llx", vs[k].name, v->status, v->isr, v->pci.intx, (unsigned long long)v->driver_features);
+                for (int q = 0; q < v->nq; q++) {
+                    HvVirtq *vq = &v->q[q];
+                    uint16_t *avail = vq->avail ? hv_phys_ptr(hv_vm_machine(), vq->avail, 4) : NULL;
+                    uint16_t *used = vq->used ? hv_phys_ptr(hv_vm_machine(), vq->used, 4) : NULL;
+                    fprintf(stderr, " | q%d size %u en %u last_avail %u avail %u used %u", q, vq->size, vq->enabled, vq->last_avail,
+                            avail ? avail[1] : 0, used ? used[1] : 0);
+                }
+                fprintf(stderr, "\n");
+            }
+            hv_pvg_lite_debug(bd->pvg, stderr);
+            HvGic *g = bd->gic;
+            fprintf(stderr, "devstate gic ctlr %x; SPIs enabled+pending:", g->ctlr);
+            for (int i = 32; i < HV_GIC_NUM_IRQS; i++)
+                if (g->enabled[i] && (g->latch[i] || g->level[i])) fprintf(stderr, " %d%s", i, g->active[i] ? "(active)" : "");
+            fprintf(stderr, "; pending not enabled:");
+            for (int i = 32; i < HV_GIC_NUM_IRQS; i++)
+                if (!g->enabled[i] && (g->latch[i] || g->level[i])) fprintf(stderr, " %d", i);
+            fprintf(stderr, "; active:");
+            for (int i = 32; i < HV_GIC_NUM_IRQS; i++) if (g->active[i]) fprintf(stderr, " %d", i);
+            fprintf(stderr, "\n");
+#pragma push_macro("cpu")
+#undef cpu
+            for (int c = 0; c < hv_vm_ncpus(); c++) {
+                HvGicCpu *gc = &g->cpu[c];
+                HvCpu *cp = hv_vm_cpu(c);
+                fprintf(stderr, "devstate cpu %d: pc %llx el%u off %d daif %llx pmr %llx igrpen1 %llx depth %d ppi pending:", c,
+                        (unsigned long long)cp->pc, cp->el, cp->off, (unsigned long long)cp->daif, (unsigned long long)gc->pmr,
+                        (unsigned long long)gc->igrpen1, gc->depth);
+                for (int i = 0; i < 32; i++) if (gc->latch[i] || gc->level[i]) fprintf(stderr, " %d%s", i, gc->enabled[i] ? "" : "(off)");
+                fprintf(stderr, " cntv_ctl %llx\n", (unsigned long long)cp->cntv_ctl);
+            }
+#pragma pop_macro("cpu")
+            HvXhci *x = bd->usb;
+            if (x) {
+                fprintf(stderr, "devstate xhci usbcmd %x usbsts %x cmd_running %d ports %x %x;", x->usbcmd, x->usbsts, x->cmd_running, x->portsc[0], x->portsc[1]);
+                for (int sl = 1; sl <= HV_XHCI_SLOTS; sl++)
+                    if (x->slot_used[sl] >= 0 && x->slots[sl].dev >= 0) {
+                        fprintf(stderr, " slot %d dev %d configured %d eps running:", sl, x->slots[sl].dev, x->slots[sl].configured);
+                        for (int e = 1; e < HV_XHCI_EPS; e++) if (x->slots[sl].ep_running[e]) fprintf(stderr, " %d", e);
+                        fprintf(stderr, ";");
+                    }
+                fprintf(stderr, " kbd reports %u..%u tp reports %u..%u tp_mt %d\n", x->rtail, x->rhead, x->tp_rtail, x->tp_rhead, x->tp_mt);
+            }
+        }
         else if (sscanf(line, "pause %d", &x) == 1) { /* paused for x seconds, then on (as Henge in the background, not killed) */
             if (hv_vm_pause() == 0) {
                 fprintf(stderr, "hengevm: paused for %d s\n", x);
