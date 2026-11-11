@@ -73,6 +73,15 @@ void *hk_lookup(const char *install_name, const char *symbol) {
         if (!strcmp(symbol, by_name[i].name)) return tl_binding_links_appkit_classes() ? NULL : by_name[i].fn;
     void *own = own_symbol(symbol); /* this image's own definitions first, classes included */
     if (own) return own;
+    /* MediaPlayer's centers when the process has no MediaPlayer (HKPrivate.m). */
+    static const char *const media[][3] = {{"MPRemoteCommandCenter", "HKRemoteCommandCenter"},
+                                           {"MPNowPlayingInfoCenter", "HKNowPlayingInfoCenter"}};
+    for (size_t i = 0; i < sizeof media / sizeof *media; i++) {
+        size_t n = strlen(media[i][0]), len = strlen(symbol);
+        if (len < n || strcmp(symbol + len - n, media[i][0]) || objc_getClass(media[i][0])) continue;
+        if (!strncmp(symbol, "_OBJC_CLASS_$_", 14)) return (__bridge void *)objc_getClass(media[i][1]);
+        if (!strncmp(symbol, "_OBJC_METACLASS_$_", 18)) return (__bridge void *)object_getClass(objc_getClass(media[i][1]));
+    }
     if (!strncmp(symbol, "_OBJC_CLASS_$_", 14) || !strncmp(symbol, "_OBJC_METACLASS_$_", 18)) {
         int meta = symbol[6] == 'M';
         Class c = objc_getClass(symbol + (meta ? 18 : 14));
