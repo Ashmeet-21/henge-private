@@ -266,6 +266,13 @@ static void handle_line(NSString *line) {
     else if ([cmd isEqualToString:@"drag"]) hk_post_mouse(w, NSEventTypeLeftMouseDragged, to_window(w, a, b), 0, 1);
     else if ([cmd isEqualToString:@"move"]) hk_post_mouse(w, NSEventTypeMouseMoved, to_window(w, a, b), 0, 0);
     else if ([cmd isEqualToString:@"scroll"]) hk_post_scroll(w, to_window(w, w.frame.size.width / 2, w.frame.size.height / 2), a, b, NSEventPhaseChanged);
+    else if ([cmd isEqualToString:@"swipe"]) { /* swipe DX DY N: a two-finger gesture, began, N changes, ended */
+        CGPoint at = to_window(w, w.frame.size.width / 2, w.frame.size.height / 2);
+        int n = f.count > 3 ? [f[3] intValue] : 5;
+        hk_post_scroll(w, at, 0, 0, NSEventPhaseBegan);
+        for (int k = 0; k < n; k++) { hk_post_scroll(w, at, a, b, NSEventPhaseChanged); usleep(16000); }
+        hk_post_scroll(w, at, 0, 0, NSEventPhaseEnded);
+    }
     else if ([cmd isEqualToString:@"key"]) {
         NSString *chars = f.count > 2 ? f[2] : @"";
         if ([chars isEqualToString:@"RET"]) chars = @"\r";

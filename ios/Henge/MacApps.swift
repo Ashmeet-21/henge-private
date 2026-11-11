@@ -256,7 +256,7 @@ struct MacAppRunView: View {
                 if app.canOpenWindowed {
                     Button("Open (experimental)") { showScreen = true }
                         .buttonStyle(DeskButtonStyle()).disabled(henge_tl_ran_program() != 0).padding(.top, 16)
-                    Text("It runs inside Henge, one app per launch, without a Mac. Tap to click, drag with one finger, scroll with two, hold for a right click; tap the screen to bring up the keyboard. Quit Henge (swipe it away) to stop it.")
+                    Text("It runs inside Henge, one app per launch, without a Mac. Tap to click, scroll with one finger, drag with two, hold for a right click; tap the screen to bring up the keyboard. Quit Henge (swipe it away) to stop it.")
                         .font(.system(size: 13)).foregroundStyle(Desk.dim).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
                 }
                 Button("Delete", role: .destructive) { confirmDelete = true }.padding(.top, 24)

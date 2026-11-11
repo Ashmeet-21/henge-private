@@ -951,7 +951,12 @@ static BOOL is_mouse(NSEventType t) {
             break;
         }
         case NSEventTypeMouseMoved: [self hk_track:event]; break;
-        case NSEventTypeScrollWheel: [[self hk_viewAt:p] scrollWheel:event]; break;
+        case NSEventTypeScrollWheel: {
+            NSView *v = [self hk_viewAt:p];
+            if (getenv("HK_LOG_EVENTS")) hk_log("scroll %.0f,%.0f phase %lu to %s", event.scrollingDeltaX, event.scrollingDeltaY, (unsigned long)event.phase, object_getClassName(v));
+            [v scrollWheel:event];
+            break;
+        }
         case NSEventTypeMagnify: [[self hk_viewAt:p] magnifyWithEvent:event]; break;
         default: break;
         }
@@ -1087,7 +1092,7 @@ static NSInteger g_event_number;
 - (CGFloat)magnification { return 0; }
 - (NSTrackingArea *)trackingArea { return nil; }
 - (void *)eventRef { return NULL; }
-- (void *)CGEvent { return NULL; }
+- (void *)CGEvent { return (__bridge void *)self; } /* the CGEvent functions read their fields from the NSEvent (HKMacC.m) */
 - (NSUInteger)associatedEventsMask { return 0; }
 - (NSInteger)stage { return 0; }
 - (NSUInteger)deviceID { return 0; }

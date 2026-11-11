@@ -423,9 +423,41 @@ HK_FN(void *, CGEventCreate, (void *source)) { return NULL; }
 HK_FN(CFDataRef, CGEventCreateData, (CFAllocatorRef allocator, void *event)) { return NULL; }
 HK_FN(void *, CGEventCreateFromData, (CFAllocatorRef allocator, CFDataRef data)) { return NULL; }
 HK_FN(void *, CGEventCreateNextEvent, (int32_t connection)) { return NULL; }
-HK_FN(int64_t, CGEventGetIntegerValueField, (void *event, uint32_t field)) { return 0; }
-HK_FN(CGPoint, CGEventGetLocation, (void *event)) { return CGPointZero; }
-HK_FN(uint32_t, CGEventGetType, (void *event)) { return 0; /* kCGEventNull */ }
+/* An NSEvent's CGEvent is the NSEvent itself (HKCore.m): the fields apps read from it come from the NSEvent. */
+static NSEvent *hk_event_of(void *event) {
+    id e = (__bridge id)event;
+    return e && [e isKindOfClass:[NSEvent class]] ? (NSEvent *)e : nil;
+}
+HK_FN(int64_t, CGEventGetIntegerValueField, (void *event, uint32_t field)) {
+    NSEvent *e = hk_event_of(event);
+    if (!e) return 0;
+    switch (field) {
+    case 1: return e.clickCount;                                     /* kCGMouseEventClickState */
+    case 3: return e.buttonNumber;                                   /* kCGMouseEventButtonNumber */
+    case 9: return e.keyCode;                                        /* kCGKeyboardEventKeycode */
+    case 8: return e.isARepeat;                                      /* kCGKeyboardEventAutorepeat */
+    case 11: return (int64_t)lround(e.scrollingDeltaY / 10);         /* kCGScrollWheelEventDeltaAxis1 */
+    case 12: return (int64_t)lround(e.scrollingDeltaX / 10);         /* kCGScrollWheelEventDeltaAxis2 */
+    case 88: return e.hasPreciseScrollingDeltas;                     /* kCGScrollWheelEventIsContinuous */
+    case 93: return (int64_t)(e.scrollingDeltaY / 10 * 65536);       /* kCGScrollWheelEventFixedPtDeltaAxis1 */
+    case 94: return (int64_t)(e.scrollingDeltaX / 10 * 65536);       /* kCGScrollWheelEventFixedPtDeltaAxis2 */
+    case 96: return (int64_t)lround(e.scrollingDeltaY);              /* kCGScrollWheelEventPointDeltaAxis1 */
+    case 97: return (int64_t)lround(e.scrollingDeltaX);              /* kCGScrollWheelEventPointDeltaAxis2 */
+    case 99: return e.phase;                                         /* kCGScrollWheelEventScrollPhase */
+    case 123: return e.momentumPhase;                                /* kCGScrollWheelEventMomentumPhase */
+    default: return 0;
+    }
+}
+HK_FN(CGPoint, CGEventGetLocation, (void *event)) {
+    NSEvent *e = hk_event_of(event);
+    if (!e || !e.window) return CGPointZero;
+    NSPoint p = [e.window convertPointToScreen:e.locationInWindow];
+    return CGPointMake(p.x, hk_presenter()->screen_size.height - p.y); /* CG's global coordinates: origin top left */
+}
+HK_FN(uint32_t, CGEventGetType, (void *event)) {
+    NSEvent *e = hk_event_of(event);
+    return e ? (uint32_t)e.type : 0; /* NSEventType and CGEventType agree for mouse, key and scroll events */
+}
 HK_FN(bool, CGEventSourceKeyState, (int32_t state, uint16_t key)) { return false; }
 HK_FN(double, CGEventSourceSecondsSinceLastEventType, (int32_t state, uint32_t type)) { return 0; }
 HK_FN(CFMachPortRef, CGEventTapCreate, (uint32_t tap, uint32_t place, uint32_t options, uint64_t mask, void *callback, void *userInfo)) {

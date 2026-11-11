@@ -2,8 +2,8 @@ import SwiftUI
 import UIKit
 
 /// A Mac app's screen (Mac apps with windows, experimental): the windows Henge's AppKit hands over, scaled to fit,
-/// with touches as a mouse (tap to click, drag, two fingers to scroll, long press for a right click) and the iOS
-/// keyboard as a Mac keyboard.
+/// with touches as a mouse (tap to click, one finger to scroll, two fingers to drag, long press for a right click)
+/// and the iOS keyboard as a Mac keyboard.
 final class MacScreenUIView: UIView, UIKeyInput {
     private let stage = CALayer()
     private var holders: [CALayer] = []
@@ -21,10 +21,11 @@ final class MacScreenUIView: UIView, UIKeyInput {
         let doubleTap = UITapGestureRecognizer(target: self, action: #selector(doubleTapped(_:)))
         doubleTap.numberOfTapsRequired = 2
         tap.require(toFail: doubleTap)
-        let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
-        pan.maximumNumberOfTouches = 1
+        // One finger scrolls, as everywhere on iOS; two fingers drag with the mouse button down (select, move).
         let scroll = UIPanGestureRecognizer(target: self, action: #selector(scrolled(_:)))
-        scroll.minimumNumberOfTouches = 2
+        scroll.maximumNumberOfTouches = 1
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
+        pan.minimumNumberOfTouches = 2
         let press = UILongPressGestureRecognizer(target: self, action: #selector(pressed(_:)))
         for g in [tap, doubleTap, pan, scroll, press] as [UIGestureRecognizer] { addGestureRecognizer(g) }
     }
