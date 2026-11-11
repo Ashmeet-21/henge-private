@@ -223,3 +223,12 @@ $(B)/test_kb_viewport: ios/Henge/KeyboardViewport.swift tests/test_kb_viewport.s
 test-kb-viewport: $(B)/test_kb_viewport
 	$(B)/test_kb_viewport
 .PHONY: test-kb-viewport
+
+# Click language: the shipped GestureEngine.swift compiled unchanged,
+# exercised headlessly over the click arbitration streams.
+$(B)/test_gesture_engine: ios/Henge/GestureEngine.swift tests/test_gesture_engine.swift | $(B)
+	xcrun --sdk macosx swiftc $^ -o $@
+
+test-gesture-engine: $(B)/test_gesture_engine
+	$(B)/test_gesture_engine
+.PHONY: test-gesture-engine
