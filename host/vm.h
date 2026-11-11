@@ -62,6 +62,8 @@ int hv_vm_start(int cpu0, void (*on_exit)(int reason));
 void hv_vm_prepare_cpu_thread(void);
 /* That, and the scheduling class the guest's CPUs run at. */
 void hv_vm_cpu_qos(void);
+/* The device is hot (iOS thermal state serious or critical): the guest's CPU threads run a class lower. */
+void hv_vm_set_hot(int hot);
 /* Run CPU 0 on the calling thread (what hv_vm_start does on its own thread); returns its exit reason. */
 int hv_vm_run_cpu0(void);
 /* Stop at the next block; the CPUs' threads end. */

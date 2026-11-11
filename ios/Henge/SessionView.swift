@@ -853,6 +853,9 @@ struct SessionView: View {
 
     // MARK: Running
 
+    /// Serious or critical: the guest's CPUs drop a QoS class until it cools (hv_vm_set_hot).
+    private static func isHot(_ state: ProcessInfo.ThermalState) -> Bool { state == .serious || state == .critical }
+
     private static func thermalLabel(_ state: ProcessInfo.ThermalState) -> String {
         switch state {
         case .nominal: return "Normal"
@@ -909,6 +912,7 @@ struct SessionView: View {
             henge_vm_set_display_mm(0, 0)
         }
         HengeLog.log("session", "screen \(plan.guestWidth)x\(plan.guestHeight) retina \(mac.isRetina)")
+        henge_vm_set_hot(Self.isHot(ProcessInfo.processInfo.thermalState) ? 1 : 0)
         let rc = henge_vm_boot(mac.rom.path, mac.disk.path, mac.aux.path, mac.ecid, mac.seed, ram, Int32(cpus), &buffer, buffer.count)
         if rc != 0 {
             error = String(cString: buffer)
@@ -942,6 +946,7 @@ struct SessionView: View {
             log = Array(HengeLog.recentLines(200))
             let heat = ProcessInfo.processInfo.thermalState
             if heat.rawValue != thermalState.rawValue {
+                if Self.isHot(heat) != Self.isHot(thermalState) { henge_vm_set_hot(Self.isHot(heat) ? 1 : 0) }
                 thermalState = heat
                 HengeLog.log("session", "thermal state: \(Self.thermalLabel(heat))")
             }

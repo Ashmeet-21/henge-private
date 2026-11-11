@@ -368,6 +368,11 @@ void hv_vm_cpu_qos(void) {
     else if (q && !strcmp(q, "init")) c = QOS_CLASS_USER_INITIATED;
     else if (q && !strcmp(q, "default")) c = QOS_CLASS_DEFAULT;
     if (c != QOS_CLASS_DEFAULT) pthread_set_qos_class_self_np(c, 0);
+    /* hv_vm_set_hot may move every CPU thread later; HV_QOS pins the class (no moves). */
+    if (!q && c != QOS_CLASS_DEFAULT) {
+        int expect = 0;
+        atomic_compare_exchange_strong(&hv_qos_wanted, &expect, (int)c);
+    }
     static int qos_logged;
     if (!__atomic_load_n(&qos_logged, __ATOMIC_RELAXED)) {
         __atomic_store_n(&qos_logged, 1, __ATOMIC_RELAXED);
@@ -375,6 +380,21 @@ void hv_vm_cpu_qos(void) {
                 c == QOS_CLASS_USER_INTERACTIVE ? "USER_INTERACTIVE" : c == QOS_CLASS_USER_INITIATED ? "USER_INITIATED" : "DEFAULT",
                 q ? "HV_QOS" : "default");
     }
+}
+
+/* Henge fork: upstream #80 runs the guest's CPUs at USER_INTERACTIVE on iOS (faster), with nothing to back off
+   when the device heats up. While iOS says the device is hot (thermal state serious or critical) they drop to
+   USER_INITIATED, upstream's class before #80, and go back up when it cools. Not with HV_QOS set. */
+void hv_vm_set_hot(int hot) {
+#if TARGET_OS_IPHONE
+    if (getenv("HV_QOS")) return;
+    int want = hot ? QOS_CLASS_USER_INITIATED : QOS_CLASS_USER_INTERACTIVE;
+    if (atomic_exchange(&hv_qos_wanted, want) != want)
+        fprintf(stderr, "henge: vCPU thread QoS -> %s (device %s)
+", hot ? "USER_INITIATED" : "USER_INTERACTIVE", hot ? "hot" : "cool");
+#else
+    (void)hot;
+#endif
 }
 
 /* CPUs 1 and up: run whenever PSCI CPU_ON starts them; the machine stops with CPU 0. */

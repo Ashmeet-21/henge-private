@@ -244,6 +244,8 @@ uint64_t henge_vm_net_frames(int sent) {
     pthread_rwlock_unlock(&api_lock);
     return result;
 }
+void henge_vm_set_hot(int hot) { hv_vm_set_hot(hot); }
+
 int henge_vm_cpus_on(void) {
     if (!lock_running()) return 0;
     int n = 0;

@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <dlfcn.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -443,6 +445,19 @@ void hv_debug_el0_in_kernel(HvCpu *cpu, const char *what) {
     }
 }
 
+_Atomic int hv_qos_wanted;
+
+/* This thread to hv_qos_wanted's class, if it changed (see machine.h). */
+static void follow_qos(void) {
+    static _Thread_local int now;
+    int want = atomic_load_explicit(&hv_qos_wanted, memory_order_relaxed);
+    if (!want || want == now) return;
+    now = want;
+#if defined(__APPLE__)
+    pthread_set_qos_class_self_np((qos_class_t)want, 0);
+#endif
+}
+
 /* WFI: sleep until an interrupt is pending (masked or not) or the next timer
    event, at most 10 ms. WFI may complete early, so the guest just runs again
    if nothing happened. */
@@ -489,6 +504,7 @@ static int wait_for_interrupt(HvCpu *cpu) {
     p->wake_pending = 0;
     pthread_mutex_unlock(&p->wake_mu);
     unpark(cpu);
+    follow_qos();
     hv_big_lock(m);
     m->stats.wfi++;
     m->stats.wfi_ticks += mach_absolute_time() - t0;
@@ -1115,7 +1131,7 @@ static int run_loop(HvCpu *cpu, int one) {
         cpu->miss_site = 0; /* only the next lookup miss sets it again */
         cpu->exit_reason = HV_EXIT_BRANCH;
         cpu->last_stub = 0;
-        cpu->icount++;
+        if (!(++cpu->icount & 0xffff)) follow_qos();
         m->stats.blocks++;
         if (m->stats_interval && cpu->index == 0 && (m->stats.blocks & 0xffff) == 0) print_stats(cpu, 0);
         if (m->gen_checks && ((uint64_t)(b->code - m->jit.base) >= m->jit.used || b->jit_gen != __atomic_load_n(&m->jit_gen, __ATOMIC_SEQ_CST)))
