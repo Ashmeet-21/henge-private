@@ -238,6 +238,7 @@ static void *run_thread(void *opaque) {
    a program registered, so a second one cannot reuse the region (nor, with the same classes, share the runtimes). */
 static _Atomic int runs;
 int henge_tl_ran_program(void) { return atomic_load(&runs); }
+void henge_tl_mark_ran(void) { atomic_store(&runs, 1); }
 
 int henge_tl_run(const char *path, const char *out_path, char *err, size_t errlen) {
     if (atomic_load(&runs)) return snprintf(err, errlen, "One program per launch: quit Henge (swipe it away) and open it again to run another."), -1;

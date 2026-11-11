@@ -73,6 +73,72 @@ static void load_deny(const char *path) {
     fprintf(stderr, "tlios: refusing %lu symbols and %lu libraries iOS lacks\n", (unsigned long)g_deny.count, (unsigned long)g_deny_libs.count);
 }
 
+/* MediaPlayer's remote-command and now-playing centers: iOS has them, but on this Mac MediaPlayer loads the real
+   AppKit, so the runner stands in with working ones (a command takes targets and hands back a token). */
+@interface TLIOSRemoteCommand : NSObject
+@property(nonatomic, getter=isEnabled) BOOL enabled;
+@end
+@implementation TLIOSRemoteCommand
+- (id)addTargetWithHandler:(id)handler { return [NSObject new]; }
+- (void)addTarget:(id)target action:(SEL)action {}
+- (void)removeTarget:(id)target {}
+- (void)removeTarget:(id)target action:(SEL)action {}
+- (id)methodSignatureForSelector:(SEL)sel { return [super methodSignatureForSelector:sel] ?: [NSMethodSignature signatureWithObjCTypes:"@@:"]; }
+- (void)forwardInvocation:(NSInvocation *)inv { id nothing = nil; if (inv.methodSignature.methodReturnLength == 8) [inv setReturnValue:&nothing]; }
+@end
+
+@interface TLIOSRemoteCommandCenter : NSObject
+@end
+@implementation TLIOSRemoteCommandCenter
++ (instancetype)sharedCommandCenter {
+    static TLIOSRemoteCommandCenter *c;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ c = [self new]; });
+    return c;
+}
+- (id)methodSignatureForSelector:(SEL)sel { return [super methodSignatureForSelector:sel] ?: [NSMethodSignature signatureWithObjCTypes:"@@:"]; }
+/* playCommand, pauseCommand, nextTrackCommand...: one working command each */
+- (void)forwardInvocation:(NSInvocation *)inv {
+    static NSMutableDictionary *commands;
+    if (!commands) commands = [NSMutableDictionary new];
+    NSString *name = NSStringFromSelector(inv.selector);
+    id result = nil;
+    if ([name hasSuffix:@"Command"]) {
+        result = commands[name] ?: (commands[name] = [TLIOSRemoteCommand new]);
+    }
+    if (inv.methodSignature.methodReturnLength == 8) [inv setReturnValue:&result];
+}
+@end
+
+@interface TLIOSNowPlayingInfoCenter : NSObject
+@property(copy) NSDictionary *nowPlayingInfo;
+@property NSUInteger playbackState;
+@end
+@implementation TLIOSNowPlayingInfoCenter
++ (instancetype)defaultCenter {
+    static TLIOSNowPlayingInfoCenter *c;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ c = [self new]; });
+    return c;
+}
+@end
+
+static void *runner_stand_in(const char *install_name, const char *symbol) {
+    if (!strstr(install_name, "/MediaPlayer.framework/")) return NULL;
+    struct { const char *name; Class cls; } map[] = {
+        {"MPRemoteCommandCenter", [TLIOSRemoteCommandCenter class]},
+        {"MPNowPlayingInfoCenter", [TLIOSNowPlayingInfoCenter class]},
+    };
+    for (size_t i = 0; i < sizeof map / sizeof *map; i++) {
+        char c[128], m[128];
+        snprintf(c, sizeof c, "_OBJC_CLASS_$_%s", map[i].name);
+        snprintf(m, sizeof m, "_OBJC_METACLASS_$_%s", map[i].name);
+        if (!strcmp(symbol, c)) return (__bridge void *)map[i].cls;
+        if (!strcmp(symbol, m)) return (__bridge void *)object_getClass(map[i].cls);
+    }
+    return NULL;
+}
+
 static const char *map_name(const char *name, char *buf, size_t len) {
     return lib_denied(name) ? NULL : name;
 }
@@ -86,6 +152,8 @@ static void *shim_lookup(const char *install_name, const char *symbol) {
                 void *s = h ? dlsym(h, symbol + 1) : NULL;
                 if (s) return s;
             }
+            void *stand_in = runner_stand_in(install_name, symbol);
+            if (stand_in) return stand_in;
             if (lib_denied(install_name) || alias) return hk_lookup(install_name, symbol);
             return NULL;
         }

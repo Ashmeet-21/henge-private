@@ -18,3 +18,16 @@
 - (void)populateMenu:(id)menu withServiceEntries:(NSArray *)entries forDisplay:(BOOL)display {}
 - (void)plugMenu:(id)menu intoMenu:(id)parent {}
 @end
+
+/* AppKit's nib loading (NSBundle's NSNibLoading category): apps load their menu bar from a nib. No nibs are read
+   yet: loading succeeds with nothing in it, so the app goes on without that menu. */
+@implementation NSBundle (HKNibLoading)
+- (BOOL)loadNibNamed:(NSString *)name owner:(id)owner topLevelObjects:(NSArray **)objects {
+    hk_log("nib %s not loaded (nibs are not read yet)", name.UTF8String);
+    if (objects) *objects = @[];
+    return YES;
+}
++ (BOOL)loadNibNamed:(NSString *)name owner:(id)owner {
+    return [[NSBundle mainBundle] loadNibNamed:name owner:owner topLevelObjects:NULL];
+}
+@end

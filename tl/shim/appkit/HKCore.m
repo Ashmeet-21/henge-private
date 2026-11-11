@@ -73,6 +73,9 @@ PASS_UP(magnifyWithEvent)
 - (instancetype)initWithCoder:(NSCoder *)coder { return [self init]; }
 - (BOOL)isAccessibilityElement { return NO; }
 - (void)invalidateRestorableState {}
+/* AppKit's responders (NSApplication above all) observe things themselves, so an app's observer passing an
+   unknown change on to super is fine there; NSObject's version would raise. */
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context {}
 @end
 
 /* ================================================================ views */
