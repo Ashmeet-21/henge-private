@@ -46,6 +46,7 @@ typedef struct SnapHeader {
     char ident[1024];
     uint64_t guest_counter; /* the virtual counter when it stopped: it goes on from there */
     int64_t saved_at;       /* host wall clock, seconds */
+    int64_t paused_wall_ns; /* the wall clock when the CPUs stopped */
     uint32_t ncpus, nram;
     uint64_t ram_size;
     char disk[256];         /* hv_vm_disk_identity when saved: the disk has to be exactly that again */
@@ -610,7 +611,8 @@ int hv_snapshot_save(const char *path, const char *ident, char *err, size_t errl
         return fail(err, errlen, "Out of memory.");
     }
     SnapHeader h = {.version = SNAP_VERSION, .header_bytes = sizeof h, .fingerprint = fingerprint(),
-                    .guest_counter = hv_vm_paused_counter(), .saved_at = (int64_t)time(NULL), .ncpus = (uint32_t)ncpus,
+                    .guest_counter = hv_vm_paused_counter(), .saved_at = (int64_t)time(NULL), .paused_wall_ns = hv_vm_paused_wall_ns(),
+                    .ncpus = (uint32_t)ncpus,
                     .nram = (uint32_t)m->nram, .ram_size = b->ram_size};
     memcpy(h.magic, SNAP_MAGIC, 8);
     snprintf(h.ident, sizeof h.ident, "%s", ident ? ident : "");
@@ -727,8 +729,8 @@ int hv_snapshot_restore(const char *path, const char *ident, char *err, size_t e
     if (!bad && b->pvg && display_len) hv_pvg_lite_set_display_state(b->pvg, display, (size_t)display_len);
     free(display);
     if (bad) return fail(err, errlen, "The saved Mac could not be read (%s).", strerror(r.err ? r.err : EINVAL));
-    /* The guest's clock goes on from where it stopped, as a Mac's does across sleep. */
-    m->cntvoff = hv_counter() - h.guest_counter;
+    /* The guest's clock goes on as far as the wall clock went since it stopped (see hv_vm_resume_counter). */
+    m->cntvoff = hv_counter() - hv_vm_resume_counter(h.guest_counter, h.paused_wall_ns);
     for (int i = 0; i < ncpus; i++) {
         HvCpu *c = hv_vm_cpu(i);
         cpu_put(c, &cs[i]);
