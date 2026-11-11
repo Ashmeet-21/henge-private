@@ -84,6 +84,8 @@ HengeDualMapping henge_ios_jit_allocate(size_t bytes);
  * will ask for (tb-size).
  */
 HENGE_EXPORT bool henge_ios_jit_prewarm(size_t bytes);
+/* The slot held for a Mac app's very large reservation (Chromium's allocator), let go and returned once; NULL if none. */
+void *henge_ios_take_high_hold(size_t bytes);
 HENGE_EXPORT bool henge_ios_jit_prewarm_self(size_t bytes);
 
 /*

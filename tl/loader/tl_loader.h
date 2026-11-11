@@ -54,6 +54,9 @@ typedef struct TlHost {
     int processes_as_threads;
     /* Called when such a process starts, with its namespace and executable (the host adopts its bundle). */
     void (*process_started)(int ns, const char *path);
+    /* Where to put a program's very large address-space reservation (16 GB or more, no access yet: Chromium's
+       allocator wants 32 GB aligned to 32 GB), or NULL: the host may hold a fitting slot for it (iOS). */
+    void *(*large_reservation)(size_t bytes);
     /* Called for each image once it is fixed up, before its initializers run (app-specific adjustments). */
     void (*image_linked)(TlImage *image);
 } TlHost;

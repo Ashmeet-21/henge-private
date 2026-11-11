@@ -510,6 +510,46 @@ static void henge_ios_jit_log_map(const char *tag)
 
 static HengeDualMapping henge_ios_jit_allocate_real(size_t bytes);
 
+/*
+ * The one 32 GB slot aligned to 32 GB that extended virtual addressing leaves (room runs from 0x7000000000 to a little
+ * under 0x8000000000, measured on iOS 26): what Chromium's allocator (PartitionAlloc) must reserve at once in a Mac
+ * app, and fails without. Held from launch, before the JIT region's writable view or anything else lands in it (zero-
+ * fill and untouched, so it costs no memory); handed to the translation layer when a program asks for that much
+ * (henge_ios_take_high_hold), or let go when QEMU starts.
+ */
+#define HENGE_HIGH_HOLD_BASE 0x7000000000ull
+#define HENGE_HIGH_HOLD_BYTES ((vm_size_t)32 << 30)
+static vm_address_t g_high_hold;
+
+static void henge_ios_hold_high(void)
+{
+    if (g_high_hold) return;
+    vm_address_t a = (vm_address_t)HENGE_HIGH_HOLD_BASE;
+    kern_return_t kr = vm_allocate(mach_task_self(), &a, HENGE_HIGH_HOLD_BYTES, VM_FLAGS_FIXED);
+    if (kr == KERN_SUCCESS) {
+        vm_protect(mach_task_self(), a, HENGE_HIGH_HOLD_BYTES, FALSE, VM_PROT_NONE);
+        g_high_hold = a;
+    }
+    HENGE_LOG("high hold for a Mac app's allocator at %#llx (32 GB): %s", (unsigned long long)HENGE_HIGH_HOLD_BASE,
+              mach_error_string(kr));
+}
+
+static void henge_ios_release_high_hold(void)
+{
+    if (!g_high_hold) return;
+    vm_deallocate(mach_task_self(), g_high_hold, HENGE_HIGH_HOLD_BYTES);
+    g_high_hold = 0;
+}
+
+/* The held slot for a reservation of `bytes` (it is let go here), or NULL. */
+HENGE_EXPORT void *henge_ios_take_high_hold(size_t bytes)
+{
+    if (!g_high_hold || bytes > HENGE_HIGH_HOLD_BYTES * 2) return NULL;
+    void *slot = (void *)g_high_hold;
+    henge_ios_release_high_hold();
+    return slot;
+}
+
 static HengeDualMapping henge_prewarmed;
 static bool henge_prewarm_done;
 
@@ -519,6 +559,7 @@ HENGE_EXPORT bool henge_ios_jit_prewarm(size_t bytes)
         return henge_prewarmed.rw_addr != NULL;
     }
     henge_prewarm_done = true;
+    henge_ios_hold_high();
     henge_prewarmed = henge_ios_jit_allocate_real(bytes);
     fprintf(stderr, "[henge-jit] prewarm %s: %zu bytes\n",
             henge_prewarmed.rw_addr ? "OK" : "FAILED", bytes);
@@ -570,6 +611,7 @@ HENGE_EXPORT bool henge_ios_jit_reserve_bottom(size_t end)
 
 HengeDualMapping henge_ios_jit_allocate(size_t bytes)
 {
+    henge_ios_release_high_hold(); /* QEMU is starting: the room is the Mac's */
     /*
      * Hand back the prewarmed region when it is big enough. QEMU asks for
      * exactly tb-size, which is what prewarm was given, so this is the normal
@@ -929,6 +971,7 @@ HengeDualMapping henge_ios_jit_allocate(size_t bytes)
 {
     return henge_ios_jit_allocate_real(bytes);
 }
+void *henge_ios_take_high_hold(size_t bytes) { (void)bytes; return NULL; }
 bool henge_ios_jit_prewarm(size_t bytes) { (void)bytes; return false; }
 bool henge_ios_jit_prewarm_self(size_t bytes) { (void)bytes; return false; }
 bool henge_ios_jit_reserve_bottom(size_t end) { (void)end; return true; }

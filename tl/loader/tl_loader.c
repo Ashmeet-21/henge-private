@@ -2518,6 +2518,16 @@ static void *rt_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t 
         errno = ENOMEM;
         return MAP_FAILED;
     }
+    if (g_host && g_host->large_reservation && len >= ((size_t)16 << 30) && prot == PROT_NONE && (flags & MAP_ANON) &&
+        !(flags & MAP_FIXED)) {
+        void *slot = g_host->large_reservation(len);
+        if (slot) {
+            void *r = mmap(slot, len, prot, flags, fd, off);
+            tl_log("a %.1f GB reservation in the host's slot at %p: %s", (double)len / (1 << 30), slot,
+                   r == slot ? "placed" : r == MAP_FAILED ? strerror(errno) : "placed elsewhere");
+            if (r != MAP_FAILED) return r;
+        }
+    }
     void *r = mmap(addr, len, prot, flags, fd, off);
     if (len >= ((size_t)1 << 30)) {
         if (r == MAP_FAILED) {

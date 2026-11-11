@@ -20,6 +20,7 @@ static HengeDualMapping mapping;
 _Atomic int henge_tl_ran;
 int henge_vm_state(void) { return 0; }
 HengeDualMapping *henge_ios_jit_get_mapping(void) { return &mapping; }
+void *henge_ios_take_high_hold(size_t bytes) { return NULL; } /* the Mac has room enough */
 
 static NSString *g_dir;
 static int g_n;

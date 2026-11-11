@@ -163,6 +163,7 @@ int henge_tl_app_load(const char *app_path, char *err, size_t errlen) {
         host.no_processes = 1; /* iOS starts no processes: the app's own programs run inside Henge (below) */
         host.processes_as_threads = 1;
         host.process_started = process_started;
+        host.large_reservation = henge_ios_take_high_hold; /* Chromium's 32 GB pool, in the slot held since launch */
         g_presenter.window_changed = window_changed;
         hk_set_presenter(&g_presenter);
 #if !TARGET_OS_OSX
