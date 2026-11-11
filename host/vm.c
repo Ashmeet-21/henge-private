@@ -390,6 +390,26 @@ static void *secondary_thread(void *arg) {
     return NULL;
 }
 
+/* The network cable out for a moment and back in, as a Mac waking from sleep sees its network come back: macOS
+   renews its address and lets connections that died while it was saved go at once. */
+void hv_vm_link_flap(void) {
+    if (!machine_created || !board.net) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1500 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        if (!machine_created || !board.net || hv_vm_paused()) return;
+        hv_dev_lock(&m);
+        hv_virtio_net_set_link(board.net, 0);
+        hv_dev_unlock(&m);
+        fprintf(stderr, "hengevm: network link down (after a resume)\n");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            if (!machine_created || !board.net) return;
+            hv_dev_lock(&m);
+            hv_virtio_net_set_link(board.net, 1);
+            hv_dev_unlock(&m);
+            fprintf(stderr, "hengevm: network link up\n");
+        });
+    });
+}
+
 int hv_vm_disk_identity(char *out, size_t n) {
     struct stat a, b;
     if (disk.fd < 0 || aux.fd < 0 || fstat(disk.fd, &a) != 0 || fstat(aux.fd, &b) != 0) return -1;
