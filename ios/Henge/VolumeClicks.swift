@@ -40,6 +40,18 @@ final class VolumeClicks: NSObject {
     private var swapButtons: Bool { UserDefaults.standard.object(forKey: Self.swapKey) as? Bool ?? false }
 
     private var active = false
+    private var cameraShared = false
+
+    /// A call owns the camera. Keep volume clicks through the existing KVO
+    /// fallback instead of opening a second capture session on the same device.
+    func setCameraShared(_ sharing: Bool) {
+        guard sharing != cameraShared else { return }
+        cameraShared = sharing
+        guard active, mode == .intercept else { return }
+        releaseButtons()
+        if sharing { stopIntercept(); startVolumeKVO() }
+        else { stopVolumeKVO(); startIntercept() }
+    }
     private let buzz = UIImpactFeedbackGenerator(style: .light)
     private var leftDown = false
     private var rightDown = false
@@ -237,6 +249,7 @@ final class VolumeClicks: NSObject {
     private var streamDelegate: DiscardStream?
 
     private func startIntercept() {
+        if cameraShared { startVolumeKVO(); return }
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
             buildCapture()

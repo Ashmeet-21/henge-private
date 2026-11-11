@@ -11,6 +11,7 @@ struct SessionView: View {
     let close: () -> Void
 
     @StateObject private var display = DisplayRouter()
+    @StateObject private var media = GuestMediaCapture()
     @State private var error: String?
     @State private var state: Int32 = 0
     @State private var bootAttempt = 0
@@ -251,6 +252,7 @@ struct SessionView: View {
         }
         .onChange(of: pointerNeeded) { PointerLock.set(!$0) }
         .onChange(of: scenePhase) { phase in
+            media.setForeground(phase == .active)
             guard phase != .active else {
                 Sharing.prepare() // resume/repair: re-serve the root
                 display.refresh()
@@ -288,6 +290,7 @@ struct SessionView: View {
         }
         .onChange(of: remoteHeadless) { _ in RemoteDesktop.shared.applyHeadless() }
         .onAppear {
+            media.setForeground(scenePhase == .active)
             UIApplication.shared.isIdleTimerDisabled = true
             HardwareMouse.shared.start()
             HardwareKeys.start()
@@ -296,6 +299,7 @@ struct SessionView: View {
         }
         .onDisappear {
             RemoteDesktop.shared.stop()
+            media.stop()
             UIApplication.shared.isIdleTimerDisabled = false
             KeyboardSignals.shared.endSession()
             kbActive = false
@@ -315,6 +319,7 @@ struct SessionView: View {
         .task(id: bootAttempt) { await run() }
         .task { await kbSignalSampler() }
         .task { await Sharing.followMacClipboard() }
+        .task { await media.followGuest() }
     }
 
     /// When there is something of the app's to point at, iPadOS gets its own pointer back.
@@ -843,8 +848,43 @@ struct SessionView: View {
                     }
                     Text(helperRunning
                          ? "Put files in Files, Henge, Shared to see them in the Henge folder in this Mac's home folder. What you copy on the Mac is copied here too, and the paste button pastes from here into the Mac."
-                         : "Once for each Mac: open Terminal on the Mac, tap this, then press Return. When macOS asks about henge-agent and local networks, choose Allow. It types \(Sharing.setUpCommand) and needs the Mac's keyboard layout to be U.S.")
+                         : "Once for each Mac: open Terminal on the Mac, tap Type the Set Up Command, then press Return. When macOS asks about henge-agent and local networks, choose Allow. It types \(Sharing.setUpCommand) and needs the Mac's keyboard layout to be U.S.")
                         .font(.footnote).foregroundStyle(.secondary)
+                }
+                Section("Camera") {
+                    Picker("Camera", selection: Binding(
+                        get: { media.camera ? (media.frontCamera ? 1 : 2) : 0 },
+                        set: { source in
+                            if source == 0 { media.camera = false }
+                            else { media.frontCamera = source == 1; media.camera = true }
+                        }
+                    )) {
+                        Text("Off").tag(0)
+                        Text("Front Camera").tag(1)
+                        Text("Back Camera").tag(2)
+                    }
+                    if media.camera { LabeledContent("Camera sharing", value: media.cameraStatus) }
+                    Text("Choose Henge Camera in the Mac app. Capture starts when the Mac uses the camera. You can switch cameras while the Mac is running.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Picker("Camera resolution", selection: $media.resolution) {
+                        ForEach(media.availableResolutions) { size in Text(size.label).tag(size) }
+                    }
+                    Text("Higher resolutions use more processing power. Changing resolution reconnects the camera; reopen capture in the Mac app if needed.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Toggle("Flip horizontally", isOn: $media.flipHorizontally)
+                    Text("Flip the live camera image, including in Photo Booth. This affects every Mac app using Henge Camera.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                Section("Microphone") {
+                    Toggle("Microphone", isOn: $media.microphone)
+                    if media.microphone { LabeledContent("Microphone sharing", value: media.microphoneStatus) }
+                    Text("Choose Apple Virtual Sound Device as the input in the Mac app. Capture starts when the Mac uses the microphone.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                if let message = media.message {
+                    Section {
+                        Text(message).font(.footnote).foregroundStyle(.orange)
+                    }
                 }
                 Section("Lighter macOS") {
                     Button("Type the Lighter macOS Command") {

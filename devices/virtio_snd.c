@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 
 #define CTLQ 0
 #define EVENTQ 1
@@ -24,9 +25,11 @@
 #define S_OK 0x8000
 #define S_BAD_MSG 0x8001
 #define S_NOT_SUPP 0x8002
+#define S_IO_ERR 0x8003
 
 #define CHMAP_FL 3
 #define CHMAP_FR 4
+#define CHMAP_MONO 2
 
 static int logging(void) {
     static int on = -1;
@@ -57,9 +60,86 @@ static void put32(uint8_t *p, uint32_t v) {
 
 /* ---- control queue ---- */
 
+/* Return every posted capture buffer on STOP/RELEASE, including a partial
+   period. All callers hold capture_mu; only the CPU touches virtqueues. */
+static void capture_release(HvVirtioSnd *d) {
+    int any = 0;
+    while (d->capture.head != d->capture.tail) {
+        HvVirtqElem *e = &d->capture.pending[d->capture.head % HV_VSND_PENDING];
+        uint32_t n = d->capture.offset;
+        uint32_t st[2] = {S_OK, 0};
+        uint32_t room = hv_virtq_writable(e);
+        if (room >= 8) hv_virtq_write(&d->vio, e, room - 8, st, 8);
+        hv_virtq_push(&d->vio, RXQ, e, room >= 8 ? n + 8 : 0);
+        d->capture.offset = 0;
+        d->capture.head++;
+        any = 1;
+    }
+    if (any) hv_virtio_interrupt(&d->vio);
+}
+
+static uint32_t capture_control(HvVirtioSnd *d, uint32_t code, const uint8_t *req) {
+    uint32_t status = S_OK;
+    pthread_mutex_lock(&d->capture_mu);
+    switch (code) {
+    case R_PCM_SET_PARAMS: {
+        uint32_t buffer, period;
+        memcpy(&buffer, req + 8, 4);
+        memcpy(&period, req + 12, 4);
+        unsigned fmt = req[21], bytes = format_bytes(fmt);
+        fprintf(stderr, "virtio-snd: input parameters ch %u fmt %u rate %u buffer %u period %u features %#x\n",
+                req[20], fmt, req[22], buffer, period,
+                (unsigned)req[16] | (unsigned)req[17] << 8 | (unsigned)req[18] << 16 | (unsigned)req[19] << 24);
+        if (req[20] != 1 || req[22] != HV_VSND_RATE_48000 ||
+            (fmt != HV_VSND_FMT_S16 && fmt != HV_VSND_FMT_S32 && fmt != HV_VSND_FMT_FLOAT) ||
+            d->capture.running || !period || period % bytes || buffer < period ||
+            buffer % period || buffer > HV_VSND_RING || req[16] || req[17] || req[18] || req[19]) {
+            status = S_NOT_SUPP;
+            break;
+        }
+        d->capture.format = fmt;
+        d->capture.frame_bytes = bytes;
+        d->capture.buffer_bytes = buffer;
+        d->capture.period_bytes = period;
+        d->capture.prepared = 0;
+        break;
+    }
+    case R_PCM_PREPARE:
+        if (!d->capture.frame_bytes || d->capture.running) status = S_BAD_MSG;
+        else d->capture.prepared = 1;
+        break;
+    case R_PCM_START:
+        if (!d->capture.prepared) status = S_BAD_MSG;
+        else if (!d->capture.running) {
+            d->capture.written = d->capture.consumed = 0;
+            d->capture.delivered = 0;
+            d->capture.received = d->capture.silenced = d->capture.underruns = 0;
+            d->capture.input_block_frames = 0;
+            d->capture.source_active = 0;
+            d->capture.start_ns = now_ns();
+            d->capture.running = 1;
+        }
+        break;
+    case R_PCM_STOP:
+    case R_PCM_RELEASE:
+        if (d->capture.running)
+            fprintf(stderr, "virtio-snd: input stopped: %llu host frames, %llu silence frames, %llu underruns\n",
+                    (unsigned long long)d->capture.received, (unsigned long long)d->capture.silenced,
+                    (unsigned long long)d->capture.underruns);
+        d->capture.running = 0;
+        d->capture.written = d->capture.consumed = 0;
+        capture_release(d);
+        if (code == R_PCM_RELEASE) d->capture.prepared = 0;
+        break;
+    default: status = S_NOT_SUPP; break;
+    }
+    pthread_mutex_unlock(&d->capture_mu);
+    return status;
+}
+
 static uint32_t control(HvVirtioSnd *d, const HvVirtqElem *e) {
     HvVirtio *v = &d->vio;
-    uint8_t req[32] = {0}, resp[4 + 32];
+    uint8_t req[32] = {0}, resp[4 + 64];
     uint32_t got = hv_virtq_read(v, e, 0, req, sizeof req);
     uint32_t code, status = S_OK, rlen = 4;
     memcpy(&code, req, 4);
@@ -69,29 +149,43 @@ static uint32_t control(HvVirtioSnd *d, const HvVirtqElem *e) {
     memcpy(&count, req + 8, 4);
     memcpy(&size, req + 12, 4);
     stream = start; /* virtio_snd_pcm_hdr: stream_id at the same place */
-    if (got < 4) code = 0;
+    if (got < 8 || ((code == R_PCM_INFO || code == R_CHMAP_INFO || code == R_JACK_INFO) && got < 16) ||
+        (code == R_PCM_SET_PARAMS && got < 24)) {
+        put32(resp, S_BAD_MSG);
+        return hv_virtq_write(v, e, 0, resp, 4);
+    }
+    if (code >= R_PCM_SET_PARAMS && code <= R_PCM_STOP && stream == 1) {
+        uint32_t result = capture_control(d, code, req);
+        fprintf(stderr, "virtio-snd: input request %#x -> %#x\n", code, result);
+        put32(resp, result);
+        return hv_virtq_write(v, e, 0, resp, 4);
+    }
     switch (code) {
     case R_PCM_INFO:
     case R_CHMAP_INFO:
-        if (start != 0 || count != 1 || size == 0 || size > 32) {
+        if (start >= 2 || !count || count > 2 - start || size != (code == R_PCM_INFO ? 32u : 24u)) {
             status = S_BAD_MSG;
             break;
         }
-        if (code == R_PCM_INFO) {
+        for (uint32_t i = 0; i < count; i++) {
+          uint8_t *item = resp + 4 + i * size;
+          int input = start + i == 1;
+          if (code == R_PCM_INFO) {
             uint64_t formats = 1ull << HV_VSND_FMT_S16 | 1ull << HV_VSND_FMT_S32 | 1ull << HV_VSND_FMT_FLOAT;
-            uint64_t rates = 1ull << HV_VSND_RATE_44100 | 1ull << HV_VSND_RATE_48000;
-            memcpy(resp + 4 + 8, &formats, 8);
-            memcpy(resp + 4 + 16, &rates, 8);
-            resp[4 + 24] = 0; /* output */
-            resp[4 + 25] = 1; /* channels min */
-            resp[4 + 26] = 2; /* channels max */
+            uint64_t rates = (input ? 0 : 1ull << HV_VSND_RATE_44100) | 1ull << HV_VSND_RATE_48000;
+            memcpy(item + 8, &formats, 8);
+            memcpy(item + 16, &rates, 8);
+            item[24] = input;
+            item[25] = 1;
+            item[26] = input ? 1 : 2;
         } else {
-            resp[4 + 4] = 0; /* output */
-            resp[4 + 5] = 2;
-            resp[4 + 6] = CHMAP_FL;
-            resp[4 + 7] = CHMAP_FR;
+            item[4] = input;
+            item[5] = input ? 1 : 2;
+            item[6] = input ? CHMAP_MONO : CHMAP_FL;
+            item[7] = input ? 0 : CHMAP_FR;
+          }
         }
-        rlen = 4 + size;
+        rlen = 4 + size * count;
         break;
     case R_JACK_INFO: /* one line-out jack, always connected */
         if (start != 0 || count != 1 || size == 0 || size > 32) {
@@ -213,6 +307,81 @@ static void take_tx(HvVirtioSnd *d) {
 void hv_virtio_snd_poll(HvVirtioSnd *d) {
     if (!d) return;
     HvVirtio *v = &d->vio;
+    /* Input periods are paced by sample time, including when the host mic is
+       muted or unavailable. Never complete an empty period in a busy loop. */
+    pthread_mutex_lock(&d->capture_mu);
+    if ((v->status & 4) && v->q[RXQ].enabled) {
+        while (d->capture.tail - d->capture.head < HV_VSND_PENDING) {
+            HvVirtqElem *e = &d->capture.pending[d->capture.tail % HV_VSND_PENDING];
+            if (hv_virtq_pop(v, RXQ, e) <= 0) break;
+            uint32_t stream = UINT32_MAX;
+            hv_virtq_read(v, e, 0, &stream, 4);
+            uint32_t room = hv_virtq_writable(e), frame = d->capture.frame_bytes;
+            if (stream != 1 || readable(e) != 4 || room < 8 || !frame || (room - 8) % frame) {
+                uint32_t st[2] = {S_BAD_MSG, 0};
+                if (room >= 8) hv_virtq_write(v, e, room - 8, st, 8);
+                hv_virtq_push(v, RXQ, e, room >= 8 ? 8 : 0);
+                hv_virtio_interrupt(v);
+                continue;
+            }
+            d->capture.tail++;
+        }
+    }
+    /* Keep the guest's 48-kHz clock steady. Completing periods in host-tap
+       bursts gives voice-processing clients a jittery input clock. Hold two
+       host blocks before playing real input, so callback jitter doesn't cut
+       silence into otherwise continuous speech. */
+    uint64_t due = d->capture.running ? (now_ns() - d->capture.start_ns) / 1000 * 48 / 1000 : 0;
+    /* Bound recovery after the VM was descheduled; discard stale capture too. */
+    if (due > d->capture.delivered + HV_VSND_CAPTURE_FRAMES) {
+        d->capture.delivered = due - HV_VSND_CAPTURE_FRAMES;
+        d->capture.consumed = d->capture.written;
+        d->capture.source_active = 0;
+    }
+    if (d->capture.enabled && !d->capture.source_active && d->capture.input_block_frames &&
+        d->capture.written - d->capture.consumed >= 2u * d->capture.input_block_frames)
+        d->capture.source_active = 1;
+    while (d->capture.running && d->capture.head != d->capture.tail && d->capture.delivered < due) {
+        HvVirtqElem *e = &d->capture.pending[d->capture.head % HV_VSND_PENDING];
+        uint32_t room = hv_virtq_writable(e), bytes = d->capture.frame_bytes;
+        uint32_t left = room - 8 - d->capture.offset;
+        uint8_t pcm[1024];
+        uint32_t frames = left / bytes;
+        if (frames > sizeof pcm / bytes) frames = sizeof pcm / bytes;
+        if (frames > due - d->capture.delivered) frames = (uint32_t)(due - d->capture.delivered);
+        for (uint32_t i = 0; i < frames; i++) {
+            float sample = 0;
+            if (d->capture.enabled && d->capture.source_active && d->capture.consumed != d->capture.written)
+                sample = d->capture.samples[d->capture.consumed++ % HV_VSND_CAPTURE_FRAMES];
+            else {
+                if (d->capture.source_active) { d->capture.underruns++; d->capture.source_active = 0; }
+                d->capture.silenced++;
+            }
+            if (!isfinite(sample)) sample = 0;
+            if (sample > 1) sample = 1;
+            if (sample < -1) sample = -1;
+            if (d->capture.format == HV_VSND_FMT_FLOAT) memcpy(pcm + i * bytes, &sample, 4);
+            else if (bytes == 2) {
+                int16_t n = sample <= -1 ? INT16_MIN : (int16_t)(sample * INT16_MAX);
+                memcpy(pcm + i * bytes, &n, 2);
+            } else {
+                int32_t n = sample <= -1 ? INT32_MIN : sample >= 1 ? INT32_MAX : (int32_t)((double)sample * INT32_MAX);
+                memcpy(pcm + i * bytes, &n, 4);
+            }
+        }
+        hv_virtq_write(v, e, d->capture.offset, pcm, frames * bytes);
+        d->capture.offset += frames * bytes;
+        d->capture.delivered += frames;
+        if (d->capture.offset == room - 8) {
+            uint32_t st[2] = {S_OK, (uint32_t)(d->capture.written - d->capture.consumed) * bytes};
+            hv_virtq_write(v, e, room - 8, st, 8);
+            hv_virtq_push(v, RXQ, e, room);
+            d->capture.offset = 0;
+            d->capture.head++;
+            hv_virtio_interrupt(v);
+        }
+    }
+    pthread_mutex_unlock(&d->capture_mu);
     /* No backend: the stream plays at its rate by the wall clock. */
     if (d->running && !d->backend.start && d->frame_bytes) {
         uint64_t now = now_ns();
@@ -280,17 +449,25 @@ static void notify(HvVirtio *v, int q) {
         hv_virtio_snd_poll(d); /* a release may have freed buffers */
     } else if (q == TXQ) {
         take_tx(d);
-    } else if (q == RXQ) { /* no input stream: hand capture buffers straight back */
-        int any = 0;
-        while (hv_virtq_pop(v, q, &e) > 0) {
-            uint8_t st[8] = {0};
-            put32(st, S_BAD_MSG);
-            hv_virtq_write(v, &e, 0, st, 8);
-            hv_virtq_push(v, q, &e, 8);
-            any = 1;
-        }
-        if (any) hv_virtio_interrupt(v);
+    } else if (q == RXQ) {
+        hv_virtio_snd_poll(d);
     } /* event queue: kept for events we never send */
+}
+
+static void reset_device(HvVirtio *v) {
+    HvVirtioSnd *d = v->dev;
+    if (d->running && d->backend.stop) d->backend.stop(d->backend.opaque);
+    d->prepared = d->running = 0;
+    d->phead = d->pcopy = d->ptail = 0;
+    atomic_store(&d->written, 0);
+    atomic_store(&d->consumed, 0);
+    pthread_mutex_lock(&d->capture_mu);
+    d->capture.prepared = d->capture.running = 0;
+    d->capture.frame_bytes = 0;
+    d->capture.head = d->capture.tail = d->capture.offset = 0;
+    d->capture.written = d->capture.consumed = d->capture.delivered = 0;
+    memset(d->capture.samples, 0, sizeof d->capture.samples);
+    pthread_mutex_unlock(&d->capture_mu);
 }
 
 HvVirtioSnd *hv_virtio_snd_create(HvMachine *m, HvPcie *bus) {
@@ -299,14 +476,59 @@ HvVirtioSnd *hv_virtio_snd_create(HvMachine *m, HvPcie *bus) {
     hv_virtio_init(v, m, 25, 0x040100, 4, 0); /* sound device, multimedia audio */
     v->dev = d;
     v->notify = notify;
-    uint32_t jacks = 1, streams = 1, chmaps = 1;
+    v->reset_device = reset_device;
+    uint32_t jacks = 1, streams = 2, chmaps = 2;
     memcpy(v->config, &jacks, 4);
     memcpy(v->config + 4, &streams, 4);
     memcpy(v->config + 8, &chmaps, 4);
     v->config_len = 12;
     d->ring = calloc(1, HV_VSND_RING);
+    pthread_mutex_init(&d->capture_mu, NULL);
     hv_pcie_attach(bus, &v->pci);
     return d;
+}
+
+void hv_virtio_snd_capture_enable(HvVirtioSnd *d, int enabled) {
+    if (!d) return;
+    pthread_mutex_lock(&d->capture_mu);
+    if (d->capture.enabled == !!enabled) { pthread_mutex_unlock(&d->capture_mu); return; }
+    d->capture.enabled = !!enabled;
+    d->capture.written = d->capture.consumed = 0;
+    d->capture.input_block_frames = 0;
+    d->capture.source_active = 0;
+    memset(d->capture.samples, 0, sizeof d->capture.samples);
+    pthread_mutex_unlock(&d->capture_mu);
+}
+
+int hv_virtio_snd_capture_requested(HvVirtioSnd *d) {
+    if (!d) return 0;
+    pthread_mutex_lock(&d->capture_mu);
+    int active = d->capture.running;
+    pthread_mutex_unlock(&d->capture_mu);
+    return active;
+}
+
+void hv_virtio_snd_capture_push(HvVirtioSnd *d, const float *mono, uint32_t frames) {
+    if (!d || !mono || !frames) return;
+    pthread_mutex_lock(&d->capture_mu);
+    if (d->capture.running && d->capture.enabled) {
+        if (frames > HV_VSND_CAPTURE_FRAMES) { mono += frames - HV_VSND_CAPTURE_FRAMES; frames = HV_VSND_CAPTURE_FRAMES; }
+        if (d->capture.written + frames - d->capture.consumed > HV_VSND_CAPTURE_FRAMES)
+            d->capture.consumed = d->capture.written + frames - HV_VSND_CAPTURE_FRAMES;
+        for (uint32_t i = 0; i < frames; i++) d->capture.samples[d->capture.written++ % HV_VSND_CAPTURE_FRAMES] = mono[i];
+        d->capture.received += frames;
+        uint32_t block = frames < HV_VSND_CAPTURE_FRAMES / 2 ? frames : HV_VSND_CAPTURE_FRAMES / 2;
+        if (block > d->capture.input_block_frames) d->capture.input_block_frames = block;
+    }
+    pthread_mutex_unlock(&d->capture_mu);
+    hv_machine_wake(d->vio.m);
+}
+
+void hv_virtio_snd_destroy(HvVirtioSnd *d) {
+    if (!d) return;
+    pthread_mutex_destroy(&d->capture_mu);
+    free(d->ring);
+    free(d);
 }
 
 /* After a pause or a restore: the host's player again for a stream that was playing, and the clock that drains it
@@ -317,4 +539,14 @@ void hv_virtio_snd_resume(HvVirtioSnd *d) {
     d->clock_start_consumed = atomic_load(&d->consumed);
     if (d->running && d->backend.start && d->backend.start(d->backend.opaque, d->channels, d->format, d->rate_hz) != 0)
         d->backend.start = NULL;
+    pthread_mutex_lock(&d->capture_mu);
+    /* Guest RX descriptors and their partial period survive; host samples and
+       permission do not. Start a fresh clock, without a burst of catch-up PCM. */
+    d->capture.enabled = 0;
+    d->capture.start_ns = now_ns();
+    d->capture.delivered = d->capture.written = d->capture.consumed = 0;
+    d->capture.input_block_frames = 0;
+    d->capture.source_active = 0;
+    memset(d->capture.samples, 0, sizeof d->capture.samples);
+    pthread_mutex_unlock(&d->capture_mu);
 }

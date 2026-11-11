@@ -488,6 +488,8 @@ int hv_vm_finish_pause(void) {
     hv_virtio_blk_stop(board.root_blk);
     hv_virtio_blk_stop(board.aux_blk);
     if (sound_on) hv_audio_detach(); /* the host's player stops; the stream's state stays in the device */
+    hv_virtio_snd_capture_enable(board.snd, 0);
+    if (board.usb) hv_usb_camera_enable(&board.usb->camera, 0);
     hv_pvg_lite_quiesce(board.pvg);
     hv_dev_lock(&m);
     int idle = hv_virtio_blk_idle(board.root_blk) && hv_virtio_blk_idle(board.aux_blk);
@@ -565,8 +567,9 @@ int hv_vm_continue(void) {
     hv_virtio_blk_start(board.aux_blk);
     if (sound_on) {
         hv_audio_attach(board.snd);
-        hv_virtio_snd_resume(board.snd);
     }
+    hv_virtio_snd_resume(board.snd);
+    if (board.usb) hv_xhci_resume(board.usb);
     atomic_store(&input_stopping, 0);
     set_pause_state(0);
     return hv_vm_start(cpu0_ours, exit_cb);
