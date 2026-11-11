@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
+#include <ftw.h>
 #include <unistd.h>
 
 #include "henge-ios-jit.h"
@@ -17,13 +18,15 @@ _Atomic int henge_tl_ran;
 int henge_vm_state(void) { return 0; }
 HengeDualMapping *henge_ios_jit_get_mapping(void) { return &mapping; }
 static int failures;
+static int rm_one(const char *p, const struct stat *st, int flag, struct FTW *f) { (void)st, (void)flag, (void)f; return remove(p); }
+static void rm_tree(const char *dir) { nftw(dir, rm_one, 16, FTW_DEPTH | FTW_PHYS); }
 static void check(const char *what, int ok) {
     if (!ok) { fprintf(stderr, "FAIL: %s\n", what); failures++; }
 }
 
 /* test_tl_glue DMG: import it and run every program in it, as the app's Mac apps screen would. */
 static int run_all(const char *dmg, const char *only) {
-    char dir[] = "/tmp/henge-tl-XXXXXX", err[512] = "", out[300];
+    char dir[] = "build/tl-glue-XXXXXX", err[512] = "", out[300];
     if (!mkdtemp(dir)) return 1;
     int n = henge_tl_import_dmg(dmg, dir, err, sizeof err);
     printf("%s: %d copied%s%s\n", dmg, n, n < 0 ? ": " : "", n < 0 ? err : "");
@@ -50,6 +53,7 @@ static int run_all(const char *dmg, const char *only) {
         if (rc) bad++;
     }
     if (d) closedir(d);
+    rm_tree(dir);
     return bad != 0;
 }
 
@@ -59,10 +63,10 @@ int main(int argc, char **argv) {
         if (hv_jit_region_open(&jit, 512u << 20)) return 1;
         mapping = (HengeDualMapping){.rx_addr = (uint8_t *)jit.base, .rw_addr = (uint8_t *)jit.base + jit.rw_diff, .size = jit.capacity * 4};
         char err[256] = "", text[256] = "";
-        int rc = henge_tl_run("build/tl-exit3", "/tmp/henge-tl-exit3.txt", err, sizeof err);
-        FILE *f = fopen("/tmp/henge-tl-exit3.txt", "r");
+        int rc = henge_tl_run("build/tl-exit3", "build/tl-exit3.txt", err, sizeof err);
+        FILE *f = fopen("build/tl-exit3.txt", "r");
         if (f) text[fread(text, 1, sizeof text - 1, f)] = 0, fclose(f);
-        unlink("/tmp/henge-tl-exit3.txt");
+        unlink("build/tl-exit3.txt");
         check("exit(3) comes back as 3", rc == 3);
         check("and what it printed before is kept", strstr(text, "leaving with exit(3)") != NULL);
         printf("tl glue exit: %d failures\n", failures);
@@ -74,7 +78,7 @@ int main(int argc, char **argv) {
         mapping = (HengeDualMapping){.rx_addr = (uint8_t *)jit.base, .rw_addr = (uint8_t *)jit.base + jit.rw_diff, .size = jit.capacity * 4};
         return run_all(argv[1], argc > 2 ? argv[2] : NULL);
     }
-    char dir[] = "/tmp/henge-tl-XXXXXX", err[512] = "", out[300], app[300], prog[300];
+    char dir[] = "build/tl-glue-XXXXXX", err[512] = "", out[300], app[300], prog[300];
     setenv("HV_JIT_SPLIT", "1", 1); /* the iPhone's shape: an executable region and a writable alias of it */
     if (!mkdtemp(dir) || hv_jit_region_open(&jit, 512u << 20)) return 1;
     mapping = (HengeDualMapping){.rx_addr = (uint8_t *)jit.base, .rw_addr = (uint8_t *)jit.base + jit.rw_diff, .size = jit.capacity * 4};
@@ -100,5 +104,6 @@ int main(int argc, char **argv) {
     check("a second program in the same launch is refused", henge_tl_run("build/tl-exit3", out, err, sizeof err) == -1 &&
           strstr(err, "One program per launch") != NULL);
     printf("tl glue: %d copied, output %zu bytes, %d failures\n", n, strlen(text), failures);
+    rm_tree(dir);
     return failures != 0;
 }
