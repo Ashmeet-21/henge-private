@@ -43,7 +43,7 @@ enum { CC_SUCCESS = 1, CC_TRB_ERROR = 5, CC_STALL = 6, CC_SLOTS_FULL = 9, CC_SLO
 #define PORT_CEC (1u << 23)
 #define PORT_CHANGES (PORT_CSC | PORT_PEC | PORT_WRC | PORT_OCC | PORT_PRC | PORT_PLC | PORT_CEC)
 #define SPEED_FULL 1
-#define SPEED_HIGH 2
+#define SPEED_HIGH 3 /* xHCI speed IDs: 1 full, 2 low, 3 high */
 
 /* ---- the devices' descriptors ---- */
 
@@ -319,6 +319,7 @@ static void tp_select(HvXhci *x, int reg) {
 /* Answer a SETUP on endpoint 0. Returns the reply length (data to send for IN
    requests), or -1 to stall. */
 static int control(HvXhci *x, int slot, const uint8_t setup[8], uint8_t *out, int max) {
+    if (x->slots[slot].dev == 2) return hv_usb_camera_control(&x->camera, setup, out, (size_t)max);
     const struct HvXhciDev *d = &devs[x->slots[slot].dev];
     uint8_t type = setup[0], req = setup[1];
     uint16_t value = (uint16_t)(setup[2] | setup[3] << 8);
@@ -426,21 +427,25 @@ static int control(HvXhci *x, int slot, const uint8_t setup[8], uint8_t *out, in
 
 /* Run the control transfers queued on the device's endpoint 0. */
 static void run_ep0(HvXhci *x, int slot) {
+    struct HvXhciSlot *s = &x->slots[slot];
+    if (s->dev == 2 && (!(x->portsc[2] & PORT_CCS) || s->camera_generation != x->camera_generation)) return;
     HvXhciRing *r = &x->slots[slot].ep[1];
     uint32_t trb[4];
     uint64_t at;
-    uint8_t setup[8], reply[256];
-    int reply_len = 0, stalled = 0;
-    while (ring_peek(x, r, trb, &at)) {
+    for (unsigned budget = 0; budget < 128 && ring_peek(x, r, trb, &at); budget++) {
         int type = (trb[3] >> 10) & 0x3f;
         int ioc = (trb[3] >> 5) & 1;
         if (type == TRB_SETUP) {
-            memcpy(setup, trb, 8);
-            uint16_t wlen = (uint16_t)(setup[6] | setup[7] << 8);
-            reply_len = control(x, slot, setup, reply, wlen < sizeof reply ? wlen : (int)sizeof reply);
-            stalled = reply_len < 0;
+            memcpy(s->setup, trb, 8);
+            uint16_t wlen = (uint16_t)(s->setup[6] | s->setup[7] << 8);
+            s->control_offset = 0;
+            int len = control(x, slot, s->setup, s->control_data,
+                              wlen < sizeof s->control_data ? wlen : (int)sizeof s->control_data);
+            s->control_len = len < 0 ? 0 : (uint32_t)len;
+            s->control_stalled = len < 0 ||
+                (s->dev == 2 && !(s->setup[0] & 0x80) && wlen > sizeof s->control_data);
             ring_advance(r);
-            if (stalled) {
+            if (s->control_stalled) {
                 transfer_event(x, at, CC_STALL, 0, slot, 1);
                 set_ep_state(x, slot, 1, 2); /* halted */
                 x->slots[slot].ep_running[1] = 0;
@@ -452,11 +457,30 @@ static void run_ep0(HvXhci *x, int slot) {
             uint32_t want = trb[2] & 0x1ffff;
             int in = (trb[3] >> 16) & 1;
             uint32_t n = 0;
+            if (s->dev == 2 && in != !!(s->setup[0] & 0x80)) {
+                ring_advance(r);
+                transfer_event(x, at, CC_STALL, want, slot, 1);
+                set_ep_state(x, slot, 1, 2);
+                s->ep_running[1] = 0;
+                s->control_stalled = 1;
+                return;
+            }
             if (in) {
-                n = reply_len < 0 ? 0 : (uint32_t)reply_len < want ? (uint32_t)reply_len : want;
-                if (n) wr(x, buf, reply, n);
+                uint32_t left = s->control_offset < s->control_len ? s->control_len - s->control_offset : 0;
+                n = left < want ? left : want;
+                if (n) wr(x, buf, s->control_data + s->control_offset, n);
+                s->control_offset += n;
             } else {
                 n = want; /* SET_REPORT and friends: take the data and ignore it */
+                if (s->dev == 2) {
+                    if (want > sizeof s->control_data - s->control_offset) {
+                        s->control_stalled = 1;
+                        n = 0;
+                    } else {
+                        rd(x, buf, s->control_data + s->control_offset, want);
+                        s->control_offset += want;
+                    }
+                }
                 if (x->slots[slot].dev == 1 && want >= 2) {
                     uint8_t data[2];
                     rd(x, buf, data, 2); /* the data lives in guest memory, at the TRB's pointer */
@@ -476,6 +500,14 @@ static void run_ep0(HvXhci *x, int slot) {
             if (ioc || (isp && n < want)) transfer_event(x, at, n < want ? CC_SHORT_PACKET : CC_SUCCESS, want - n, slot, 1);
         } else if (type == TRB_STATUS) {
             ring_advance(r);
+            if (s->dev == 2 && !(s->setup[0] & 0x80) && (s->setup[6] || s->setup[7]))
+                s->control_stalled |= hv_usb_camera_control_out(&x->camera, s->setup, s->control_data, s->control_offset) != 0;
+            if (s->control_stalled) {
+                transfer_event(x, at, CC_STALL, 0, slot, 1);
+                set_ep_state(x, slot, 1, 2);
+                s->ep_running[1] = 0;
+                return;
+            }
             if (ioc) transfer_event(x, at, CC_SUCCESS, 0, slot, 1);
         } else {
             ring_advance(r);
@@ -484,9 +516,82 @@ static void run_ep0(HvXhci *x, int slot) {
     }
 }
 
+static uint64_t camera_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+/* A UVC bulk payload may span chained TRBs and finish with Event Data. Inspect
+   a whole TD before consuming it, so a NAK leaves every descriptor posted. */
+static void run_camera(HvXhci *x, int slot) {
+    if (!(x->portsc[2] & PORT_CCS) || x->slots[slot].camera_generation != x->camera_generation) return;
+    struct HvXhciSlot *s = &x->slots[slot];
+    const int dci = 3; /* EP1 IN */
+    if (!s->ep_running[dci]) return;
+    for (unsigned budget = 0; budget < 64; budget++) {
+        HvXhciRing next = s->ep[dci];
+        struct { uint64_t at, address; uint32_t len, flags, target; } segments[64];
+        unsigned count = 0, total = 0, complete = 0, has_event = 0;
+        uint64_t event_data = 0, event_at = 0;
+        uint32_t event_target = 0, event_flags = 0;
+        uint32_t trb[4]; uint64_t at;
+        for (unsigned steps = 0; steps < 64 && count < 64 && ring_peek(x, &next, trb, &at); steps++) {
+            unsigned type = (trb[3] >> 10) & 0x3f;
+            if (type != TRB_NORMAL && type != TRB_EVENT_DATA) break;
+            ring_advance(&next);
+            event_at = at; event_target = trb[2] >> 22; event_flags = trb[3];
+            if (type == TRB_EVENT_DATA) {
+                event_data = (uint64_t)trb[1] << 32 | trb[0]; has_event = 1;
+            } else {
+                segments[count].at = at;
+                segments[count].address = (uint64_t)trb[1] << 32 | trb[0];
+                segments[count].len = trb[2] & 0x1ffff;
+                segments[count].flags = trb[3];
+                segments[count].target = trb[2] >> 22;
+                total += segments[count++].len;
+            }
+            if (!(trb[3] & (1u << 4))) { complete = 1; break; }
+        }
+        if (!complete || !count) return;
+        if (total < 7) {
+            s->ep[dci] = next;
+            transfer_event(x, event_at, CC_TRB_ERROR, total, slot, dci);
+            continue;
+        }
+        uint8_t payload[HV_CAMERA_PAYLOAD];
+        size_t bytes = hv_usb_camera_read(&x->camera, payload, total < sizeof payload ? total : sizeof payload, camera_now());
+        if (!bytes) return;
+        unsigned written = 0, short_target = event_target;
+        uint64_t short_at = event_at;
+        int signal_short = 0;
+        for (unsigned i = 0; i < count; i++) {
+            unsigned n = segments[i].len;
+            if (n > bytes - written) n = (unsigned)bytes - written;
+            if (n) wr(x, segments[i].address, payload + written, n);
+            written += n;
+            if (n < segments[i].len) {
+                short_at = segments[i].at; short_target = segments[i].target;
+                signal_short = !!(segments[i].flags & 4);
+                break;
+            }
+        }
+        s->ep[dci] = next;
+        int short_packet = bytes < total;
+        if ((event_flags & 32) || (short_packet && signal_short)) {
+            uint64_t parameter = has_event ? event_data : short_packet ? short_at : event_at;
+            uint32_t length = has_event ? (uint32_t)bytes : total - (uint32_t)bytes;
+            int target = has_event || !short_packet ? (int)event_target : (int)short_target;
+            event_to(x, target, parameter, (uint32_t)(short_packet ? CC_SHORT_PACKET : CC_SUCCESS) << 24 | length,
+                     TRB_TRANSFER_EVENT << 10 | (uint32_t)dci << 16 | (uint32_t)slot << 24 | (has_event ? 4u : 0));
+        }
+    }
+}
+
 /* Give the device's waiting reports to the interrupt IN endpoint's posted transfers. */
 static void run_ep_in(HvXhci *x, int slot) {
     struct HvXhciSlot *s = &x->slots[slot];
+    if (s->dev == 2) { run_camera(x, slot); return; }
     int dci = -1;
     for (int d = 2; d < HV_XHCI_EPS; d++) if (s->ep_running[d]) { dci = d; break; }
     if (s->dev < 0 || dci < 0) return;
@@ -559,6 +664,7 @@ static int address_device(HvXhci *x, int slot, uint64_t input, int bsr) {
     int dev = port - 1;
     if (dev < 0 || dev >= HV_XHCI_DEVICES) return CC_TRB_ERROR;
     x->slots[slot].dev = dev;
+    x->slots[slot].camera_generation = x->camera_generation;
     uint32_t dw3 = (uint32_t)(bsr ? 1 : 2) << 27 | (uint32_t)(bsr ? 0 : slot); /* default or addressed; address = slot */
     memcpy(slot_ctx + 12, &dw3, 4);
     uint32_t e0 = 0;
@@ -638,6 +744,8 @@ static void run_commands(HvXhci *x) {
         }
         case TRB_DISABLE_SLOT:
             if (slot >= 1 && slot <= HV_XHCI_SLOTS) {
+                if (x->slots[slot].dev == 2 && x->slots[slot].camera_generation == x->camera_generation)
+                    hv_usb_camera_reset(&x->camera);
                 x->slot_used[slot] = 0;
                 x->slots[slot].dev = -1;
                 memset(x->slots[slot].ep_running, 0, sizeof x->slots[slot].ep_running);
@@ -681,6 +789,8 @@ static void run_commands(HvXhci *x) {
             break;
         }
         case TRB_RESET_DEVICE: {
+            if (x->slots[slot].dev == 2 && x->slots[slot].camera_generation == x->camera_generation)
+                hv_usb_camera_reset(&x->camera);
             for (int dci = 2; dci < HV_XHCI_EPS; dci++) x->slots[slot].ep_running[dci] = 0;
             uint32_t dw3 = (uint32_t)1 << 27; /* default state, address 0 */
             wr(x, out_ctx(x, slot) + 12, &dw3, 4);
@@ -700,8 +810,8 @@ static void run_commands(HvXhci *x) {
 
 /* ---- ports ---- */
 
-/* Port 1 is the full-speed keyboard; port 2 is the high-speed trackpad, as the real
-   Magic Trackpad 2 is. */
+/* Port 1 is the full-speed keyboard; ports 2 and 3 are the high-speed trackpad
+   and camera. Low-speed ports cannot carry the camera's bulk endpoint. */
 static void port_connect(HvXhci *x) {
     for (int p = 0; p < HV_XHCI_PORTS; p++) {
         x->portsc[p] = PORT_PP | PORT_CCS | PORT_CSC | (uint32_t)(p ? SPEED_HIGH : SPEED_FULL) << PORT_SPEED_SHIFT | 7u << PORT_PLS_SHIFT;
@@ -715,6 +825,7 @@ static void port_write(HvXhci *x, int p, uint32_t v) {
     s &= ~(v & PORT_CHANGES); /* write 1 to clear */
     if (v & PORT_PED) s &= ~PORT_PED;
     if (v & PORT_PR) { /* reset: enabled, in U0 */
+        if (p == 2) hv_usb_camera_reset(&x->camera);
         s = (s & ~(0xfu << PORT_PLS_SHIFT)) | PORT_PED | PORT_PRC;
         x->portsc[p] = s;
         port_event(x, p);
@@ -737,6 +848,9 @@ static void port_write(HvXhci *x, int p, uint32_t v) {
 /* ---- registers ---- */
 
 static void reset(HvXhci *x) {
+    x->camera_reconnect_ns = 0;
+    x->camera_generation = 0;
+    hv_usb_camera_reset(&x->camera);
     x->usbcmd = 0;
     x->usbsts = 1; /* halted */
     x->dnctrl = x->config = 0;
@@ -789,7 +903,7 @@ static uint64_t bar_read(HvPciDev *d, int bar, uint64_t off, unsigned size) {
         if (size == 8 && i + 1 < 8) v |= (uint64_t)cap[i + 1] << 32;
         v >>= 8 * (off & 3);
     } else if (off >= XECP && off < XECP + 16) { /* Supported Protocol: USB 2.0 on every port */
-        static const uint32_t ext[4] = {2u | 0x0200u << 16, 0x20425355, 1u | ((1u << HV_XHCI_PORTS) - 1u) << 8, 0};
+        static const uint32_t ext[4] = {2u | 0x0200u << 16, 0x20425355, 1u | HV_XHCI_PORTS << 8, 0};
         uint32_t i = (uint32_t)(off - XECP) / 4;
         v = ext[i];
         if (size == 8 && i + 1 < 4) v |= (uint64_t)ext[i + 1] << 32;
@@ -809,7 +923,7 @@ static uint64_t bar_read(HvPciDev *d, int bar, uint64_t off, unsigned size) {
         int p = (int)(off - PORTREGS) / 16;
         v = (off - PORTREGS) % 16 == 0 ? x->portsc[p] : 0;
     } else if (off >= RT && off < RT + 0x20 + 32u * HV_XHCI_INTRS) {
-        if (off - RT < 0x20) return 0; /* MFINDEX */
+        if (off - RT < 0x20) return off == RT ? (camera_now() / 125000) & 0x3fff : 0;
         struct HvXhciIntr *it = &x->intr[(off - RT - 0x20) / 32];
         switch ((off - RT - 0x20) % 32) {
         case 0x00: v = it->iman; break;
@@ -1112,8 +1226,28 @@ void hv_xhci_touch_button(HvXhci *x, int down) {
     hv_machine_wake(x->m);
 }
 
+void hv_xhci_resume(HvXhci *x) {
+    if (!x) return;
+    hv_usb_camera_resume(&x->camera);
+    if (x->camera_reconnect_ns) x->camera_reconnect_ns = camera_now() + 300000000;
+}
+
 void hv_xhci_poll(HvXhci *x) {
     if (!x) return;
+    if (hv_usb_camera_apply_profile(&x->camera)) {
+        x->camera_generation++;
+        if (x->usbcmd & 1) {
+            x->portsc[2] = (x->portsc[2] & ~(PORT_CCS | PORT_PED)) | PORT_CSC;
+            x->camera_reconnect_ns = camera_now() + 300000000;
+            port_event(x, 2);
+        }
+    }
+    /* Let the guest acknowledge the disconnect even if its CPUs are busy. */
+    if (x->camera_reconnect_ns && !(x->portsc[2] & PORT_CSC) && camera_now() >= x->camera_reconnect_ns) {
+        x->camera_reconnect_ns = 0;
+        x->portsc[2] = PORT_PP | PORT_CCS | PORT_CSC | SPEED_HIGH << PORT_SPEED_SHIFT | 7u << PORT_PLS_SHIFT;
+        port_event(x, 2);
+    }
     for (int slot = 1; slot <= HV_XHCI_SLOTS; slot++)
         if (x->slots[slot].dev >= 0) run_ep_in(x, slot);
 }
@@ -1122,6 +1256,7 @@ HvXhci *hv_xhci_create(HvMachine *m, HvPcie *bus) {
     HvXhci *x = calloc(1, sizeof *x);
     x->m = m;
     pthread_mutex_init(&x->mu, NULL);
+    hv_usb_camera_init(&x->camera);
     /* QEMU's xHCI IDs. Class 0x0c0330 with revision 0: macOS's IOPCIClassMatch compares all 32 bits. */
     hv_pci_init(&x->pci, 0x1b36, 0x000d, 0x0c033000, 0x1af4, 0x1100);
     x->pci.opaque = x;
@@ -1131,9 +1266,16 @@ HvXhci *hv_xhci_create(HvMachine *m, HvPcie *bus) {
     x->pci.config[0x60] = 0x30; /* SBRN: USB 3.0 controller */
     x->pci.config[0x61] = 0x20; /* FLADJ default */
     if (hv_pcie_attach(bus, &x->pci) < 0) {
-        free(x);
+        hv_xhci_destroy(x);
         return NULL;
     }
     reset(x);
     return x;
+}
+
+void hv_xhci_destroy(HvXhci *x) {
+    if (!x) return;
+    hv_usb_camera_destroy(&x->camera);
+    pthread_mutex_destroy(&x->mu);
+    free(x);
 }

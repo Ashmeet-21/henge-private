@@ -9,10 +9,11 @@ HOST = $(B)/jit_region.o $(B)/enter.o $(B)/disk.o
 DEV = $(B)/pvg_lite.o $(B)/pvg_metal.o $(B)/gicv3.o $(B)/timer.o $(B)/pl011.o $(B)/pl031.o $(B)/cfg.o $(B)/bdif.o $(B)/pcie.o \
       $(B)/virtio.o $(B)/virtio_blk.o $(B)/virtio_net.o $(B)/virtio_input.o $(B)/virtio_snd.o $(B)/virtio_usb.o $(B)/virtio_balloon.o $(B)/xhci.o $(B)/vmapple.o $(B)/aes.o $(B)/pl061.o $(B)/metallib.o
 ENGINE = $(CORE) $(HOST)
+DEV += $(B)/usb_camera.o
 METAL_LIBS = -framework Foundation -framework QuartzCore -framework Metal -framework IOSurface -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers
 
 TESTS = $(B)/test_classify $(B)/test_jit_region $(B)/test_operands $(B)/test_jit $(B)/test_mem \
-        $(B)/test_mmu $(B)/test_exc $(B)/test_devices $(B)/test_shutdown
+        $(B)/test_mmu $(B)/test_exc $(B)/test_devices $(B)/test_shutdown $(B)/test_media
 
 all: $(TESTS) $(B)/hengevm $(B)/hengevm-ref $(B)/hvsparse
 
@@ -88,6 +89,17 @@ $(B)/test_mmu: tests/test_mmu.c $(ENGINE)
 
 $(B)/test_shutdown: tests/test_shutdown.c $(ENGINE)
 	$(CC) $(CFLAGS) $^ -o $@
+
+$(B)/test_media: tests/test_media.c $(ENGINE) $(DEV)
+	$(CC) $(CFLAGS) $^ $(METAL_LIBS) -o $@
+
+# Instrument the new transport code while retaining the engine's special
+# no-SIMD compilation rules. Exercises real guest descriptor chains.
+$(B)/test_media_sanitized: tests/test_media.c devices/usb_camera.c devices/xhci.c devices/virtio_snd.c devices/virtio.c $(ENGINE) $(filter-out $(B)/usb_camera.o $(B)/xhci.o $(B)/virtio_snd.o $(B)/virtio.o,$(DEV))
+	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer $^ $(METAL_LIBS) -o $@
+
+$(B)/media-probe: tools/media-probe.m tools/media-probe-Info.plist | $(B)
+	xcrun --sdk macosx clang -arch arm64 -mmacosx-version-min=15.0 -fobjc-arc -Wall -Wextra -Wno-deprecated-declarations -O2 $< -Wl,-sectcreate,__TEXT,__info_plist,tools/media-probe-Info.plist -framework Foundation -framework CoreAudio -framework AVFoundation -framework CoreMedia -framework CoreVideo -o $@
 
 # Native app lifecycle with real devices and networking; no restore assets.
 $(B)/test_dns_lifecycle: tests/test_dns_lifecycle.c $(B)/dns_proxy.o
@@ -169,7 +181,7 @@ $(B)/test_tl_glue: tests/test_tl_glue.c ios/Henge/Native/henge-tl.c $(TL_SRC) ho
 	  -x objective-c -fobjc-arc tl/loader/tl_bundle.m -framework Foundation -lz -lbz2 -lcompression -o $@
 # Sample Mac programs for the app's Mac apps screen, as a disk image (read by the same import path as anyone's).
 $(B)/tl-samples.dmg: tests/tl/exit3.c tl/tests/hello.c tl/tests/fnd.m tl/tests/swifty.swift tl/tests/cxx.cpp tl/tests/fw.m tl/tests/fwapp.m | $(B)
-	make -C tl all
+	env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET $(MAKE) -C tl all
 	rm -rf $(B)/tl-samples $@ && mkdir -p $(B)/tl-samples
 	cp tl/build/hello "$(B)/tl-samples/Hello (C)"
 	cp tl/build/fnd "$(B)/tl-samples/Foundation sample"
@@ -215,6 +227,9 @@ restore-objs: $(RESTORE_OBJ)
 # Session-owned display routing, independent of JIT, Metal and a connected monitor.
 $(B)/test_display_targets: ios/Henge/DisplayTargetSelection.swift tests/test_display_targets.swift | $(B)
 	xcrun --sdk macosx swiftc $^ -o $@
+
+$(B)/test_camera_encoder: ios/Henge/CameraFrameEncoder.swift tests/test_camera_encoder.swift | $(B)
+	xcrun --sdk macosx swiftc -module-cache-path $(B)/swift-cache $^ -o $@
 
 # The router's hand-off to the engine, with the engine call recorded instead of made.
 $(B)/test_display_router: ios/Henge/DisplayRouter.swift ios/Henge/DisplayTargetSelection.swift tests/test_display_router.swift tests/display_engine_stub.h | $(B)

@@ -62,7 +62,9 @@
 		<string>_remotepairing._tcp</string>
 	</array>
 	<key>NSCameraUsageDescription</key>
-	<string>Henge can use the volume buttons as the trackpad's mouse buttons. Receiving those presses needs the camera active; no video is recorded, saved or shown.</string>
+	<string>Share this device’s camera with apps in your virtual Mac when you enable Camera. The volume-button mouse mode can also use the camera to receive button presses.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Share this device’s microphone with calls and recording apps in your virtual Mac when you enable Microphone.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Henge uses the local network to pair with this iPhone for JIT, without a computer.</string>
 	<key>UIApplicationSceneManifest</key>

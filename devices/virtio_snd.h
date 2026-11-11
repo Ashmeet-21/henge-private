@@ -6,7 +6,7 @@
 
 #include "virtio.h"
 
-/* virtio-snd (virtio 1.2, section 5.14) with one output stream: what
+/* virtio-snd (virtio 1.2, section 5.14), output stream 0 and microphone stream 1:
    Virtualization.framework's VZVirtioSoundDeviceConfiguration gives a macOS
    guest, which AppleVirtIOSound drives.
 
@@ -17,6 +17,7 @@
    the wall clock, so the guest still runs at the right speed. */
 #define HV_VSND_RING (1u << 18)   /* bytes: over a second of 48 kHz stereo 16-bit */
 #define HV_VSND_PENDING 64
+#define HV_VSND_CAPTURE_FRAMES 9600 /* bounded to 200 ms; never accumulate seconds of speech */
 
 /* PCM formats and rates, as the spec numbers them (the ones this device offers). */
 #define HV_VSND_FMT_S16 5
@@ -48,6 +49,21 @@ typedef struct HvVirtioSnd {
     uint64_t pending_end[HV_VSND_PENDING]; /* `written` after this buffer's data */
     uint32_t phead, pcopy, ptail; /* pcopy: next one whose audio is not yet in the ring */
     uint64_t underruns, xfers;
+    /* Host input is always mono float32 / 48 kHz. The CPU converts it to the
+       negotiated guest format. The mutex also fences permission revocation. */
+    pthread_mutex_t capture_mu;
+    struct {
+        unsigned format, frame_bytes;
+        uint32_t buffer_bytes, period_bytes;
+        int prepared, running, enabled;
+        uint64_t start_ns, delivered, written, consumed;
+        uint64_t received, silenced, underruns;
+        uint32_t input_block_frames;
+        int source_active;
+        float samples[HV_VSND_CAPTURE_FRAMES];
+        HvVirtqElem pending[HV_VSND_PENDING];
+        uint32_t head, tail, offset;
+    } capture;
 } HvVirtioSnd;
 
 HvVirtioSnd *hv_virtio_snd_create(HvMachine *m, HvPcie *bus);
@@ -56,5 +72,10 @@ void hv_virtio_snd_poll(HvVirtioSnd *d);
 void hv_virtio_snd_resume(HvVirtioSnd *d);
 /* Backend thread: take up to `len` bytes of PCM; the rest of `buf` is silence. Returns bytes taken. */
 uint32_t hv_virtio_snd_pull(HvVirtioSnd *d, void *buf, uint32_t len);
+/* Host thread. Disabled input is clocked silence and discards all old samples. */
+void hv_virtio_snd_capture_enable(HvVirtioSnd *d, int enabled);
+void hv_virtio_snd_capture_push(HvVirtioSnd *d, const float *mono, uint32_t frames);
+int hv_virtio_snd_capture_requested(HvVirtioSnd *d);
+void hv_virtio_snd_destroy(HvVirtioSnd *d);
 
 #endif

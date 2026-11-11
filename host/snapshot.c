@@ -105,6 +105,8 @@ static uint64_t fingerprint(void) {
     MIX(sizeof(HvCpu)), MIX(sizeof(CpuState)), MIX(sizeof(HvGic)), MIX(sizeof(HvGicCpu)), MIX(offsetof(HvGic, ctlr));
     MIX(sizeof(HvXhci)), MIX(offsetof(HvXhci, usbcmd)), MIX(offsetof(HvXhci, mu)), MIX(offsetof(HvXhci, reports));
     MIX(sizeof(HvVirtio)), MIX(sizeof(HvVirtq)), MIX(sizeof(HvVirtioSnd)), MIX(sizeof(HvVirtioInput));
+    /* Media sections omit host capture buffers, mutexes and permissions. */
+    MIX(TAG('M', 'E', 'D', '1')), MIX(offsetof(HvXhci, camera)), MIX(sizeof(HvUsbCamera));
     MIX(sizeof(HvVirtioBalloon)), MIX(sizeof(HvPciDev)), MIX(sizeof(HvPcie)), MIX(sizeof(HvAes)), MIX(sizeof(HvBdif));
     MIX(sizeof(HvPl011)), MIX(sizeof(HvPl031)), MIX(sizeof(HvPl061)), MIX(sizeof(HvVmapple));
     MIX(hv_pvg_lite_state(NULL, NULL, 0)), MIX(CHUNK_PAGES), MIX(PAGE);
@@ -506,6 +508,10 @@ static void save_devices(W *w, HvVmapple *b) {
         uint64_t wc[4] = {atomic_load(&d->written), atomic_load(&d->consumed), d->underruns, d->xfers};
         w_section(w, VSND, wc, sizeof wc);
         w_section(w, VSND, RANGE(d, pending, ptail));
+        pthread_mutex_lock(&d->capture_mu);
+        w_section(w, VSND, RANGE(&d->capture, format, running));
+        w_section(w, VSND, RANGE(&d->capture, pending, offset));
+        pthread_mutex_unlock(&d->capture_mu);
     }
     if (b->balloon) {
         save_virtio(w, VBAL, &b->balloon->vio);
@@ -523,7 +529,17 @@ static void save_devices(W *w, HvVmapple *b) {
         HvXhci *x = b->usb;
         save_pci(w, XHCI, &x->pci);
         pthread_mutex_lock(&x->mu);
-        w_section(w, XHCI, (const uint8_t *)x + offsetof(HvXhci, usbcmd), offsetof(HvXhci, mu) - offsetof(HvXhci, usbcmd));
+        w_section(w, XHCI, (const uint8_t *)x + offsetof(HvXhci, usbcmd), offsetof(HvXhci, camera) - offsetof(HvXhci, usbcmd));
+        HvUsbCamera *c = &x->camera;
+        pthread_mutex_lock(&c->mu);
+        w_section(w, XHCI, RANGE(c, configured, committed));
+        w_section(w, XHCI, RANGE(c, fid, height));
+        w_section(w, XHCI, c->black_jpeg, sizeof c->black_jpeg);
+        w_section(w, XHCI, c->requested_black, sizeof c->requested_black);
+        uint32_t black_len[2] = {c->black_len, c->requested_black_len};
+        w_section(w, XHCI, black_len, sizeof black_len);
+        pthread_mutex_unlock(&c->mu);
+        w_section(w, XHCI, RANGE(x, camera_reconnect_ns, camera_generation));
         w_section(w, XHCI, (const uint8_t *)x + offsetof(HvXhci, reports), sizeof(HvXhci) - offsetof(HvXhci, reports));
         pthread_mutex_unlock(&x->mu);
     }
@@ -566,6 +582,7 @@ static int load_devices(R *r, HvVmapple *b, void **display, uint64_t *display_le
             return -1;
         atomic_store(&d->written, wc[0]), atomic_store(&d->consumed, wc[1]);
         d->underruns = wc[2], d->xfers = wc[3];
+        if (R_RANGE(r, VSND, &d->capture, format, running) || R_RANGE(r, VSND, &d->capture, pending, offset)) return -1;
     }
     if (b->balloon && (load_virtio(r, VBAL, &b->balloon->vio) || R_RANGE(r, VBAL, b->balloon, target, told_pattern))) return -1;
     HvVirtioInput *in[2] = {b->keyboard, b->mouse};
@@ -573,10 +590,21 @@ static int load_devices(R *r, HvVmapple *b, void **display, uint64_t *display_le
         if (in[i] && (load_virtio(r, VINP, &in[i]->vio) || R_RANGE(r, VINP, in[i], ring, dropped))) return -1;
     if (b->usb) {
         HvXhci *x = b->usb;
+        HvUsbCamera *c = &x->camera;
+        uint32_t black_len[2];
         if (load_pci(r, XHCI, &x->pci) ||
-            r_section(r, XHCI, (uint8_t *)x + offsetof(HvXhci, usbcmd), offsetof(HvXhci, mu) - offsetof(HvXhci, usbcmd)) ||
+            r_section(r, XHCI, (uint8_t *)x + offsetof(HvXhci, usbcmd), offsetof(HvXhci, camera) - offsetof(HvXhci, usbcmd)) ||
+            R_RANGE(r, XHCI, c, configured, committed) || R_RANGE(r, XHCI, c, fid, height) ||
+            r_section(r, XHCI, c->black_jpeg, sizeof c->black_jpeg) ||
+            r_section(r, XHCI, c->requested_black, sizeof c->requested_black) ||
+            r_section(r, XHCI, black_len, sizeof black_len) ||
+            R_RANGE(r, XHCI, x, camera_reconnect_ns, camera_generation) ||
             r_section(r, XHCI, (uint8_t *)x + offsetof(HvXhci, reports), sizeof(HvXhci) - offsetof(HvXhci, reports)))
             return -1;
+        if (c->profile > 2 || c->requested_profile > 2 || black_len[0] > HV_CAMERA_BLACK_BYTES || black_len[1] > HV_CAMERA_BLACK_BYTES)
+            return r->err = EINVAL, -1;
+        c->black_len = black_len[0];
+        c->requested_black_len = black_len[1];
     }
     void *blob;
     uint64_t len;
@@ -740,6 +768,7 @@ int hv_snapshot_restore(const char *path, const char *ident, char *err, size_t e
     }
     hv_gicv3_update(b->gic);
     if (b->snd) hv_virtio_snd_resume(b->snd);
+    if (b->usb) hv_xhci_resume(b->usb);
     clock_gettime(CLOCK_MONOTONIC, &t1);
     fprintf(stderr, "hengevm: snapshot: restored a Mac saved %lld s ago, in %.2f s (reading RAM %.2f s, decompressing %.2f s alongside)\n",
             (long long)(time(NULL) - h.saved_at), (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9,

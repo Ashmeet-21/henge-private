@@ -32,6 +32,7 @@ static void add_cap(HvVirtio *v, uint8_t at, uint8_t next, uint8_t type, uint32_
 }
 
 static void reset(HvVirtio *v) {
+    if (v->reset_device) v->reset_device(v);
     v->driver_features = 0;
     v->dfsel = v->gfsel = 0;
     v->status = 0;

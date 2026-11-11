@@ -43,6 +43,7 @@ typedef struct HvVirtio {
     uint8_t config[256];
     uint32_t config_len;
     void (*notify)(struct HvVirtio *v, int q);
+    void (*reset_device)(struct HvVirtio *v);
     void (*config_write)(struct HvVirtio *v, uint32_t off, uint64_t val, unsigned size);
     void *dev;
 } HvVirtio;

@@ -22,6 +22,7 @@
 
 #include <fcntl.h>
 #include <unistd.h>
+#include <time.h>
 
 HENGE_EXPORT HengeDualMapping *henge_ios_jit_get_mapping(void);
 
@@ -457,6 +458,78 @@ int henge_vm_boot_display(const uint8_t **pixels, int *width, int *height, int *
     return result;
 }
 void henge_vm_free_display(const uint8_t *pixels) { free((void *)pixels); }
+
+void henge_vm_media_enable(int microphone, int camera) {
+    if (!lock_running()) return;
+    HvVmapple *b = hv_vm_board();
+    hv_virtio_snd_capture_enable(b->snd, microphone);
+    if (b->usb) hv_usb_camera_enable(&b->usb->camera, camera);
+    pthread_rwlock_unlock(&api_lock);
+}
+
+int henge_vm_media_demand(void) {
+    if (!lock_running()) return 0;
+    HvVmapple *b = hv_vm_board();
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+    int bits = hv_virtio_snd_capture_requested(b->snd) ? 1 : 0;
+    if (b->usb && hv_usb_camera_requested(&b->usb->camera, now)) bits |= 2;
+    pthread_rwlock_unlock(&api_lock);
+    return bits;
+}
+
+uint32_t henge_vm_camera_frame_rate(void) {
+    if (!lock_running()) return 0;
+    HvVmapple *b = hv_vm_board();
+    uint32_t rate = b->usb ? hv_usb_camera_frame_rate(&b->usb->camera) : 0;
+    pthread_rwlock_unlock(&api_lock);
+    return rate;
+}
+
+void henge_vm_microphone(const float *samples, uint32_t frames) {
+    if (!lock_running()) return;
+    hv_virtio_snd_capture_push(hv_vm_board()->snd, samples, frames);
+    pthread_rwlock_unlock(&api_lock);
+}
+
+uint32_t henge_vm_camera_resolution(void) {
+    if (!lock_running()) return 0;
+    HvVmapple *b = hv_vm_board();
+    uint32_t result = b->usb ? hv_usb_camera_profile(&b->usb->camera) : 0;
+    pthread_rwlock_unlock(&api_lock);
+    return result;
+}
+
+int henge_vm_camera_set_resolution(uint32_t profile, const uint8_t *black, uint32_t length) {
+    if (!lock_running()) return -1;
+    HvVmapple *b = hv_vm_board();
+    int result = b->usb ? hv_usb_camera_set_profile(&b->usb->camera, profile, black, length) : -1;
+    hv_machine_wake(hv_vm_machine());
+    pthread_rwlock_unlock(&api_lock);
+    return result;
+}
+
+void henge_vm_camera_jpeg(const uint8_t *jpeg, uint32_t length, uint32_t profile) {
+    if (!lock_running()) return;
+    HvVmapple *b = hv_vm_board();
+    if (b->usb) {
+        hv_usb_camera_jpeg(&b->usb->camera, jpeg, length, profile);
+        hv_machine_wake(hv_vm_machine());
+    }
+    pthread_rwlock_unlock(&api_lock);
+}
+
+void henge_vm_camera_nv12(const uint8_t *y, uint32_t ys, const uint8_t *uv,
+                          uint32_t uvs, uint32_t width, uint32_t height, int mirrored) {
+    if (!lock_running()) return;
+    HvVmapple *b = hv_vm_board();
+    if (b->usb) {
+        hv_usb_camera_nv12(&b->usb->camera, y, ys, uv, uvs, width, height, mirrored);
+        hv_machine_wake(hv_vm_machine());
+    }
+    pthread_rwlock_unlock(&api_lock);
+}
 
 #if TARGET_OS_IPHONE
 size_t henge_available_memory(void) { return os_proc_available_memory(); }

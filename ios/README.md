@@ -21,6 +21,31 @@ the packager as an environment variable (`HENGE_ENTITLEMENTS=... ios/scripts/pac
 - **Memory**: `increased-memory-limit` is recommended, not required. Once a
   debugger has attached, guest RAM is kept out of the app's memory limit, and if
   iOS refuses that it comes from a file on free storage instead.
+- **Microphone and camera**: on iPhone and iPad, open the running Mac's `i`
+  menu. The Camera section follows the clipboard and folder setup. It offers Off,
+  Front Camera and Back Camera; switching leaves the guest's USB device and
+  format unchanged. The Microphone section has its own sharing switch. Both default off,
+  request iOS permission when enabled, and capture only while the guest uses
+  them and the session is in the foreground. The guest needs no media helper:
+  audio uses input stream 1 of virtio-snd (48 kHz mono, with PCM conversion),
+  and video uses a UVC 1.1 bulk camera (640x480 YUY2, or 1280x720 and
+  1920x1080 MJPEG, each at 15/30 fps, default 30 fps for Photo Booth
+  compatibility). The Resolution picker lists the selected camera's supported
+  sizes; changing it reconnects only the USB camera. Host capture follows the guest's
+  negotiated frame rate. Off supplies
+  silence/black and discards buffered host samples. Sharing the camera moves
+  volume-button interception onto the existing volume-change fallback, avoiding
+  two capture sessions on the same camera.
+  Instant resume preserves the guest's input periods and camera format, while
+  discarding host samples and images. On return to the foreground, this session's
+  switches authorize capture again; a saved Mac never restores host permission.
+  **Flip horizontally** changes live frames after gravity rotation, for front or
+  back cameras at every resolution, without reconnecting. It is remembered on
+  this device and affects all guest apps sharing Henge Camera. Photo Booth
+  performs its own preview mirroring, so this switch can reverse that preview;
+  it does not change Photo Booth's separate saved-photo flip preference.
+  **Tested**: microphone and camera sharing work normally on iPhone Duo and on
+  iPad Pro M4 running iPadOS 27.0.1.
 - **Machines** are installed on the iPhone from Apple's restore image
   (`Installer.swift`, [docs/architecture.md](../docs/architecture.md)). A machine
   can also be exported from the app, or made on a Mac with

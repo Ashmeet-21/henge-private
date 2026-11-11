@@ -4,17 +4,18 @@
 #include <pthread.h>
 
 #include "pcie.h"
+#include "usb_camera.h"
 
 /* An xHCI USB host controller (xHCI 1.0, one interrupter, 32-byte contexts,
-   INTx) with two USB HID devices: a boot keyboard on port 1 and a Magic
-   Trackpad 2 on port 2: what Virtualization.framework gives a macOS guest as
+   INTx), a boot keyboard on port 1, a Magic Trackpad 2 on port 2, and a
+   UVC bulk camera on port 3: what Virtualization.framework gives a macOS guest as
    its "Virtual USB Keyboard", plus Apple's multitouch pad, so the guest's
    own gesture engine sees a real trackpad. Changes come from the host UI on
    any thread (hv_xhci_key, hv_xhci_touch); the CPU thread delivers them
    (hv_xhci_poll). */
 #define HV_XHCI_SLOTS 8
-#define HV_XHCI_PORTS 2
-#define HV_XHCI_DEVICES 2
+#define HV_XHCI_PORTS 3
+#define HV_XHCI_DEVICES 3
 #define HV_XHCI_INTRS 4
 #define HV_XHCI_EPS 32 /* device context index 1..31 */
 #define HV_XHCI_REPORTS 256
@@ -52,11 +53,18 @@ typedef struct HvXhci {
     /* device slots: -1 until the device on the slot's port is addressed */
     int slot_used[HV_XHCI_SLOTS + 1];
     struct HvXhciSlot {
-        int dev;         /* 0 keyboard, 1 trackpad, -1 none */
+        int dev;         /* 0 keyboard, 1 trackpad, 2 UVC camera, -1 none */
+        uint64_t camera_generation;
         int configured;
         HvXhciRing ep[HV_XHCI_EPS];
         int ep_running[HV_XHCI_EPS];
+        uint8_t setup[8], control_data[512];
+        uint32_t control_len, control_offset;
+        int control_stalled;
     } slots[HV_XHCI_SLOTS + 1];
+    HvUsbCamera camera;
+    uint64_t camera_reconnect_ns; /* CPU-owned: resolution change reconnects port 3 */
+    uint64_t camera_generation;
     /* keyboard reports waiting for an IN transfer (8 bytes each) */
     pthread_mutex_t mu;
     uint8_t reports[HV_XHCI_REPORTS][8];
@@ -86,6 +94,7 @@ typedef struct HvXhci {
 } HvXhci;
 
 HvXhci *hv_xhci_create(HvMachine *m, HvPcie *bus);
+void hv_xhci_destroy(HvXhci *x);
 /* Any thread: a key went down or up (HID usage page 7 usage, e.g. 4 = A; 0xe0-0xe7 are modifiers). */
 void hv_xhci_key(HvXhci *x, uint8_t usage, int down);
 /* The same, by Linux input key code (what the host UI produces). */
@@ -104,5 +113,7 @@ void hv_xhci_touch_frame(HvXhci *x, uint32_t ts_ms);
 void hv_xhci_touch_button(HvXhci *x, int down);
 /* CPU thread: hand waiting reports to the guest. */
 void hv_xhci_poll(HvXhci *x);
+/* CPU stopped: rebase host deadlines and discard pre-pause camera images. */
+void hv_xhci_resume(HvXhci *x);
 
 #endif
