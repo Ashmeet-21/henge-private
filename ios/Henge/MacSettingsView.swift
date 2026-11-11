@@ -52,34 +52,14 @@ struct MacSettingsView: View {
                 .padding(.vertical, 10)
                 .deskCard()
 
-                if Device.fittingScreen.height != 1080 {
+                if Device.isPad {
+                    /* Henge fork: the screen's size now comes from the Display profile below (upstream #87); the old
+                       Retina / Performance / Fit / 16:9 sizes were no longer used at start. Retina still is: it gives
+                       macOS the panel's real size in mm, so it draws at 2x. */
                     DeskHeading("Screen")
                     VStack(alignment: .leading, spacing: 12) {
-                        Picker("Screen", selection: Binding(get: {
-                            if mac.isRetina { return "retina" }
-                            if mac.screen.width == Device.performanceScreen.width,
-                               mac.screen.height == Device.performanceScreen.height { return "performance" }
-                            if mac.screen.width == 1920, mac.screen.height == 1080 { return "wide" }
-                            return "fit"
-                        }, set: { choice in
-                            mac.retina = choice == "retina"
-                            switch choice {
-                            case "retina": break
-                            case "performance": (mac.screenWidth, mac.screenHeight) = Device.performanceScreen
-                            case "wide": (mac.screenWidth, mac.screenHeight) = (1920, 1080)
-                            default: (mac.screenWidth, mac.screenHeight) = Device.fittingScreen
-                            }
-                            save()
-                        })) {
-                            if Device.isPad {
-                                Text("Retina").tag("retina")
-                                Text("Performance").tag("performance")
-                            }
-                            Text("Fit this \(Device.name)").tag("fit")
-                            Text("16:9").tag("wide")
-                        }
-                        .pickerStyle(.segmented)
-                        Text("\(mac.screen.width) × \(mac.screen.height). \(Device.isPad ? "Performance renders about 30% fewer pixels. " : "")Changes apply the next time this Mac starts.")
+                        Toggle("Retina", isOn: Binding(get: { mac.isRetina }, set: { mac.retina = $0; save() }))
+                        Text("macOS draws at 2× for sharp text, as on a Retina Mac (everything looks half the size in pixels). Changes apply the next time this Mac starts.")
                             .font(.system(size: 13)).foregroundStyle(Desk.dim)
                     }
                     .padding(17)
@@ -101,7 +81,7 @@ struct MacSettingsView: View {
                         Text("Split-compact").tag(DisplayProfile.splitCompact)
                     }
                     .pickerStyle(.segmented)
-                    Text("Changes apply the next time this Mac starts. Perf renders the Mac at 0.75× into the same full-size screen, so it does less work per frame. Split-compact gives the portrait screen the top 42% and leaves more room below it.")
+                    Text("Changes apply the next time this Mac starts. Perf renders the Mac at 0.75× into the same full-size screen, so it does less work per frame and runs cooler\(Device.hasLittleMemory ? " (the default on this \(Device.name))" : ""). Split-compact gives the portrait screen the top 42% and leaves more room below it.")
                         .font(.system(size: 13)).foregroundStyle(Desk.dim)
                 }
                 .padding(17)
