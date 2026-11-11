@@ -22,23 +22,15 @@
 #include <string.h>
 #include <sys/utsname.h>
 
-/* 1080p shrunk onto a phone would make a normal pointer a few dots across; an iPad's screen needs less. */
-static int cursor_scale(void) {
-#if TARGET_OS_IPHONE
-    NSInteger saved = [[NSUserDefaults standardUserDefaults] integerForKey:@"henge.cursor.scale"];
-    if (saved >= 1 && saved <= 3) return (int)saved;
-    static int defaultScale;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        struct utsname u;
-        uname(&u);
-        defaultScale = strncmp(u.machine, "iPad", 4) ? 3 : 1;
-    });
-    return defaultScale;
-#else
-    return 1;
-#endif
-}
+/* How big the pointer is drawn, as a multiple of the glyph macOS sends, worked out by
+   -cursorScale below: (guest pixels per point of the pane it is drawn on) / (the display's
+   native scale). The glyph is drawn into a framebuffer of guest pixels that the layer then
+   maps onto pane points at the display's native scale, so this multiple puts the pointer on
+   the panel at exactly its glyph size in device pixels: its natural point size at any guest
+   size, and exactly 1 (a pixel-for-pixel copy, no upscale to smear) when the guest framebuffer
+   is the display's native pixel size. The old table (3 on iPhone, 2 on iPad) compensated for
+   a 1080p guest shrunk onto a phone; at a native-sized guest it only made the pointer huge
+   and, through the software path's nearest sampling, pixelated. */
 
 #include <mach/mach.h>
 #include <stdatomic.h>
@@ -216,6 +208,7 @@ static NSCountedSet<NSNumber *> *wb_unmapping; /* mapping ids unmapped by the gu
     uint32_t cursor_w, cursor_h, cursor_stride;
     int cursor_hot_x, cursor_hot_y;
     BOOL cursor_shown;
+    float cursor_scale_live; /* the presenter's last -cursorScale, for the software path below */
     int drawn_x, drawn_y, drawn_w, drawn_h; /* where it is on the frame now */
     double last_capture;
     /* A frame that came too soon after the last: shown shortly, for it may be the last for a long while. */
@@ -253,6 +246,7 @@ static NSCountedSet<NSNumber *> *wb_unmapping; /* mapping ids unmapped by the gu
 - (void)complain:(NSString *)what;
 - (HvObject *)object:(uint32_t)ref task:(uint32_t)task;
 - (void)drawCursor;
+- (float)cursorScale;
 - (BOOL)hasDisplayLayer;
 - (void)kickPresenter:(BOOL)fresh;
 - (void)present:(uint64_t)mapping;
@@ -2746,6 +2740,24 @@ static const uint8_t *half_to_byte(void) {
     return attached;
 }
 
+/* The pointer's size multiple (see the note where cursor_scale used to be at the top of
+   this file): guest pixels per point of the layer's bounds, over the layer's contents
+   scale (the display's native scale, which the app sets on the layer). 1 when the guest
+   is the display's native size. Without a layer there is nothing to measure: 1. */
+- (float)cursorScale {
+#if TARGET_OS_IPHONE
+    if (layer && screen_w) {
+        CGFloat points = layer.bounds.size.width;
+        CGFloat native = layer.contentsScale;
+        if (points > 0 && native > 0) {
+            double scale = ((double)screen_w / (double)points) / (double)native;
+            if (scale > 0.05 && scale < 20.0) return (float)scale;
+        }
+    }
+#endif
+    return 1.0f;
+}
+
 /* Puts back what the pointer covered, and draws it where the shared page says it is now. */
 - (void)drawCursor {
     if ([self hasDisplayLayer]) {
@@ -2765,10 +2777,11 @@ static const uint8_t *half_to_byte(void) {
         last = where;
     }
     if (where == 0xffffffff) return;
-    /* Bigger than the guest draws it. The hot spot stays where it points. */
-    const int scale = cursor_scale();
-    int x = (int)(where & 0xffff) - cursor_hot_x * scale, y = (int)(where >> 16) - cursor_hot_y * scale;
-    int cw = (int)cursor_w * scale, ch = (int)cursor_h * scale;
+    /* At the size -cursorScale says. The hot spot stays where it points. The presenter
+       keeps cursor_scale_live current; before it has run, -cursorScale itself answers. */
+    const float scale = cursor_scale_live > 0 ? cursor_scale_live : [self cursorScale];
+    int x = (int)(where & 0xffff) - (int)lround(cursor_hot_x * scale), y = (int)(where >> 16) - (int)lround(cursor_hot_y * scale);
+    int cw = (int)lround(cursor_w * scale), ch = (int)lround(cursor_h * scale);
     int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
     int x1 = x + cw > (int)w ? (int)w : x + cw, y1 = y + ch > (int)h ? (int)h : y + ch;
     if (x1 <= x0 || y1 <= y0) return;
@@ -2851,9 +2864,11 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
     return YES;
 }
 
-/* The screen, then the pointer over it, into whatever target the encoder has (W x H: the screen's size). */
+/* The screen, then the pointer over it, into whatever target the encoder has (W x H: the screen's size), the
+   pointer at `scale` times the glyph macOS sends (-cursorScale on the iPad's own screen, 1 for remote desktop,
+   whose viewer shows the guest's pixels as they are). */
 - (void)drawScreen:(id<MTLRenderCommandEncoder>)e tex:(id<MTLTexture>)tex half:(BOOL)half cursor:(id<MTLTexture>)ctex shown:(BOOL)shown
-                 w:(uint32_t)W h:(uint32_t)H cw:(uint32_t)cw0 ch:(uint32_t)ch0 hx:(int)hx hy:(int)hy {
+                 w:(uint32_t)W h:(uint32_t)H cw:(uint32_t)cw0 ch:(uint32_t)ch0 hx:(int)hx hy:(int)hy scale:(float)scale {
     [e setRenderPipelineState:half ? linear_pipe : screen_pipe];
     float rect[4] = {-1, -1, 2, 2};
     [e setVertexBytes:rect length:sizeof rect atIndex:0];
@@ -2867,7 +2882,6 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
     const uint8_t *page = hv_pvg_lite_display_page(lite);
     uint32_t where = page ? __atomic_load_n((const uint32_t *)(page + 0xe00), __ATOMIC_ACQUIRE) : 0xffffffff;
     if (ctex && where != 0xffffffff && (shown || page[0xe04])) {
-        const float scale = cursor_scale();
         float x = (float)(where & 0xffff) - hx * scale, y = (float)(where >> 16) - hy * scale;
         float cw = cw0 * scale, ch = ch0 * scale;
         float r[4] = {x / W * 2 - 1, 1 - (y + ch) / H * 2, cw / W * 2, ch / H * 2};
@@ -2904,7 +2918,7 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
     pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:pass];
-    [self drawScreen:e tex:tex half:half cursor:ctex shown:shown w:W h:H cw:cw0 ch:ch0 hx:hx hy:hy];
+    [self drawScreen:e tex:tex half:half cursor:ctex shown:shown w:W h:H cw:cw0 ch:ch0 hx:hx hy:hy scale:1];
     [e endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
@@ -3074,7 +3088,8 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
         pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:pass];
-        [self drawScreen:e tex:tex half:half cursor:ctex shown:shown w:W h:H cw:cw0 ch:ch0 hx:hx hy:hy];
+        cursor_scale_live = [self cursorScale];
+        [self drawScreen:e tex:tex half:half cursor:ctex shown:shown w:W h:H cw:cw0 ch:ch0 hx:hx hy:hy scale:cursor_scale_live];
         [e endEncoding];
         if (cp.on) cp_capture_post(self, drawable.texture, W, H, cb);
 #if !TARGET_OS_IPHONE
