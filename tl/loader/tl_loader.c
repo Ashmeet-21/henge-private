@@ -1956,18 +1956,36 @@ static int rt_posix_spawn_file_actions_destroy(posix_spawn_file_actions_t *fa) {
 /* System tools a program runs for a line of facts, answered here (iOS runs no tools): sw_vers. The output goes to
    where the program pointed the tool's standard output; the "process" has ended by the time it is returned. */
 static int builtin_tool(pid_t *pid, const char *path, const void *fa, int parent_ns, char *const argv[], char *const envp[]) {
-    if (!path || strcmp(path, "/usr/bin/sw_vers")) return -1;
-    char version[64] = "15.0", build[64] = "24A335";
+    if (!path) return -1;
+    char version[64] = "15.0", build[64] = "24A335", release[64] = "24.0.0";
     size_t n = sizeof version;
     sysctlbyname("kern.osproductversion", version, &n, NULL, 0);
     n = sizeof build;
     sysctlbyname("kern.osversion", build, &n, NULL, 0);
+    n = sizeof release;
+    sysctlbyname("kern.osrelease", release, &n, NULL, 0);
     char out[256];
-    const char *arg = argv && argv[0] && argv[1] ? argv[1] : "";
-    if (!strcmp(arg, "-productVersion") || !strcmp(arg, "--productVersion")) snprintf(out, sizeof out, "%s\n", version);
-    else if (!strcmp(arg, "-buildVersion") || !strcmp(arg, "--buildVersion")) snprintf(out, sizeof out, "%s\n", build);
-    else if (!strcmp(arg, "-productName") || !strcmp(arg, "--productName")) snprintf(out, sizeof out, "macOS\n");
-    else snprintf(out, sizeof out, "ProductName:\t\tmacOS\nProductVersion:\t\t%s\nBuildVersion:\t\t%s\n", version, build);
+    /* A shell running one of these tools ("sh -c 'uname -m'") is answered as the tool. */
+    char cmd[128] = "";
+    const char *tool = path, *arg = argv && argv[0] && argv[1] ? argv[1] : "";
+    if ((!strcmp(path, "/bin/sh") || !strcmp(path, "/bin/bash") || !strcmp(path, "/bin/zsh")) && !strcmp(arg, "-c") && argv[2]) {
+        snprintf(cmd, sizeof cmd, "%s", argv[2]);
+        char *sp = strchr(cmd, ' ');
+        arg = sp ? (*sp = 0, sp + 1) : "";
+        tool = cmd;
+    }
+    if (!strcmp(tool, "/usr/bin/sw_vers") || !strcmp(tool, "sw_vers")) {
+        if (!strcmp(arg, "-productVersion") || !strcmp(arg, "--productVersion")) snprintf(out, sizeof out, "%s\n", version);
+        else if (!strcmp(arg, "-buildVersion") || !strcmp(arg, "--buildVersion")) snprintf(out, sizeof out, "%s\n", build);
+        else if (!strcmp(arg, "-productName") || !strcmp(arg, "--productName")) snprintf(out, sizeof out, "macOS\n");
+        else snprintf(out, sizeof out, "ProductName:\t\tmacOS\nProductVersion:\t\t%s\nBuildVersion:\t\t%s\n", version, build);
+    } else if (!strcmp(tool, "/usr/bin/uname") || !strcmp(tool, "uname")) {
+        if (!strcmp(arg, "-m") || !strcmp(arg, "-p")) snprintf(out, sizeof out, "%s\n", !strcmp(arg, "-m") ? "arm64" : "arm");
+        else if (!strcmp(arg, "-r")) snprintf(out, sizeof out, "%s\n", release);
+        else if (!*arg || !strcmp(arg, "-s")) snprintf(out, sizeof out, "Darwin\n");
+        else return -1;
+    } else
+        return -1;
     pthread_mutex_lock(&g_spawn_fds_lock);
     TlSpawnFds *f = fa ? spawn_fds(*(const void *const *)fa, 0) : NULL;
     int fd = f && f->to[1] >= 0 ? f->to[1] : -1;

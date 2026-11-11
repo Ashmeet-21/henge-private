@@ -51,10 +51,13 @@ static Class own_class(const char *name) {
    has other classes called NSColor and NSFont. */
 /* They return void *, not Class: ARC would retain and autorelease a returned Class, and a root class that answers no
    messages (Chromium's CrZombie) takes that retain for a message to a freed object and stops the program. */
+Class tl_missing_class_by_name(const char *name); /* tl/loader/tl_stubs.m */
 static void *hk_objc_getClass(const char *name) {
     Class own = own_class(name);
     if (own && getenv("HK_LOG_BYNAME")) hk_log("objc_getClass(%s): Henge's", name);
-    return (__bridge void *)(own ?: objc_getClass(name));
+    Class c = own ?: objc_getClass(name);
+    if (!c && (c = tl_missing_class_by_name(name))) hk_log("objc_getClass(%s): a stand-in (not on this system)", name);
+    return (__bridge void *)c;
 }
 static void *hk_objc_lookUpClass(const char *name) { return (__bridge void *)(own_class(name) ?: objc_lookUpClass(name)); }
 static void *hk_objc_getRequiredClass(const char *name) {
