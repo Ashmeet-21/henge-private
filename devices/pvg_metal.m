@@ -2793,7 +2793,11 @@ static const uint8_t *half_to_byte(void) {
     /* At the size -cursorScale says. The hot spot stays where it points. The presenter
        keeps cursor_scale_live current; before it has run, -cursorScale itself answers. */
     const float scale = cursor_scale_live > 0 ? cursor_scale_live : [self cursorScale];
-    int x = (int)(where & 0xffff) - (int)lround(cursor_hot_x * scale), y = (int)(where >> 16) - (int)lround(cursor_hot_y * scale);
+    /* The pointer's place is in the display mode's pixels; a scaled resolution's frame is smaller than the mode (#109). */
+    uint32_t mw = w, mh = h;
+    hv_pvg_lite_display_size(&mw, &mh);
+    if (!mw || !mh) mw = w, mh = h;
+    int x = (int)((uint64_t)(where & 0xffff) * w / mw) - (int)lround(cursor_hot_x * scale), y = (int)((uint64_t)(where >> 16) * h / mh) - (int)lround(cursor_hot_y * scale);
     int cw = (int)lround(cursor_w * scale), ch = (int)lround(cursor_h * scale);
     int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
     int x1 = x + cw > (int)w ? (int)w : x + cw, y1 = y + ch > (int)h ? (int)h : y + ch;
@@ -2897,7 +2901,12 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
     if (ctex && where != 0xffffffff && (shown || page[0xe04])) {
         float x = (float)(where & 0xffff) - hx * scale, y = (float)(where >> 16) - hy * scale;
         float cw = cw0 * scale, ch = ch0 * scale;
-        float r[4] = {x / W * 2 - 1, 1 - (y + ch) / H * 2, cw / W * 2, ch / H * 2};
+        /* The pointer's place is in the display mode's pixels, not the surface's (#109): with a scaled resolution
+           chosen in macOS the surface is smaller than the mode, and the pointer was drawn right of and below where it clicks. */
+        uint32_t MW = W, MH = H;
+        hv_pvg_lite_display_size(&MW, &MH);
+        if (!MW || !MH) MW = W, MH = H;
+        float r[4] = {x / MW * 2 - 1, 1 - (y + ch) / MH * 2, cw / MW * 2, ch / MH * 2};
         [e setRenderPipelineState:cursor_pipe];
         [e setVertexBytes:r length:sizeof r atIndex:0];
         [e setFragmentTexture:ctex atIndex:0];
