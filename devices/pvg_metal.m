@@ -1406,9 +1406,16 @@ static BOOL has_guest_pages(HvObject *o) {
    now goes through here and is logged with its mechanism, so an instrumented
    run can count the flips and check that every NO->YES flip names a real
    upload or the guest's own invalidate word, never an assumption. */
+/* HV_PVG_VALID_LOG=1 logs every flip (several per frame: debugging only). */
+static int valid_log(void) {
+    static int on = -1;
+    if (on < 0) { const char *v = getenv("HV_PVG_VALID_LOG"); on = v && v[0] == '1'; }
+    return on;
+}
+
 static void set_host_valid(HvObject *o, BOOL valid, const char *mech, uint32_t ref) {
     if (o->host_valid == valid) return;
-    fprintf(stderr, "hengevm: pvg-metal: v1: host_valid %d->%d ref %u: %s\n", (int)o->host_valid, (int)valid, ref, mech);
+    if (valid_log()) fprintf(stderr, "hengevm: pvg-metal: v1: host_valid %d->%d ref %u: %s\n", (int)o->host_valid, (int)valid, ref, mech);
     o->host_valid = valid;
 }
 
@@ -1476,7 +1483,7 @@ static void set_host_valid(HvObject *o, BOOL valid, const char *mech, uint32_t r
         /* The guest copy is current only if the download
            was actually enqueued; on a NO it stays stale, honestly. */
         if ([self page:o toGuest:YES task:task blit:&blit commandBuffer:cb])
-            o->guest_stale = NO;
+            o->guest_stale = NO, o->upload_hash_set = NO; /* the guard re-baselines: not a guest write */
     }
     [blit endEncoding];
     if (cb) {
@@ -2522,7 +2529,7 @@ static NSData *insp_slice(id<MTLBuffer> b, NSUInteger from, NSUInteger length) {
                     uint64_t stride = region / 512, hh = 0xcbf29ce484222325ull;
                     for (uint64_t si = 0; si < 512; si++) { uint64_t v; memcpy(&v, src + si * stride, 8); hh = (hh ^ v) * 0x100000001b3ull; }
                     if (o->upload_hash_set && hh != o->upload_hash) {
-                        fprintf(stderr, "hengevm: pvg-metal: v1: source of ref %u changed: hash %llx -> %llx, host_valid %d\n", res[i * 2], (unsigned long long)o->upload_hash, (unsigned long long)hh, (int)o->host_valid);
+                        if (valid_log()) fprintf(stderr, "hengevm: pvg-metal: v1: source of ref %u changed: hash %llx -> %llx, host_valid %d\n", res[i * 2], (unsigned long long)o->upload_hash, (unsigned long long)hh, (int)o->host_valid);
                         set_host_valid(o, NO, "content-hash guard: guest source changed", res[i * 2]);
                     }
                     o->upload_hash = hh, o->upload_hash_set = YES;
@@ -2542,19 +2549,13 @@ static NSData *insp_slice(id<MTLBuffer> b, NSUInteger from, NSUInteger length) {
             set_host_valid(o, NO, "exec flag 1: guest wrote it", res[i * 2]);
         }
         if (o->guest_backed && !o->host_valid) {
-            /* host_valid is set ONLY on a true page: return. The
-               old code set it unconditionally, including when guest_stale
-               skipped the upload entirely (a GPU-write claim on this object,
-               or on a child of it via the parent-chain marking below, is not
-               an upload of this object's guest bytes) and when page: copied
-               nothing or skipped an oversized mip. A skipped or incomplete
-               upload now leaves the object invalid, logged once per deferral
-               until the upload lands. */
+            /* From PR #92: an upload sets host_valid only when page: really enqueued a complete copy (every page
+               and mip present); otherwise it stays NO and is tried again on the next exec, logged once. */
             if (o->guest_stale) {
-                if (!o->upload_deferred) {
-                    o->upload_deferred = YES;
-                    fprintf(stderr, "hengevm: pvg-metal: v1: upload deferred for ref %u (%llu KB): guest_stale, no upload run; host_valid left NO\n", res[i * 2], (unsigned long long)(o->length >> 10));
-                }
+                /* Henge fork: upstream PR #92 leaves host_valid NO here, but guest_stale means the GPU drew into it
+                   (or into a texture in it), so the host copy IS the newest; left NO, "the guest asks to see" skips
+                   it for good and the GPU's drawing never reaches the guest. Old behaviour kept. */
+                set_host_valid(o, YES, "guest_stale: host holds what the GPU drew", res[i * 2]);
             } else if ([self page:o toGuest:NO task:task blit:&blit commandBuffer:cb]) {
                 if (o->upload_deferred) {
                     o->upload_deferred = NO;
@@ -2660,7 +2661,7 @@ static NSData *insp_slice(id<MTLBuffer> b, NSUInteger from, NSUInteger length) {
             if (!o || !o->guest_backed) continue;
             /* guest_stale clears only on a real download. */
             if ([self page:o toGuest:YES task:task blit:&back commandBuffer:cb])
-                o->guest_stale = NO;
+                o->guest_stale = NO, o->upload_hash_set = NO; /* the guard re-baselines: not a guest write */
         }
         [back endEncoding];
     }
