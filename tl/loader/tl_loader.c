@@ -1397,7 +1397,10 @@ static pid_t rt_fork(void) {
 
 /* TL_MAX_MAP_GB=N (a test switch for Mac runs): the program's single mappings and VM allocations larger than N GB
    fail, to find how little address space it needs (iOS gives much less than a Mac). */
+#include <TargetConditionals.h>
+#if TARGET_OS_OSX
 #include <mach/mach_vm.h>
+#endif
 static uint64_t max_map_bytes(void) {
     static uint64_t v = (uint64_t)-1;
     if (v == (uint64_t)-1) {
@@ -1420,6 +1423,7 @@ static void *rt_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t 
     }
     return mmap(addr, len, prot, flags, fd, off);
 }
+#if TARGET_OS_OSX
 static kern_return_t rt_mach_vm_allocate(vm_map_t map, mach_vm_address_t *addr, mach_vm_size_t size, int flags) {
     uint64_t max = max_map_bytes();
     if (max && size > max) {
@@ -1438,6 +1442,7 @@ static kern_return_t rt_mach_vm_map(vm_map_t map, mach_vm_address_t *addr, mach_
     }
     return mach_vm_map(map, addr, size, mask, flags, obj, off, copy, cur, max_prot, inh);
 }
+#endif
 
 static int rt_mprotect(void *addr, size_t len, int prot) {
     if (g_host && g_host->ios_kernel_rules && (prot & PROT_EXEC)) {
@@ -1459,8 +1464,10 @@ void *tl_runtime_lookup(const char *sym) {
         {"_dlopen", (void *)rt_dlopen},
         {"_mmap", (void *)rt_mmap},
         {"_mprotect", (void *)rt_mprotect},
+#if TARGET_OS_OSX
         {"_mach_vm_allocate", (void *)rt_mach_vm_allocate},
         {"_mach_vm_map", (void *)rt_mach_vm_map},
+#endif
         {"_dlclose", (void *)rt_dlclose},
         {"_dlsym", (void *)rt_dlsym},
         {"_dladdr", (void *)rt_dladdr},
