@@ -581,6 +581,18 @@ void hv_pvg_lite_command(HvPvgLite *p, const uint32_t *cmd, uint32_t len) {
     else if (op == 8 && n >= 16) display_swap(p, (uint64_t)args[3] << 32 | args[2], args);
 }
 
+/* The Metal side, made the first time the guest's GPU work needs it. */
+static void ensure_metal(HvPvgLite *p) {
+    os_unfair_lock_lock(&p->layer_lock);
+    if (!p->metal_tried) {
+        p->metal_tried = 1;
+        HvPvgMetal *metal = getenv("HV_PVG_NO_METAL") ? NULL : hv_pvg_metal_create(p);
+        if (metal && p->layer_set) hv_pvg_metal_set_layer(metal, (void *)p->layer);
+        atomic_store_explicit(&p->metal, metal, memory_order_release);
+    }
+    os_unfair_lock_unlock(&p->layer_lock);
+}
+
 static void do_channel(HvPvgLite *p, uint32_t ch) {
     uint64_t root = (uint64_t)reg(p, 0x101c) << 14, buf = (uint64_t)reg(p, 0x1030) << 14;
     if (!root || !buf || !ch) return;
@@ -615,14 +627,7 @@ static void do_channel(HvPvgLite *p, uint32_t ch) {
                 fprintf(stderr, "trace: dev ch %u op %x len %u stamp %x sub %x args %x %x %x %x %x %x %x %x\n", ch, hdr[0], hdr[1], hdr[2], p->submitted[ch], w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
             }
         }
-        os_unfair_lock_lock(&p->layer_lock);
-        if (!p->metal_tried) {
-            p->metal_tried = 1;
-            HvPvgMetal *metal = getenv("HV_PVG_NO_METAL") ? NULL : hv_pvg_metal_create(p);
-            if (metal && p->layer_set) hv_pvg_metal_set_layer(metal, (void *)p->layer);
-            atomic_store_explicit(&p->metal, metal, memory_order_release);
-        }
-        os_unfair_lock_unlock(&p->layer_lock);
+        ensure_metal(p);
         int blocked = 0;
         for (uint32_t k = 0; p->metal && k < hdr[0] >> 16 && !blocked; k++) {
             /* {channel, stamp}, as many as bits 31..16 say: this waits for that channel's
@@ -784,4 +789,71 @@ void hv_pvg_lite_destroy(HvPvgLite *p) {
     hv_pvg_metal_destroy(atomic_exchange(&p->metal, NULL));
     if (p->layer) CFRelease(p->layer);
     free(p);
+}
+
+/* Instant resume. What the device keeps outside guest memory; its Metal side is not in it: that is made again from
+   guest memory as the guest uses it, once hv_pvg_lite_quiesce has put back what only the GPU held. */
+typedef struct PvgState {
+    uint32_t regs[0x1000 / 4];
+    uint64_t io_regs[0x40 / 8];
+    uint32_t root_rp, status, chan_pending, draining, stamps_pending;
+    int root_pending, iosfc_pending, old_driver;
+    uint64_t display_pa, swaps;
+    uint32_t submitted[MAX_CHANNELS], barrier_waits[MAX_CHANNELS];
+    uint32_t task_root[512];
+    uint64_t task_objects[512], task_placement[512];
+} PvgState;
+
+size_t hv_pvg_lite_state(HvPvgLite *p, void *out, size_t cap) {
+    if (!out || cap < sizeof(PvgState)) return sizeof(PvgState);
+    PvgState *s = out;
+    memset(s, 0, sizeof *s);
+    memcpy(s->regs, p->regs, sizeof s->regs);
+    memcpy(s->io_regs, p->io_regs, sizeof s->io_regs);
+    s->root_rp = p->root_rp, s->status = __atomic_load_n(&p->status, __ATOMIC_ACQUIRE), s->chan_pending = p->chan_pending;
+    s->draining = p->draining, s->stamps_pending = p->stamps_pending;
+    s->root_pending = p->root_pending, s->iosfc_pending = p->iosfc_pending, s->old_driver = p->old_driver;
+    s->display_pa = p->display_pa, s->swaps = p->swaps;
+    memcpy(s->submitted, p->submitted, sizeof s->submitted);
+    memcpy(s->barrier_waits, p->barrier_waits, sizeof s->barrier_waits);
+    memcpy(s->task_root, p->task_root, sizeof s->task_root);
+    memcpy(s->task_objects, p->task_objects, sizeof s->task_objects);
+    memcpy(s->task_placement, p->task_placement, sizeof s->task_placement);
+    return sizeof(PvgState);
+}
+
+int hv_pvg_lite_set_state(HvPvgLite *p, const void *in, size_t len) {
+    if (len != sizeof(PvgState)) return -1;
+    const PvgState *s = in;
+    memcpy(p->regs, s->regs, sizeof s->regs);
+    memcpy(p->io_regs, s->io_regs, sizeof s->io_regs);
+    p->root_rp = s->root_rp, p->status = s->status, p->chan_pending = s->chan_pending;
+    p->draining = s->draining, p->stamps_pending = s->stamps_pending;
+    p->root_pending = s->root_pending, p->iosfc_pending = s->iosfc_pending, p->old_driver = s->old_driver;
+    p->display_pa = s->display_pa, p->swaps = s->swaps;
+    memcpy(p->submitted, s->submitted, sizeof s->submitted);
+    memcpy(p->barrier_waits, s->barrier_waits, sizeof s->barrier_waits);
+    memcpy(p->task_root, s->task_root, sizeof s->task_root);
+    memcpy(p->task_objects, s->task_objects, sizeof s->task_objects);
+    memcpy(p->task_placement, s->task_placement, sizeof s->task_placement);
+    return 0;
+}
+
+/* CPUs stopped: the GPU's queued work done, and what only it holds copied into guest memory. */
+void hv_pvg_lite_quiesce(HvPvgLite *p) {
+    HvPvgMetal *metal = p ? atomic_load_explicit(&p->metal, memory_order_acquire) : NULL;
+    if (metal) hv_pvg_metal_quiesce(metal);
+}
+
+size_t hv_pvg_lite_display_state(HvPvgLite *p, void *out, size_t cap) {
+    HvPvgMetal *metal = p ? atomic_load_explicit(&p->metal, memory_order_acquire) : NULL;
+    return metal ? hv_pvg_metal_display_state(metal, out, cap) : 0;
+}
+
+/* After hv_pvg_lite_set_state: the screen and the pointer as they were, before the guest draws again. */
+void hv_pvg_lite_set_display_state(HvPvgLite *p, const void *in, size_t len) {
+    if (!p || !len) return;
+    ensure_metal(p);
+    HvPvgMetal *metal = atomic_load_explicit(&p->metal, memory_order_acquire);
+    if (metal) hv_pvg_metal_set_display_state(metal, in, len);
 }

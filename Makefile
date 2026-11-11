@@ -60,8 +60,8 @@ $(B)/henge-agent.gz: $(B)/henge-agent
 $(B)/share.o: host/share.c host/share.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(B)/hengevm: host/main.c $(ENGINE) $(DEV) $(B)/pvg_mac.o $(B)/net_slirp.o $(B)/dns_proxy.o $(B)/share.o $(B)/audio_mac.o $(B)/vm.o $(B)/usb_host.o $(B)/mac-restore/libhengerestore.a
-	$(CC) $(CFLAGS) host/main.c $(ENGINE) $(DEV) $(B)/pvg_mac.o $(B)/net_slirp.o $(B)/dns_proxy.o $(B)/share.o $(B)/audio_mac.o $(B)/vm.o $(B)/usb_host.o $(B)/mac-restore/libhengerestore.a -lz -framework Foundation -framework CFNetwork -framework Security -framework SystemConfiguration -framework IOKit $(SLIRP_LIBS) -framework AudioToolbox -framework ParavirtualizedGraphics -framework Metal -framework IOSurface \
+$(B)/hengevm: host/main.c $(ENGINE) $(DEV) $(B)/pvg_mac.o $(B)/net_slirp.o $(B)/dns_proxy.o $(B)/share.o $(B)/audio_mac.o $(B)/vm.o $(B)/snapshot.o $(B)/usb_host.o $(B)/mac-restore/libhengerestore.a
+	$(CC) $(CFLAGS) host/main.c $(ENGINE) $(DEV) $(B)/pvg_mac.o $(B)/net_slirp.o $(B)/dns_proxy.o $(B)/share.o $(B)/audio_mac.o $(B)/vm.o $(B)/snapshot.o $(B)/usb_host.o $(B)/mac-restore/libhengerestore.a -lz -lcompression -framework Foundation -framework CFNetwork -framework Security -framework SystemConfiguration -framework IOKit $(SLIRP_LIBS) -framework AudioToolbox -framework ParavirtualizedGraphics -framework Metal -framework IOSurface \
 	    -framework Foundation -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers -framework CoreFoundation \
 	    -framework AppKit -framework QuartzCore -o $@
 
@@ -93,8 +93,8 @@ $(B)/test_shutdown: tests/test_shutdown.c $(ENGINE)
 $(B)/test_dns_lifecycle: tests/test_dns_lifecycle.c $(B)/dns_proxy.o
 	$(CC) $(CFLAGS) $^ -o $@
 
-$(B)/test_vm_lifecycle: tests/test_vm_lifecycle.c ios/Henge/Native/henge-vm.c $(ENGINE) $(DEV) $(B)/vm.o $(B)/audio_mac.o $(B)/net_slirp.o $(B)/dns_proxy.o $(B)/share.o $(B)/usb_host.o
-	$(CC) $(CFLAGS) -Iios/Henge/Native $^ $(SLIRP_LIBS) $(METAL_LIBS) -framework AudioToolbox -o $@
+$(B)/test_vm_lifecycle: tests/test_vm_lifecycle.c ios/Henge/Native/henge-vm.c $(ENGINE) $(DEV) $(B)/vm.o $(B)/snapshot.o $(B)/audio_mac.o $(B)/net_slirp.o $(B)/dns_proxy.o $(B)/share.o $(B)/usb_host.o
+	$(CC) $(CFLAGS) -Iios/Henge/Native $^ $(SLIRP_LIBS) $(METAL_LIBS) -framework AudioToolbox -lcompression -o $@
 
 test-vm-lifecycle: $(B)/test_vm_lifecycle
 	$(B)/test_vm_lifecycle
@@ -132,7 +132,7 @@ IOS_CC = xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=17.0 -isy
 IOS_DEPS ?= $(if $(wildcard ios/deps/include/slirp/libslirp.h),$(CURDIR)/ios/deps,$(HOME)/Documents/Coding/Husk/build/ios-arm64/sysroot)
 IOS_CFLAGS = -std=c11 -Wall -Wextra -O2 -g -Icore -Ihost -Idevices -I$(IOS_DEPS)/include/slirp
 IB = build/ios
-IOS_SRC = $(wildcard core/*.c) host/prof_ios.c host/jit_region.c host/disk.c host/vm.c host/net_slirp.c host/dns_proxy.c host/share.c host/audio_mac.c host/hvsparse.c host/usb_host.c \
+IOS_SRC = $(wildcard core/*.c) host/prof_ios.c host/jit_region.c host/disk.c host/vm.c host/snapshot.c host/net_slirp.c host/dns_proxy.c host/share.c host/audio_mac.c host/hvsparse.c host/usb_host.c \
           $(filter-out devices/pvg_mac.m,$(wildcard devices/*.c))
 IOS_OBJ = $(patsubst %.c,$(IB)/%.o,$(IOS_SRC)) $(IB)/host/enter.o $(IB)/devices/pvg_metal.o
 

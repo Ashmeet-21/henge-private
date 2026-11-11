@@ -75,6 +75,7 @@ targets:
           - "-lpcre2-8"
           - "-liconv"
           - "-lresolv"
+          - "-lcompression"
           # On-device pairing for Built-in StikJIT (from Husk's src/rppairing-ios).
           - "-lhusk_rppairing"
           - "-framework"

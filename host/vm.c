@@ -11,6 +11,7 @@
 #include <signal.h>
 #include <sys/ucontext.h>
 #include <stdio.h>
+#include <sys/stat.h>
 #include <time.h>
 
 #include "usb_host.h"
@@ -44,7 +45,13 @@ static pthread_t secondary_threads[HV_MAX_CPUS], kicker;
 static int secondary_started[HV_MAX_CPUS], kicker_started;
 static _Atomic int kicker_stopped;
 static pthread_t primary_thread;
-static int primary_started;
+static int primary_started, cpu0_ours, sound_on;
+/* Instant resume: a pause stops the CPUs and quiets the devices without taking the machine apart. */
+static pthread_mutex_t pause_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t pause_cv = PTHREAD_COND_INITIALIZER;
+static int pause_state; /* 0 running, 1 pausing, 2 paused, 3 it stopped instead */
+static int pause_clean; /* paused with nothing in flight: it can be saved */
+static int run_ended;   /* CPU 0's thread is on its way out for good: nothing will finish a pause */
 
 HvMachine *hv_vm_machine(void) { return &m; }
 HvVmapple *hv_vm_board(void) { return &board; }
@@ -275,7 +282,9 @@ int hv_vm_create(const HvVmConfig *c, char *err, size_t errlen) {
         if (hv_net_attach(&m, board.net) != 0) fprintf(stderr, "hengevm: user-mode network unavailable\n");
         else net_on = 1;
     }
-    if (board.snd && !c->no_sound) hv_audio_attach(board.snd);
+    sound_on = board.snd && !c->no_sound;
+    if (sound_on) hv_audio_attach(board.snd);
+    pause_state = 0;
     board.poll = board_poll;
     if (board.vusb && getenv("HV_VUSB_PROBE")) hv_usb_probe_start(board.vusb);
     // The setter and publication share this lock: an older preboot target can
@@ -381,6 +390,15 @@ static void *secondary_thread(void *arg) {
     return NULL;
 }
 
+int hv_vm_disk_identity(char *out, size_t n) {
+    struct stat a, b;
+    if (disk.fd < 0 || aux.fd < 0 || fstat(disk.fd, &a) != 0 || fstat(aux.fd, &b) != 0) return -1;
+    snprintf(out, n, "disk %llu %lld %ld.%09ld aux %llu %lld %ld.%09ld", (unsigned long long)a.st_ino, (long long)a.st_size,
+             (long)a.st_mtimespec.tv_sec, (long)a.st_mtimespec.tv_nsec, (unsigned long long)b.st_ino, (long long)b.st_size,
+             (long)b.st_mtimespec.tv_sec, (long)b.st_mtimespec.tv_nsec);
+    return 0;
+}
+
 void hv_vm_flush_disks(void) {
     hv_disk_flush(&disk);
     hv_disk_flush(&aux);
@@ -390,10 +408,103 @@ int hv_vm_run_cpu0(void) {
     return hv_run(&cpus[0]);
 }
 
+int hv_vm_paused(void);
+static void set_pause_state(int v) {
+    pthread_mutex_lock(&pause_mu);
+    pause_state = v;
+    pthread_cond_broadcast(&pause_cv);
+    pthread_mutex_unlock(&pause_mu);
+}
+
+/* Every CPU halted to be saved (a CPU stopping the machine itself at the same moment keeps its own reason). */
+static int all_saving(void) {
+    for (int i = 0; i < ncpus; i++)
+        if (atomic_load(&cpus[i].halted) != HV_HALT_SAVE) return 0;
+    return 1;
+}
+
+int hv_vm_finish_pause(void) {
+    atomic_store(&kicker_stopped, 1);
+    for (int i = 1; i < ncpus; i++)
+        if (secondary_started[i]) pthread_join(secondary_threads[i], NULL);
+    if (kicker_started) pthread_join(kicker, NULL);
+    kicker_started = 0;
+    memset(secondary_started, 0, sizeof secondary_started);
+    if (!all_saving()) return -1;
+    hv_virtio_blk_stop(board.root_blk);
+    hv_virtio_blk_stop(board.aux_blk);
+    if (sound_on) hv_audio_detach(); /* the host's player stops; the stream's state stays in the device */
+    hv_pvg_lite_quiesce(board.pvg);
+    hv_dev_lock(&m);
+    int idle = hv_virtio_blk_idle(board.root_blk) && hv_virtio_blk_idle(board.aux_blk);
+    hv_dev_unlock(&m);
+    if (!idle) fprintf(stderr, "hengevm: pause: disk requests still in flight; it cannot be saved like this\n");
+    pause_clean = idle;
+    hv_vm_flush_disks();
+    set_pause_state(2);
+    return 0;
+}
+
+int hv_vm_pause_clean(void) { return hv_vm_paused() && pause_clean; }
+
+int hv_vm_pause(void) {
+    pthread_mutex_lock(&pause_mu);
+    if (pause_state == 2) {
+        pthread_mutex_unlock(&pause_mu);
+        return 0;
+    }
+    if (run_ended) {
+        pthread_mutex_unlock(&pause_mu);
+        return -1;
+    }
+    pause_state = 1;
+    pthread_mutex_unlock(&pause_mu);
+    atomic_store(&input_stopping, 1);
+    hv_machine_halt(&m, HV_HALT_SAVE);
+    pthread_mutex_lock(&pause_mu);
+    while (pause_state == 1) pthread_cond_wait(&pause_cv, &pause_mu);
+    int r = pause_state == 2 ? 0 : -1;
+    pthread_mutex_unlock(&pause_mu);
+    return r;
+}
+
+int hv_vm_paused(void) {
+    pthread_mutex_lock(&pause_mu);
+    int r = pause_state == 2;
+    pthread_mutex_unlock(&pause_mu);
+    return r;
+}
+
+int hv_vm_continue(void) {
+    pthread_mutex_lock(&pause_mu);
+    int paused = pause_state == 2;
+    pthread_mutex_unlock(&pause_mu);
+    if (!paused) return -1;
+    if (cpu0_ours && primary_started && !pthread_equal(primary_thread, pthread_self())) {
+        pthread_join(primary_thread, NULL);
+        primary_started = 0;
+    }
+    for (int i = 0; i < ncpus; i++) atomic_store(&cpus[i].halted, HV_HALT_NONE);
+    hv_virtio_blk_start(board.root_blk);
+    hv_virtio_blk_start(board.aux_blk);
+    if (sound_on) {
+        hv_audio_attach(board.snd);
+        hv_virtio_snd_resume(board.snd);
+    }
+    atomic_store(&input_stopping, 0);
+    set_pause_state(0);
+    return hv_vm_start(cpu0_ours, exit_cb);
+}
+
 static void *cpu0_thread(void *unused) {
     (void)unused;
     hv_vm_cpu_qos();
     int r = hv_vm_run_cpu0();
+    if (atomic_load(&cpus[0].halted) == HV_HALT_SAVE && hv_vm_finish_pause() == 0) return NULL;
+    pthread_mutex_lock(&pause_mu);
+    run_ended = 1;
+    if (pause_state == 1) pause_state = 3, pthread_cond_broadcast(&pause_cv);
+    pthread_mutex_unlock(&pause_mu);
     /* Finish CPU activity before flushing or telling the UI the Mac stopped.
        CPU 0 can also leave for a fatal execution error. */
     hv_machine_halt(&m, HV_HALT_HOST);
@@ -414,6 +525,10 @@ static void *cpu0_thread(void *unused) {
 
 int hv_vm_start(int cpu0, void (*on_exit)(int reason)) {
     exit_cb = on_exit;
+    cpu0_ours = cpu0;
+    pthread_mutex_lock(&pause_mu);
+    run_ended = 0;
+    pthread_mutex_unlock(&pause_mu);
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, 8u << 20);

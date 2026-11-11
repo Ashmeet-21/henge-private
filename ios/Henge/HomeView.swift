@@ -187,7 +187,11 @@ private struct MacHero: View {
             .buttonStyle(.plain)
             if jitReady {
                 Button(action: start) {
-                    Label("Start", systemImage: "play.fill")
+                    if InstantResume.enabled && InstantResume.hasSave(for: mac) {
+                        Label("Resume", systemImage: "play.fill")
+                    } else {
+                        Label("Start", systemImage: "play.fill")
+                    }
                 }
                 .buttonStyle(DeskButtonStyle())
                 .padding(.top, 15)

@@ -16,6 +16,7 @@ struct SettingsView: View {
     @AppStorage(EngineTuning.superblocksKey) private var superblocks = false
     @AppStorage(JITBootstrap.codeCacheKey) private var codeCacheMB = JITBootstrap.defaultCodeCacheMB
     @AppStorage(DeskAppearance.key) private var appearance = DeskAppearance.system
+    @AppStorage(InstantResume.key) private var instantResume = false
 
     /// The second footer paragraph: how you click, given the selected input mode.
     private var inputDescription: String {
@@ -118,6 +119,12 @@ struct SettingsView: View {
                     Text("A bigger code cache empties less often and takes more memory; Henge picks 1.5 GB where there is room for it. Applies the next time Henge opens. If JIT stops turning on, choose 1 GB.")
                         .font(.footnote).foregroundStyle(.secondary)
                     Text("macOS draws a frame for every refresh: 30 Hz leaves the most of the emulated CPU to apps, at the cost of choppier animation; 60 Hz is smoother. Faster disk writes order them without waiting for a full sync; a sudden power loss could lose the last ones. Quicker wake keeps an idle CPU watching for work for 50 µs, at some battery cost. Superblocks let translated code run past conditional branches. Changes apply the next time a Mac starts.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                .listRowBackground(Desk.card)
+                Section("Instant Resume") {
+                    Toggle("Resume where you left off", isOn: $instantResume)
+                    Text("When you leave Henge, the running Mac is saved to storage, and opening it again picks up where it was in a few seconds, even after iOS closes Henge. The save is about the size of the Mac's memory in use, compressed. The Mac pauses while Henge is in the background, so its sound stops. Experimental.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 .listRowBackground(Desk.card)
