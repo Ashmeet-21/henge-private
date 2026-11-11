@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     @ObservedObject private var jit = JITCoordinator.shared
@@ -18,6 +19,8 @@ struct SettingsView: View {
     @AppStorage(JITBootstrap.codeCacheKey) private var codeCacheMB = JITBootstrap.defaultCodeCacheMB
     @AppStorage(DeskAppearance.key) private var appearance = DeskAppearance.system
     @AppStorage("henge.keyboardZoom") private var keyboardZoom = true
+    @State private var pickingShareFolder = false
+    @State private var servedRoot = Sharing.servedDescription
 
     /// The second footer paragraph: how you click, given the selected input mode.
     private var inputDescription: String {
@@ -146,6 +149,23 @@ struct SettingsView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 .listRowBackground(Desk.card)
+                Section("Shared folder") {
+                    LabeledContent("Served to the Mac", value: servedRoot)
+                    Button("Choose a folder\u{2026}") { pickingShareFolder = true }
+                    if Sharing.hasChosenFolder {
+                        Button("Use the Shared folder instead") {
+                            Sharing.forgetChosen()
+                            servedRoot = Sharing.servedDescription
+                        }
+                    }
+                    if Sharing.importState == .blanket {
+                        Text("The folder you picked cannot be found or opened, so automatic imports are paused until it can be. Pick a folder again, or use the Shared folder instead.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                    Text("The Mac mounts this folder and can read and change everything in it. Henge's own working files (its log, the JIT pairing file, its tuning files) are never served, even if the folder you pick contains them. A pick is kept until you change it; if the folder goes away, Henge falls back to the Shared folder.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                .listRowBackground(Desk.card)
                 Section("Log") {
                     ShareLink(item: HengeLog.logFileURL) { Label("Share henge.log", systemImage: "square.and.arrow.up") }
                 }
@@ -154,6 +174,11 @@ struct SettingsView: View {
             .scrollContentBackground(.hidden)
             .background(Desk.page)
             .navigationTitle("Settings")
+            .fileImporter(isPresented: $pickingShareFolder, allowedContentTypes: [.folder]) { result in
+                if case .success(let url) = result { Sharing.choose(url) }
+                servedRoot = Sharing.servedDescription
+            }
+            .onAppear { servedRoot = Sharing.servedDescription }
         }
     }
 }
