@@ -151,8 +151,41 @@ $(IB)/host/enter.o: host/enter.S
 $(IB)/libhengevm.a: $(IOS_OBJ)
 	rm -f $@
 	xcrun --sdk iphoneos libtool -static -o $@ $(IOS_OBJ)
-ios-lib: $(IB)/libhengevm.a
+# The translation layer (tl/) for the app's experimental Mac apps: its loader and disk-image reader, not the toy AppKit.
+TL_SRC = tl/loader/tl_loader.c tl/loader/tl_bundle.m tl/loader/tl_tlv.S tl/dmg/udif.c tl/dmg/volume.c tl/dmg/hfsplus.c tl/dmg/apfs.c tl/dmg/appinfo.c
+TL_IOS_OBJ = $(patsubst %,$(IB)/%.o,$(TL_SRC))
+$(IB)/tl/%.o: tl/% tl/loader/*.h tl/dmg/*.h
+	@mkdir -p $(dir $@)
+	$(IOS_CC) -O2 -g -Wall -Wno-unused-parameter -fblocks $(if $(filter %.m,$<),-fobjc-arc) -c $< -o $@
+$(IB)/libhengetl.a: $(TL_IOS_OBJ)
+	rm -f $@
+	xcrun --sdk iphoneos libtool -static -o $@ $(TL_IOS_OBJ)
+ios-lib: $(IB)/libhengevm.a $(IB)/libhengetl.a
 .PHONY: ios-lib
+
+# The app's glue to it (ios/Henge/Native/henge-tl.c) on the Mac: import a disk image, describe what it holds, run a program.
+$(B)/test_tl_glue: tests/test_tl_glue.c ios/Henge/Native/henge-tl.c $(TL_SRC) host/jit_region.c | $(B)
+	$(CC) $(CFLAGS) -fblocks -Iios/Henge/Native tests/test_tl_glue.c ios/Henge/Native/henge-tl.c $(filter-out %.m,$(TL_SRC)) host/jit_region.c \
+	  -x objective-c -fobjc-arc tl/loader/tl_bundle.m -framework Foundation -lz -lbz2 -lcompression -o $@
+# Sample Mac programs for the app's Mac apps screen, as a disk image (read by the same import path as anyone's).
+$(B)/tl-samples.dmg: tests/tl/exit3.c tl/tests/hello.c tl/tests/fnd.m tl/tests/swifty.swift tl/tests/cxx.cpp tl/tests/fw.m tl/tests/fwapp.m | $(B)
+	make -C tl all
+	rm -rf $(B)/tl-samples $@ && mkdir -p $(B)/tl-samples
+	cp tl/build/hello "$(B)/tl-samples/Hello (C)"
+	cp tl/build/fnd "$(B)/tl-samples/Foundation sample"
+	cp tl/build/swifty "$(B)/tl-samples/Swift sample"
+	cp tl/build/cxx "$(B)/tl-samples/C++ sample"
+	ditto tl/build/FW.app "$(B)/tl-samples/Framework sample.app"
+	hdiutil create -quiet -srcfolder $(B)/tl-samples -volname "Henge Samples" -fs HFS+ -format UDZO $@
+	xattr -c $@ # codesign refuses an app holding a file with Finder information
+
+$(B)/tl-exit3: tests/tl/exit3.c | $(B)
+	$(CC) -target arm64-apple-macos13 -O1 $< -o $@
+test-tl-glue: $(B)/test_tl_glue $(B)/tl-exit3
+	make -C tl all test-dmg >/dev/null
+	$(B)/test_tl_glue
+	$(B)/test_tl_glue exit3
+.PHONY: test-tl-glue
 
 # The restore stack, built from the same sources and with the same stand-ins as iOS.
 $(B)/mac-restore/libhengerestore.a: tools/build_ios_restore.sh host/libusb_shim.c host/install.c host/curl_shim.m $(wildcard third_party/*/src/*.c) $(wildcard third_party/libirecovery/src/*.c)

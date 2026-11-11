@@ -22,6 +22,7 @@
 #include "audio_mac.h"
 #include "dispatch.h"
 #include "net_slirp.h"
+#include "sysreg.h"
 
 static HvMachine m;
 static HvCpu cpus[HV_MAX_CPUS]; /* the board takes them as an array */
@@ -52,6 +53,7 @@ static pthread_cond_t pause_cv = PTHREAD_COND_INITIALIZER;
 static int pause_state; /* 0 running, 1 pausing, 2 paused, 3 it stopped instead */
 static int pause_clean; /* paused with nothing in flight: it can be saved */
 static int run_ended;   /* CPU 0's thread is on its way out for good: nothing will finish a pause */
+static uint64_t paused_counter; /* the guest's virtual counter when its CPUs stopped: it goes on from there */
 
 HvMachine *hv_vm_machine(void) { return &m; }
 HvVmapple *hv_vm_board(void) { return &board; }
@@ -451,6 +453,7 @@ int hv_vm_finish_pause(void) {
     kicker_started = 0;
     memset(secondary_started, 0, sizeof secondary_started);
     if (!all_saving()) return -1;
+    paused_counter = hv_counter() - m.cntvoff;
     hv_virtio_blk_stop(board.root_blk);
     hv_virtio_blk_stop(board.aux_blk);
     if (sound_on) hv_audio_detach(); /* the host's player stops; the stream's state stays in the device */
@@ -466,6 +469,7 @@ int hv_vm_finish_pause(void) {
 }
 
 int hv_vm_pause_clean(void) { return hv_vm_paused() && pause_clean; }
+uint64_t hv_vm_paused_counter(void) { return paused_counter; }
 
 int hv_vm_pause(void) {
     pthread_mutex_lock(&pause_mu);
@@ -504,7 +508,14 @@ int hv_vm_continue(void) {
         pthread_join(primary_thread, NULL);
         primary_started = 0;
     }
-    for (int i = 0; i < ncpus; i++) atomic_store(&cpus[i].halted, HV_HALT_NONE);
+    /* No time passes for the guest while it is paused, as with a restore: its clock is behind until macOS next sets
+       it from the network (minutes), but nothing in it sees time jump (a jump of minutes or hours could look to its
+       watchdog like hung services). */
+    m.cntvoff = hv_counter() - paused_counter;
+    for (int i = 0; i < ncpus; i++) {
+        cpus[i].cntvoff = m.cntvoff;
+        atomic_store(&cpus[i].halted, HV_HALT_NONE);
+    }
     hv_virtio_blk_start(board.root_blk);
     hv_virtio_blk_start(board.aux_blk);
     if (sound_on) {

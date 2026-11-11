@@ -76,6 +76,7 @@ int hv_vm_finish_pause(void);
 int hv_vm_paused(void);
 int hv_vm_continue(void);
 int hv_vm_pause_clean(void); /* paused with no disk request in flight: it can be saved */
+uint64_t hv_vm_paused_counter(void); /* the guest's virtual counter when it paused */
 /* After a resume (or a long pause): the network link down for 2 s, 1.5 s from now. */
 void hv_vm_link_flap(void);
 void hv_vm_flush_disks(void);

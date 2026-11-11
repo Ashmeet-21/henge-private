@@ -588,8 +588,6 @@ static int load_devices(R *r, HvVmapple *b, void **display, uint64_t *display_le
 
 /* ---- the file ---- */
 
-static uint64_t now_counter_guest(HvMachine *m) { return hv_counter() - m->cntvoff; }
-
 int hv_snapshot_save(const char *path, const char *ident, char *err, size_t errlen) {
     HvMachine *m = hv_vm_machine();
     HvVmapple *b = hv_vm_board();
@@ -612,7 +610,7 @@ int hv_snapshot_save(const char *path, const char *ident, char *err, size_t errl
         return fail(err, errlen, "Out of memory.");
     }
     SnapHeader h = {.version = SNAP_VERSION, .header_bytes = sizeof h, .fingerprint = fingerprint(),
-                    .guest_counter = now_counter_guest(m), .saved_at = (int64_t)time(NULL), .ncpus = (uint32_t)ncpus,
+                    .guest_counter = hv_vm_paused_counter(), .saved_at = (int64_t)time(NULL), .ncpus = (uint32_t)ncpus,
                     .nram = (uint32_t)m->nram, .ram_size = b->ram_size};
     memcpy(h.magic, SNAP_MAGIC, 8);
     snprintf(h.ident, sizeof h.ident, "%s", ident ? ident : "");

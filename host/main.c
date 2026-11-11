@@ -592,6 +592,15 @@ static void *input_thread(void *unused) {
         else if (!strncmp(line, "save ", 5)) save_now(line + 5, 0);
         else if (!strncmp(line, "saveexit ", 9)) save_now(line + 9, 1);
         else if (!strncmp(line, "linkflap", 8)) hv_vm_link_flap();
+        else if (sscanf(line, "pause %d", &x) == 1) { /* paused for x seconds, then on (as Henge in the background, not killed) */
+            if (hv_vm_pause() == 0) {
+                fprintf(stderr, "hengevm: paused for %d s\n", x);
+                sleep((unsigned)x);
+                if (hv_vm_continue() != 0) fprintf(stderr, "hengevm: pause: cannot run on\n");
+                dispatch_semaphore_signal(resume_go);
+                fprintf(stderr, "hengevm: running on after the pause\n");
+            }
+        }
         else if (!strncmp(line, "btn ", 4)) { /* "btn CODE 1|0": any evdev button code on the virtio mouse (testing) */
             unsigned code = 0;
             int down = 0;

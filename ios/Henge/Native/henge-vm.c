@@ -33,6 +33,8 @@ static int installer_session;
 static uint64_t stopped_blocks, stopped_tx, stopped_rx;
 static const char *exit_description(void);
 static int lock_running(void);
+/* A Mac app ran through the translation layer in this launch (henge-tl.c): it may have remapped part of the JIT region. */
+_Atomic int henge_tl_ran;
 
 static void on_exit(int reason) {
     pthread_rwlock_wrlock(&api_lock);
@@ -60,6 +62,10 @@ static void on_exit(int reason) {
 
 /* Holds api_lock through creation so UI snapshots cannot see a partial board. */
 static int begin_start(char *err, size_t errlen) {
+    if (atomic_load(&henge_tl_ran)) {
+        snprintf(err, errlen, "A Mac app ran in this launch. Quit Henge (swipe it away) and open it again to start a Mac.");
+        return -1;
+    }
     pthread_rwlock_wrlock(&api_lock);
     if ((state != 0 && state != 2) || installer_session) {
         snprintf(err, errlen, "%s", installer_session

@@ -186,6 +186,18 @@ int main(void) {
         henge_vm_stop();
         for (int n = 0; n < 3000 && henge_vm_state() != 2; n++) usleep(1000);
         check("resumed Mac stops", henge_vm_state() == 2);
+        /* A disk written after the save: the saved Mac must not come back over it. */
+        rc = henge_vm_boot(rom, disk, aux, 1, 0, 64, 2, error, sizeof error);
+        usleep(30000);
+        rc |= henge_vm_suspend(snap, "test", error, sizeof error);
+        henge_vm_stop();
+        int dfd = open(disk, O_WRONLY);
+        check("disk changed", dfd >= 0 && pwrite(dfd, "x", 1, 4096) == 1);
+        if (dfd >= 0) close(dfd);
+        check("save before the disk changes", rc == 0);
+        rc = henge_vm_resume(rom, disk, aux, 1, 0, 64, 2, snap, "test", error, sizeof error);
+        check("a changed disk refuses the saved Mac", rc != 0 && strstr(error, "disk has changed") != NULL);
+        check("refused, it can start from cold", henge_vm_state() == 0 && henge_vm_can_start());
         unlink(snap);
     }
     hv_vm_destroy();
