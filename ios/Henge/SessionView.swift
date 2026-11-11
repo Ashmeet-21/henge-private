@@ -22,6 +22,7 @@ struct SessionView: View {
     @State private var log: [String] = []
     @State private var started = Date()
     @State private var thermalState = ProcessInfo.processInfo.thermalState
+    @State private var bootRAM: UInt64 = 0 /* what the Mac was started with, which a save is for */
     @AppStorage("henge.cpus") private var cpus = 4
     /// The shape of the screen this session started with, when a Display profile chose it (not mac.screen).
     @State private var bootAspect: CGFloat?
@@ -252,6 +253,7 @@ struct SessionView: View {
         .onChange(of: scenePhase) { phase in
             guard phase != .active else {
                 display.refresh()
+                InstantResume.cameBack(mac)
                 return
             }
             if kbActive || kbKeyboard != nil {
@@ -271,6 +273,8 @@ struct SessionView: View {
             henge_vm_mouse_button(0, 0)
             henge_vm_mouse_button(1, 0)
             henge_vm_mouse_button(2, 0)
+            if phase == .inactive { InstantResume.pause() }
+            if phase == .background && bootRAM > 0 { InstantResume.suspend(mac, ramMB: bootRAM, cpus: cpus) }
         }
         .onChange(of: showDetails) { showing in
             if showing { HardwareKeys.releaseAll(); StickyKeys.shared.releaseAll() }
@@ -934,11 +938,29 @@ struct SessionView: View {
         }
         HengeLog.log("session", "screen \(guest.width)x\(guest.height) retina \(mac.isRetina)")
         henge_vm_set_hot(Self.isHot(ProcessInfo.processInfo.thermalState) ? 1 : 0)
-        let rc = henge_vm_boot(mac.rom.path, mac.disk.path, mac.aux.path, mac.ecid, mac.seed, ram, Int32(cpus), &buffer, buffer.count)
+        InstantResume.bootScreen = "\(guest.width)x\(guest.height)"
+        var rc: Int32 = -1
+        if InstantResume.enabled, let at = InstantResume.saved(for: mac, ramMB: ram, cpus: cpus) {
+            HengeLog.log("resume", "picking up the Mac saved \(Int(Date().timeIntervalSince(at))) s ago")
+            let t0 = Date()
+            rc = henge_vm_resume(mac.rom.path, mac.disk.path, mac.aux.path, mac.ecid, mac.seed, ram, Int32(cpus),
+                                 InstantResume.file(for: mac).path, InstantResume.ident(for: mac, ramMB: ram, cpus: cpus), &buffer, buffer.count)
+            if rc == 0 {
+                HengeLog.log("resume", String(format: "resumed in %.1f s", Date().timeIntervalSince(t0)))
+            } else {
+                HengeLog.log("resume", "could not resume (\(String(cString: buffer))); starting it from cold")
+                buffer = [CChar](repeating: 0, count: 256)
+            }
+        }
+        InstantResume.discard(for: mac) /* used or out of date: the disk moves on from here */
+        if rc != 0 {
+            rc = henge_vm_boot(mac.rom.path, mac.disk.path, mac.aux.path, mac.ecid, mac.seed, ram, Int32(cpus), &buffer, buffer.count)
+        }
         if rc != 0 {
             error = String(cString: buffer)
             return
         }
+        bootRAM = ram
         started = Date()
         var used = mac
         used.lastUsed = started
@@ -950,7 +972,7 @@ struct SessionView: View {
         var tick = 0
         while !Task.isCancelled {
             state = henge_vm_state()
-            if state == 3 {
+            if state == 3 || state == 4 { /* starting, stopping, or paused while Henge is in the background */
                 try? await Task.sleep(nanoseconds: 100_000_000)
                 continue
             }
@@ -1030,10 +1052,11 @@ struct SessionView: View {
     }
 
     private func finish() {
-        if state == 1 {
+        if state == 1 || state == 4 {
             MacPreview.saveNow(for: mac)
             henge_vm_stop()
         }
+        InstantResume.discard(for: mac) /* turned off: nothing to pick up */
         close()
     }
 }

@@ -70,7 +70,22 @@ int hv_vm_run_cpu0(void);
 void hv_vm_stop(void);
 /* Presses (1) or lets go of (0) the machine's power button: the guest decides what to do about it. */
 void hv_vm_power_button(int down);
+/* Instant resume (see snapshot.h). hv_vm_pause stops every CPU at a block boundary and quiets the devices (disk
+   requests finished, the GPU's own memory copied back into the guest's, sound stopped), keeping the machine whole:
+   0, or -1 if it stopped for good instead (shut down, or a CPU stopped it at the same moment). A machine whose CPU 0
+   the caller runs (hv_vm_start(0, ...)) calls hv_vm_finish_pause on that thread once hv_vm_run_cpu0 returns with
+   halted HV_HALT_SAVE. hv_vm_continue runs it on from where it stopped. */
+int hv_vm_pause(void);
+int hv_vm_finish_pause(void);
+int hv_vm_paused(void);
+int hv_vm_continue(void);
+int hv_vm_pause_clean(void); /* paused with no disk request in flight: it can be saved */
+uint64_t hv_vm_paused_counter(void); /* the guest's virtual counter when it paused */
+/* After a resume (or a long pause): the network link down for 2 s, 1.5 s from now. */
+void hv_vm_link_flap(void);
 void hv_vm_flush_disks(void);
+/* The disk and auxiliary storage files as they are now (inode, size, last change): a saved machine resumes only onto these. */
+int hv_vm_disk_identity(char *out, size_t n);
 const char *hv_vm_reason_name(int reason);
 
 /* Input from the host UI, any thread. Keys are Linux input codes (KEY_A = 30). */
