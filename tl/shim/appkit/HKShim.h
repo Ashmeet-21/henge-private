@@ -497,7 +497,9 @@ typedef NSString *NSUserInterfaceItemIdentifier;
 @property(readonly) NSInteger numberOfColorComponents;
 @end
 
-@interface NSColor : HKShimObject <NSCopying>
+/* iOS has classes of its own called NSColor (UIKitCore) and NSFont (UIFoundation): these go by other names in the
+   Objective-C runtime, and programs reach them through hk_lookup, which maps AppKit's names onto them. */
+__attribute__((objc_runtime_name("HKColor"))) @interface NSColor : HKShimObject <NSCopying>
 + (NSColor *)colorWithCGColor:(CGColorRef)color;
 + (NSColor *)colorWithSRGBRed:(CGFloat)r green:(CGFloat)g blue:(CGFloat)b alpha:(CGFloat)a;
 + (NSColor *)colorWithRed:(CGFloat)r green:(CGFloat)g blue:(CGFloat)b alpha:(CGFloat)a;
@@ -534,7 +536,7 @@ typedef NSString *NSUserInterfaceItemIdentifier;
 - (void)setStroke;
 @end
 
-@interface NSFont : HKShimObject
+__attribute__((objc_runtime_name("HKFont"))) @interface NSFont : HKShimObject
 + (NSFont *)systemFontOfSize:(CGFloat)size;
 + (NSFont *)systemFontOfSize:(CGFloat)size weight:(NSFontWeight)weight;
 + (NSFont *)boldSystemFontOfSize:(CGFloat)size;

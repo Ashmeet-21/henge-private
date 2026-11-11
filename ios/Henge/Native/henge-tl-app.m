@@ -35,6 +35,21 @@ static void *shim_lookup(const char *install_name, const char *symbol) {
     return NULL;
 }
 
+/* iOS's library names. Built for the Mac (tests/test_tl_app), the frameworks whose Mac versions load the real
+   AppKit are refused as well, as tl/tools/tlios does: on iOS they don't, and with AppKit loaded UIFoundation draws
+   text the AppKit way, which iOS never does. */
+static const char *map_name(const char *name, char *buf, size_t len) {
+#if TARGET_OS_OSX
+    static const char *const appkit_loaders[] = {"/AuthenticationServices.framework/", "/ScreenCaptureKit.framework/",
+                                                 "/MediaPlayer.framework/", "/SafariServices.framework/",
+                                                 "/LocalAuthenticationEmbeddedUI.framework/", "/Accessibility.framework/",
+                                                 "/MetalKit.framework/", "/WebKit.framework/", "/AVKit.framework/", NULL};
+    for (int i = 0; appkit_loaders[i]; i++)
+        if (strstr(name, appkit_loaders[i])) return NULL;
+#endif
+    return tl_ios_map_install_name(name, buf, len);
+}
+
 static void window_changed(NSWindow *window, int visible) {
     (void)window, (void)visible;
     if (g_changed) g_changed();
@@ -88,7 +103,7 @@ int henge_tl_app_load(const char *app_path, char *err, size_t errlen) {
         memset(&host, 0, sizeof host);
         size_t keep = (size_t)16 << 20; /* the region's start stays QEMU's way of finding it; the rest is the app's */
         tl_host_init_region(&host, jit->rx_addr + keep, jit->rw_addr + keep, jit->size - keep);
-        host.map_install_name = tl_ios_map_install_name;
+        host.map_install_name = map_name;
         host.shim_lookup = shim_lookup;
         host.log = log_line;
         host.soft_missing = 1;

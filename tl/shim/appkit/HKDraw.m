@@ -472,7 +472,7 @@ SYS(scrubberTexturedBackgroundColor, 0, 0, 0, 0) SYS(controlAlternatingRowColor,
 
 /* ================================================================ fonts */
 
-@interface NSFontDescriptor : HKShimObject
+__attribute__((objc_runtime_name("HKFontDescriptor"))) @interface NSFontDescriptor : HKShimObject
 @end
 
 static BOOL is_ct_font(id o) { return o && CFGetTypeID((__bridge CFTypeRef)o) == CTFontGetTypeID(); }
@@ -501,6 +501,8 @@ static NSFontDescriptor *own_desc(CTFontDescriptorRef d) { return d ? hk_font_ad
 @interface HKFontMethods : NSObject
 @end
 @implementation HKFontMethods
+/* UIFoundation's string drawing on the Mac asks AppKit's fonts for the variant for the current appearance. */
+- (id)_fontForCurrentAppearance { return self; }
 #define FONT_ONLY(...) \
     if (!is_ct_font(self)) { \
         [self doesNotRecognizeSelector:_cmd]; \

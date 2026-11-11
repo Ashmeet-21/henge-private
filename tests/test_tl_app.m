@@ -8,6 +8,7 @@
 #import <ImageIO/ImageIO.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
+#include <dlfcn.h>
 #include <stdatomic.h>
 
 #include "henge-ios-jit.h"
@@ -100,6 +101,8 @@ int main(int argc, char **argv) {
         g_dir = @(argv[2]);
         [[NSFileManager defaultManager] createDirectoryAtPath:g_dir withIntermediateDirectories:YES attributes:nil error:nil];
         double every = argc > 3 ? atof(argv[3]) : 5;
+        /* NSParagraphStyle, string drawing: UIKit always has UIFoundation loaded on iOS. */
+        dlopen("/System/Library/PrivateFrameworks/UIFoundation.framework/UIFoundation", RTLD_LAZY);
         henge_tl_app_set_screen(1180, 680, 2);
         henge_tl_app_on_change(changed);
         char err[512] = "";
