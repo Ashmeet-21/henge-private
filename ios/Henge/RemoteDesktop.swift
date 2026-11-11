@@ -17,6 +17,20 @@ final class RemoteDesktop: ObservableObject {
     static let headlessKey = "henge.remote.headless"
     static let wifiKey = "henge.remote.wifi"
     static let muteHereKey = "henge.remote.muteHere"
+    /// The Wi-Fi code, kept across Mac starts so the computer can reconnect without looking at the iPad.
+    /// "New code" in the session's Details replaces it.
+    static let codeKey = "henge.remote.code"
+
+    static func savedCode(renew: Bool = false) -> String {
+        if !renew, let c = UserDefaults.standard.string(forKey: codeKey), c.count == 6, c.allSatisfy(\.isNumber) { return c }
+        let c = String(format: "%06d", Int.random(in: 0..<1_000_000))
+        UserDefaults.standard.set(c, forKey: codeKey)
+        return c
+    }
+
+    /// Lockout after the n-th wrong code in a row: 2, 4, 8 ... s, at most 10 min. With a code that no longer
+    /// changes each start, a flat 2 s would let a guesser on the same Wi-Fi go through all codes in days.
+    static func lockout(after failures: Int) -> Double { min(600, 2 * pow(2, Double(min(failures, 20) - 1))) }
     static let port: UInt16 = 5901
     /// The Mac's sound, for the same client: packets of [length: UInt32][rate: UInt32][channels: UInt16][format: UInt16]
     /// (5 s16, 17 s32, 19 float), little-endian, then that many bytes of interleaved PCM.
@@ -44,6 +58,7 @@ final class RemoteDesktop: ObservableObject {
     private var unsent = 0
     private var codeBytes: [UInt8] = []
     private var lockedUntil = 0.0
+    private var failures = 0
     // audioQueue only: sound has a queue of its own, as `queue` waits on the GPU and would make it stutter
     private let audioQueue = DispatchQueue(label: "henge.remote.audio", qos: .userInteractive)
     private var audioListener: NWListener?
@@ -51,6 +66,7 @@ final class RemoteDesktop: ObservableObject {
     private var audioTimer: DispatchSourceTimer?
     private var audioCode: [UInt8] = []
     private var audioLockedUntil = 0.0
+    private var audioFailures = 0
     private var audioUnsent = 0
     private var audioBuf = [UInt8](repeating: 0, count: 65536)
     // inputQueue only
@@ -58,10 +74,23 @@ final class RemoteDesktop: ObservableObject {
     private var heldKeys = Set<UInt8>()
     private var heldButtons = Set<Int32>()
 
+    /// A fresh Wi-Fi code; clients already streaming stay connected.
+    func renewCode() {
+        queue.async { [self] in
+            let code = Self.savedCode(renew: true)
+            codeBytes = Array(code.utf8)
+            failures = 0
+            lockedUntil = 0
+            DispatchQueue.main.async { self.code = code }
+            let codeNow = codeBytes
+            audioQueue.async { [self] in audioCode = codeNow; audioFailures = 0; audioLockedUntil = 0 }
+        }
+    }
+
     func start() {
         queue.async { [self] in
             guard listener == nil else { return }
-            let code = String(format: "%06d", Int.random(in: 0..<1_000_000))
+            let code = Self.savedCode()
             codeBytes = Array(code.utf8)
             DispatchQueue.main.async { self.code = code }
             do {
@@ -125,9 +154,11 @@ final class RemoteDesktop: ObservableObject {
         c.receive(minimumIncompleteLength: 6, maximumLength: 6) { [weak self] data, _, _, _ in
             guard let self else { return }
             if let data, [UInt8](data) == self.audioCode, !self.audioCode.isEmpty {
+                self.audioFailures = 0
                 self.promoteAudio(c)
             } else {
-                self.audioLockedUntil = CACurrentMediaTime() + 2
+                self.audioFailures += 1
+                self.audioLockedUntil = CACurrentMediaTime() + Self.lockout(after: self.audioFailures)
                 c.cancel()
             }
         }
@@ -241,15 +272,18 @@ final class RemoteDesktop: ObservableObject {
         c.start(queue: netQueue)
         if usb { promote(c); return }
         // Over Wi-Fi the first 6 bytes must be the code shown on the phone; until then no picture and no input.
-        // A wrong code shuts Wi-Fi out for 2 s, so guessing a million codes takes weeks.
+        // A wrong code shuts Wi-Fi out for 2 s, doubling with each wrong one in a row up to 10 min (see lockout).
         c.receive(minimumIncompleteLength: 6, maximumLength: 6) { [weak self] data, _, _, _ in
             self?.queue.async {
                 guard let self else { return }
                 if let data, [UInt8](data) == self.codeBytes, !self.codeBytes.isEmpty {
+                    self.failures = 0
                     self.promote(c)
                 } else {
-                    HengeLog.log("remote", "wrong code from \(c.endpoint)")
-                    self.lockedUntil = CACurrentMediaTime() + 2
+                    self.failures += 1
+                    let wait = Self.lockout(after: self.failures)
+                    HengeLog.log("remote", "wrong code from \(c.endpoint) (\(self.failures) in a row), Wi-Fi shut for \(Int(wait)) s")
+                    self.lockedUntil = CACurrentMediaTime() + wait
                     c.cancel()
                 }
             }

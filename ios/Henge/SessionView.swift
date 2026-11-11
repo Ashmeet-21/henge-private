@@ -560,6 +560,7 @@ struct SessionView: View {
                         if remoteWifi {
                             if let ip = RemoteDesktop.wifiAddress() { LabeledContent("Wi-Fi address", value: "\(ip):\(RemoteDesktop.port)") }
                             LabeledContent("Code", value: remote.code)
+                            Button("New code") { RemoteDesktop.shared.renewCode() }
                         }
                     }
                     Text("Run tools/henge-remote.py on the computer. Over USB, start iproxy 15901:5901 there first and connect to 127.0.0.1:15901. Over Wi-Fi, give it the address and --code. Keep Henge open: iOS pauses it in the background.")
