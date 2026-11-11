@@ -51,6 +51,7 @@ final class VolumeClicks: NSObject {
         let button: Int32 = left ? 0 : 1
         let currently = left ? leftDown : rightDown
         guard currently != down else { return }
+        henge_vm_mouse_use_relative()
         henge_vm_mouse_button(button, down ? 1 : 0)
         if left { leftDown = down } else { rightDown = down }
     }
@@ -204,6 +205,7 @@ final class VolumeClicks: NSObject {
             armTapTimer(left: left, interval: releaseAfter) { [weak self] in self?.finishTapDrag(left: left) }
         case .idle:
             let button: Int32 = left ? 0 : 1
+            henge_vm_mouse_use_relative()
             henge_vm_mouse_button(button, 1)
             henge_vm_mouse_button(button, 0)
             buzz.impactOccurred()

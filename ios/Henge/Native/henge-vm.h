@@ -72,6 +72,7 @@ void henge_vm_key_hid(uint8_t usage, int down); /* a hardware keyboard: iOS give
 void henge_vm_mouse_move(int dx, int dy);
 void henge_vm_mouse_move_abs(int x, int y);
 void henge_vm_mouse_button(int button, int down);
+void henge_vm_mouse_use_relative(void); /* buttons and wheel to the mouse, not the touch tablet (see hv_vm_mouse_use_relative) */
 /* Wheel units: dy > 0 up, dx > 0 right. */
 void henge_vm_mouse_scroll(int dx, int dy);
 /* The Magic Trackpad 2 the Mac sees on its USB bus: a finger on it. phase: 0 down, 1 move, 2 up;

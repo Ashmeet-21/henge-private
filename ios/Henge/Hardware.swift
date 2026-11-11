@@ -438,7 +438,9 @@ final class HardwareMouse {
     }
 
     func releaseButtons() {
-        for button in buttons.releaseAll() { henge_vm_mouse_button(button, 0) }
+        let held = buttons.releaseAll()
+        if !held.isEmpty { henge_vm_mouse_use_relative() }
+        for button in held { henge_vm_mouse_button(button, 0) }
     }
 
     private func attach(_ mouse: GCMouse) {
@@ -469,6 +471,7 @@ final class HardwareMouse {
             buttonsLogged += 1
             HengeLog.log("input", "physical mouse button: raw=\(physicalButton) guest=\(guestButton) \(pressed ? "down" : "up")")
         }
+        henge_vm_mouse_use_relative() // the mouse clicks where its pointer is, never where a finger last tapped
         henge_vm_mouse_button(guestButton, pressed ? 1 : 0)
         if !pressed { StickyKeys.shared.releaseAll() }
     }
@@ -499,7 +502,10 @@ final class HardwareMouse {
             scrollsLogged += 1
             HengeLog.log("input", "scroll raw: \(first), \(second); units: \(horizontal), \(vertical)")
         }
-        if horizontal != 0 || vertical != 0 { henge_vm_mouse_scroll(horizontal, vertical) }
+        if horizontal != 0 || vertical != 0 {
+            henge_vm_mouse_use_relative()
+            henge_vm_mouse_scroll(horizontal, vertical)
+        }
     }
 
     private static func wheelUnits(_ value: Float, scale: Float) -> Int32 {

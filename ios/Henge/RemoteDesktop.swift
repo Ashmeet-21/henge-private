@@ -330,6 +330,7 @@ final class RemoteDesktop: ObservableObject {
         henge_vm_set_headless(0)
         inputQueue.async { [self] in
             for k in heldKeys { henge_vm_key_hid(k, 0) }
+            if !heldButtons.isEmpty { henge_vm_mouse_use_relative() }
             for b in heldButtons { henge_vm_mouse_button(b, 0) }
             heldKeys.removeAll()
             heldButtons.removeAll()
@@ -480,9 +481,11 @@ final class RemoteDesktop: ObservableObject {
                 henge_vm_mouse_move(x, y)
             case 2:
                 let b = Int32(a)
+                henge_vm_mouse_use_relative()
                 henge_vm_mouse_button(b, x != 0 ? 1 : 0)
                 if x != 0 { heldButtons.insert(b) } else { heldButtons.remove(b) }
             case 3:
+                henge_vm_mouse_use_relative()
                 henge_vm_mouse_scroll(x, y)
             case 4:
                 henge_vm_key_hid(a, x != 0 ? 1 : 0)

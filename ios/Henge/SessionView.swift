@@ -80,8 +80,9 @@ struct SessionView: View {
             let layout = Layout(full: full, insets: insets, landscape: landscape, zoomed: zoomed, typing: typing, centre: zoomCentre, aspect: mac.aspect,
                                 kb: kbLayoutInput(full: full, insets: insets, landscape: landscape))
             /// An explicit choice wins; auto is direct when the pane fills the phone
-            /// and trackpad in the portrait split.
-            let effectiveDirect = pointing == "direct" || (pointing != "trackpad" && layout.fillsPhone)
+            /// and trackpad in the portrait split. Henge fork: on an iPad a finger is always a touch on the
+            /// Mac's screen (tap = click there), in every layout; a mouse or trackpad stays a mouse (HardwareMouse).
+            let effectiveDirect = Device.isPad || pointing == "direct" || (pointing != "trackpad" && layout.fillsPhone)
             ZStack(alignment: .topLeading) {
                 (landscape || zoomed ? Color.black : Desk.page)
                 // One view in every layout: it holds the layer the engine draws into.
@@ -562,8 +563,10 @@ struct SessionView: View {
                 Spacer()
                 tool("plus.magnifyingglass", "Zoom in") { zoomed = true }
                 Spacer()
-                pointingToggle(fillsPhone: false)
-                Spacer()
+                if !Device.isPad {
+                    pointingToggle(fillsPhone: false)
+                    Spacer()
+                }
                 tool("info.circle", "Details") { showDetails = true }
                 Spacer()
                 tool("power", "Shut down", tint: Desk.bad) { stopTapped() }
@@ -670,7 +673,7 @@ struct SessionView: View {
             tool("keyboard", "Keyboard", tint: .white) { typing.toggle() }
             pasteTool
             tool(zoomed ? "minus.magnifyingglass" : "plus.magnifyingglass", zoomed ? "Zoom out" : "Zoom in", tint: zoomed ? Desk.accentLight : .white) { zoomed.toggle() }
-            pointingToggle(fillsPhone: true, tint: .white)
+            if !Device.isPad { pointingToggle(fillsPhone: true, tint: .white) }
             tool("info.circle", "Details", tint: .white) { showDetails = true }
             Rectangle().fill(Color.white.opacity(0.3)).frame(width: 1, height: 22).padding(.horizontal, 4)
             tool("power", "Shut down", tint: Desk.bad) { stopTapped() }

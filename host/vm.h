@@ -81,7 +81,10 @@ void hv_vm_mouse_move(int dx, int dy);
    the USB tablet. Clamped to the display. Marks the tablet the active
    pointer device (see hv_vm_mouse_button). */
 void hv_vm_mouse_move_abs(int x, int y);
-void hv_vm_mouse_button(int button, int down); /* 0 left, 1 right, 2 middle */
+void hv_vm_mouse_button(int button, int down); /* 0 left, 1 right, 2 middle: to the device that moved last */
+/* Buttons and wheel from here on go to the virtio mouse (a hardware mouse, the trackpad surface, volume-key
+   clicks, remote desktop), not the tablet a finger last tapped. In order with the calls around it. */
+void hv_vm_mouse_use_relative(void);
 void hv_vm_mouse_wheel(int dy);
 void hv_vm_mouse_hwheel(int dx);
 /* The Magic Trackpad 2 on the USB bus: a finger on it. phase: 0 down, 1 move, 2 up; id a

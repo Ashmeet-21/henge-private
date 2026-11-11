@@ -497,12 +497,24 @@ static dispatch_queue_t pointer_queue(void) {
     return q;
 }
 
+/* Which pointing device buttons and wheel go to: the one most recently
+   moved. 0 is the virtio mouse (relative), 1 the USB tablet (absolute).
+   Both are enumerated on every boot; macOS merges them into one cursor. */
+static int active_abs;
+static int virtio_buttons; /* bits of the buttons down on the virtio mouse, as sent (the right button goes out as left: see button_now); only the pointer queue touches this */
+static int tablet_buttons; /* bitmask of buttons currently down on the tablet */
+static void set_active_now(int abs_mode);
+
 static void stop_pointer(void) {
     atomic_store(&input_stopping, 1);
     /* The bridge excludes new input. Finish a click already in progress and
        discard queued input before releasing the keyboard and mouse. */
     dispatch_sync(pointer_queue(), ^{
         left_user = left_click = left_sent = 0;
+        for (int b = 0; b < 3; b++)
+            if (tablet_buttons & (1 << b)) hv_xhci_tablet_button(board.usb, b, 0);
+        tablet_buttons = 0;
+        active_abs = 0;
         os_unfair_lock_lock(&rctrl_lock);
         rctrl_user = rctrl_click = 0;
         os_unfair_lock_unlock(&rctrl_lock);
@@ -526,15 +538,10 @@ void hv_vm_key_hid(uint8_t usage, int down) {
     else hv_xhci_key(board.usb, usage, down);
 }
 
-/* Which pointing device buttons and wheel go to: the one most recently
-   moved. 0 is the virtio mouse (relative), 1 the USB tablet (absolute).
-   Both are enumerated on every boot; macOS merges them into one cursor. */
-static int active_abs;
-static int virtio_buttons; /* bits of the buttons down on the virtio mouse, as sent (the right button goes out as left: see button_now); only the pointer queue touches this */
-static int tablet_buttons; /* bitmask of buttons currently down on the tablet */
 
 static void move_now(void *ctx) {
     if (atomic_load(&input_stopping)) return;
+    set_active_now(0);
     int64_t packed = (int64_t)(intptr_t)ctx;
     int32_t dx = (int32_t)(packed >> 32), dy = (int32_t)packed;
     /* Both axes every time, zero or not: macOS's driver keeps the last value of an axis a report leaves out, so a
@@ -598,28 +605,45 @@ static void release_virtio_now(void *ctx) {
     rctrl_hold(&rctrl_click, 0);
 }
 
+/* Henge fork: everything below runs on the pointer queue, in the order it was asked for. Upstream #90 sent
+   tablet moves and buttons straight from the caller while mouse moves went through the queue, so the two could
+   pass each other; and buttons and wheel went to whichever device moved last, so a hardware mouse's click after
+   a finger tap went to the tablet, and the cursor jumped back to where the finger had been. */
+
 /* A switch first releases any button still down on the outgoing device,
    so no button is ever stranded on a device nobody will release. */
-static void release_outgoing(int to_abs) {
-    if (to_abs) {
-        dispatch_async_f(pointer_queue(), NULL, release_virtio_now);
-    } else {
+static void set_active_now(int abs_mode) {
+    if (abs_mode == active_abs) return;
+    if (abs_mode) release_virtio_now(NULL);
+    else {
         for (int b = 0; b < 3; b++)
             if (tablet_buttons & (1 << b)) hv_xhci_tablet_button(board.usb, b, 0);
         tablet_buttons = 0;
     }
-}
-
-static void set_active(int abs_mode) {
-    if (abs_mode == active_abs) return;
-    release_outgoing(abs_mode);
     active_abs = abs_mode;
 }
 
+static void use_relative_now(void *ctx) {
+    (void)ctx;
+    if (!atomic_load(&input_stopping)) set_active_now(0);
+}
+
+/* The hardware mouse, the trackpad surface, volume-key clicks and remote desktop point with the virtio mouse:
+   their buttons and wheel go there too, wherever a finger last tapped. Call before the button or wheel. */
+void hv_vm_mouse_use_relative(void) {
+    dispatch_async_f(pointer_queue(), NULL, use_relative_now);
+}
+
 void hv_vm_mouse_move(int dx, int dy) {
-    set_active(0);
     int64_t packed = (int64_t)((uint64_t)(uint32_t)dx << 32 | (uint32_t)dy);
     dispatch_async_f(pointer_queue(), (void *)(intptr_t)packed, move_now);
+}
+
+static void move_abs_now(void *ctx) {
+    if (atomic_load(&input_stopping)) return;
+    intptr_t v = (intptr_t)ctx;
+    set_active_now(1);
+    hv_xhci_tablet_move(board.usb, (uint16_t)(v >> 16), (uint16_t)(v & 0xffff));
 }
 
 void hv_vm_mouse_move_abs(int x, int y) {
@@ -629,23 +653,35 @@ void hv_vm_mouse_move_abs(int x, int y) {
     if (y < 0) y = 0;
     if (w >= 1 && x > (int)w - 1) x = (int)w - 1;
     if (h >= 1 && y > (int)h - 1) y = (int)h - 1;
-    set_active(1);
-    hv_xhci_tablet_move(board.usb, (uint16_t)x, (uint16_t)y);
+    if (x > 0xffff) x = 0xffff;
+    if (y > 0xffff) y = 0xffff;
+    dispatch_async_f(pointer_queue(), (void *)(intptr_t)((intptr_t)x << 16 | y), move_abs_now);
 }
 
-void hv_vm_mouse_button(int button, int down) {
-    if (button < 0 || button > 2) return;
+static void button_any_now(void *ctx) {
+    if (atomic_load(&input_stopping)) return;
+    intptr_t v = (intptr_t)ctx;
+    int button = (int)(v >> 1), down = (int)(v & 1);
     if (active_abs) {
         if (down) tablet_buttons |= 1 << button;
         else tablet_buttons &= ~(1 << button);
         hv_xhci_tablet_button(board.usb, button, down);
         return;
     }
-    dispatch_async_f(pointer_queue(), (void *)(intptr_t)(button << 1 | !!down), button_now);
+    button_now(ctx);
+}
+
+void hv_vm_mouse_button(int button, int down) {
+    if (button < 0 || button > 2) return;
+    dispatch_async_f(pointer_queue(), (void *)(intptr_t)(button << 1 | !!down), button_any_now);
 }
 
 /* The guest takes a wheel event as 8 bits: -200 arrives as +56, the wrong way. So big moves go in pieces. */
-static void wheel(uint16_t axis, int amount) {
+static void wheel_now(void *ctx) {
+    if (atomic_load(&input_stopping)) return;
+    int64_t v = (int64_t)(intptr_t)ctx;
+    uint16_t axis = (v & 1) ? HV_REL_HWHEEL : HV_REL_WHEEL;
+    int amount = (int)(int32_t)(v >> 1);
     if (active_abs) {
         if (axis == HV_REL_HWHEEL) return; /* the v1 tablet descriptor has no horizontal wheel field */
         while (amount) {
@@ -661,6 +697,14 @@ static void wheel(uint16_t axis, int amount) {
         hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
         amount -= piece;
     }
+}
+
+static void wheel(uint16_t axis, int amount) {
+    if (!amount) return;
+    if (amount > 1000000) amount = 1000000;
+    if (amount < -1000000) amount = -1000000;
+    int64_t v = (int64_t)amount * 2 + (axis == HV_REL_HWHEEL);
+    dispatch_async_f(pointer_queue(), (void *)(intptr_t)v, wheel_now);
 }
 
 void hv_vm_mouse_wheel(int dy) { wheel(HV_REL_WHEEL, dy); }

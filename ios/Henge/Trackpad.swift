@@ -251,6 +251,7 @@ struct Trackpad: UIViewRepresentable {
 
         /// A brief press of a mouse button: down then up.
         private func click(_ button: Int32) {
+            henge_vm_mouse_use_relative()
             henge_vm_mouse_button(button, 1)
             Self.recordClickFromPointerReadback()
             henge_vm_mouse_button(button, 0)
@@ -328,11 +329,13 @@ struct Trackpad: UIViewRepresentable {
                         started = Date()
                         travelled = 0
                         hadTwoFingers = false
+                        mostFingers = 0
                         scrollX = 0
                         scrollY = 0
                         buzz.prepare()
                     }
                     fingers.append(Finger(touch: touch, id: 0))
+                    mostFingers = max(mostFingers, fingers.count)
                     if fingers.count >= 2 {
                         hadTwoFingers = true
                         cancelHold()
@@ -395,6 +398,15 @@ struct Trackpad: UIViewRepresentable {
             if !fingers.contains(where: { $0.touch.type == .pencil }) { pencilActive = false }
             guard fingers.isEmpty else { return }
             cancelHold()
+            /* Four fingers tapped together: the session shows its hidden controls (as on the trackpad surface). */
+            if mostFingers >= 4 {
+                if engaged { henge_vm_mouse_button(0, 0); engaged = false }
+                if travelled < Self.tapDistance * 3, Date().timeIntervalSince(started) < Self.tapTime * 2 {
+                    NotificationCenter.default.post(name: Trackpad.revealTap, object: nil)
+                }
+                StickyKeys.shared.releaseAll()
+                return
+            }
             if engaged {
                 engaged = false
                 if let last = registered.last { sendAbs(for: last, precise: last.type == .pencil) }
@@ -402,8 +414,11 @@ struct Trackpad: UIViewRepresentable {
                 StickyKeys.shared.releaseAll()
                 return
             }
-            guard travelled < Self.tapDistance, Date().timeIntervalSince(started) < Self.tapTime else { return }
+            /* Henge fork: a finger that did not move is a click however long it stayed (until the hold engages,
+               above). Upstream dropped a press held 0.3-0.35 s: after the tap window, before the hold. */
+            guard travelled < Self.tapDistance else { return }
             if hadTwoFingers {
+                guard Date().timeIntervalSince(started) < Self.tapTime * 2 else { return } /* a two-finger rest is not a right click */
                 // A two-finger tap is a right click at the centroid: where the fingers are.
                 let cx = registered.map { $0.location(in: self).x }.reduce(0, +) / CGFloat(registered.count)
                 let cy = registered.map { $0.location(in: self).y }.reduce(0, +) / CGFloat(registered.count)
@@ -452,9 +467,11 @@ struct Trackpad: UIViewRepresentable {
             for action in actions {
                 switch action {
                 case .buttonDown(let b, _):
+                    henge_vm_mouse_use_relative()
                     henge_vm_mouse_button(b, 1)
                     buzz.impactOccurred()
                 case .buttonUp(let b):
+                    henge_vm_mouse_use_relative()
                     henge_vm_mouse_button(b, 0)
                 case .click(let b, _):
                     click(b)
@@ -515,12 +532,14 @@ struct MouseButton: View {
                     .onChanged { _ in
                         guard !down else { return }
                         down = true
+                        henge_vm_mouse_use_relative()
                         henge_vm_mouse_button(button, 1)
                         Trackpad.Surface.recordClickFromPointerReadback()
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     }
                     .onEnded { _ in
                         down = false
+                        henge_vm_mouse_use_relative()
                         henge_vm_mouse_button(button, 0)
                         StickyKeys.shared.releaseAll()
                     }
