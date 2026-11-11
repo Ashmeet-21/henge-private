@@ -599,6 +599,11 @@ struct SessionView: View {
         Sharing.prepare()
         EngineTuning.apply()
         henge_vm_set_display(UInt32(mac.screen.width), UInt32(mac.screen.height))
+        // About This Mac's chip: this device's ("Apple A20 Pro"), where it said "Apple M1 (Virtual)". henge-env.txt can name another.
+        if getenv("HV_SOC_NAME") == nil, let chip = Device.chipName {
+            setenv("HV_SOC_NAME", String(chip.prefix(31)), 1)
+            HengeLog.log("session", "chip name for the Mac: \(chip)")
+        }
         if mac.isRetina {
             henge_vm_set_display_mm(UInt32(Device.retinaMM.width), UInt32(Device.retinaMM.height))
         } else {
