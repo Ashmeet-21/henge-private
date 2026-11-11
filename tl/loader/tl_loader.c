@@ -2506,27 +2506,131 @@ static void log_free_address_space(void) {
     }
 }
 
+/* Large reservations in the host's held room (TlHost.high_room: iOS gives an app 64 GB of high address space, and
+   Chromium's Mac build asks for more than that at start). Each goes at the alignment its size implies (the largest
+   power of two in it, at most 32 GB), first fit from the bottom, mapped over the host's hold with MAP_FIXED. Three
+   rules make Chromium fit, all from the fact that each of these blocks is only ever used from the start of its used
+   part:
+   - the 16 GB block PartitionAlloc reserves right after its 32 GB pools (their metadata) goes over the top half of
+     the first pool and the bottom half of the second (as long as neither pool grows past 8 GB, far more than a phone
+     holds);
+   - a second 32 GB block (Blink's heap, Oilpan, which over-reserves twice its 16 GB cage and uses the upper half)
+     gets its address but only its upper half is mapped: the lower half stays for others (V8, the host's JIT view);
+   - smaller blocks go where nothing is mapped yet, which may be such an unused lower half. */
+typedef struct { uint8_t *at; size_t len; } TlRoomUse;
+static TlRoomUse g_room_used[32];
+static int g_room_nused;
+static uint8_t *g_room_pools; /* where the first 32 GB block went: the next 16 GB block overlaps it */
+static pthread_mutex_t g_room_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int room_held(uint8_t *at, size_t len) {
+    for (int i = 0; i < g_host->high_rooms; i++) {
+        uint8_t *lo = g_host->high_room[i], *hi = lo + g_host->high_room_bytes[i];
+        if (at >= lo && at + len <= hi) return 1;
+    }
+    return 0;
+}
+static int room_unused(uint8_t *at, size_t len) {
+    for (int i = 0; i < g_room_nused; i++)
+        if (at < g_room_used[i].at + g_room_used[i].len && g_room_used[i].at < at + len) return 0;
+    return 1;
+}
+static void room_use(uint8_t *at, size_t len) {
+    if (g_room_nused < 32) g_room_used[g_room_nused++] = (TlRoomUse){at, len};
+}
+
+/* Ranges a program will unmap that it never got: the slack of an over-reservation placed exactly (below). */
+static TlRoomUse g_room_slack[16];
+static int g_room_nslack;
+
+static void *room_place(size_t len) {
+    /* V8 over-reserves its sandbox for alignment, asking size + 4 GB - a page and unmapping what lies outside the
+       aligned block: the block alone is placed, and the unmap of the slack after it is ignored (it is not V8's). */
+    size_t slack = 0;
+    if (len > ((size_t)4 << 30)) {
+        size_t core = len + TL_PAGE - ((size_t)4 << 30);
+        if (core >= ((size_t)4 << 30) && !(core & (core - 1))) slack = len - core, len = core;
+    }
+    size_t align = (size_t)1 << 32; /* at least 4 GB */
+    while (align * 2 <= len && align < ((size_t)32 << 30)) align *= 2;
+    uint8_t *lo = g_host->high_room[0], *hi = lo;
+    for (int i = 0; i < g_host->high_rooms; i++) {
+        if ((uint8_t *)g_host->high_room[i] < lo) lo = g_host->high_room[i];
+        if ((uint8_t *)g_host->high_room[i] + g_host->high_room_bytes[i] > hi) hi = (uint8_t *)g_host->high_room[i] + g_host->high_room_bytes[i];
+    }
+    uint8_t *at = NULL, *map = NULL;
+    size_t maplen = len;
+    const char *how = "";
+    pthread_mutex_lock(&g_room_lock);
+    uint8_t *first = (uint8_t *)(((uintptr_t)lo + align - 1) & ~(uintptr_t)(align - 1));
+    if (len == ((size_t)16 << 30) && g_room_pools) {
+        at = map = g_room_pools + ((size_t)8 << 30);
+        g_room_pools = NULL;
+        how = " (over the pools' unused halves)";
+    } else if (len == ((size_t)32 << 30)) {
+        for (uint8_t *c = first; c + len <= hi && !at; c += align) {
+            if (room_held(c, len) && room_unused(c, len)) {
+                at = map = c;
+                if (!g_room_pools) g_room_pools = c;
+                room_use(c, len);
+            } else if (room_held(c + len / 2, len / 2) && room_unused(c + len / 2, len / 2)) {
+                at = c, map = c + len / 2, maplen = len / 2; /* only the upper half: the lower stays for others */
+                room_use(map, maplen);
+                how = " (upper half mapped)";
+            }
+        }
+    } else {
+        for (uint8_t *c = first; c + len <= hi && !at; c += align)
+            if (room_held(c, len) && room_unused(c, len)) {
+                at = map = c;
+                room_use(c, len);
+            }
+    }
+    pthread_mutex_unlock(&g_room_lock);
+    if (!at) {
+        tl_log("a %.1f GB reservation does not fit the held room", (double)len / (1 << 30));
+        return NULL;
+    }
+    void *r = mmap(map, maplen, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
+    tl_log("a %.1f GB reservation at %p in the held room%s%s: %s", (double)len / (1 << 30), at, how,
+           slack ? " (its alignment slack left out)" : "", r == map ? "placed" : strerror(errno));
+    if (r == map && slack) {
+        pthread_mutex_lock(&g_room_lock);
+        if (g_room_nslack < 16) g_room_slack[g_room_nslack++] = (TlRoomUse){at + len, slack};
+        pthread_mutex_unlock(&g_room_lock);
+    }
+    return r == map ? at : NULL;
+}
+
+static int rt_munmap(void *addr, size_t len) {
+    if (g_host && g_host->high_rooms) {
+        pthread_mutex_lock(&g_room_lock);
+        for (int i = 0; i < g_room_nslack; i++)
+            if ((uint8_t *)addr >= g_room_slack[i].at && (uint8_t *)addr + len <= g_room_slack[i].at + g_room_slack[i].len) {
+                pthread_mutex_unlock(&g_room_lock);
+                return 0; /* the slack of a reservation placed exactly: never mapped for it */
+            }
+        pthread_mutex_unlock(&g_room_lock);
+    }
+    return munmap(addr, len);
+}
+
 static void *rt_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
     if (g_host && g_host->ios_kernel_rules && (prot & PROT_EXEC)) {
         tl_log("refused an executable mapping (iOS)");
         errno = EPERM;
         return MAP_FAILED;
     }
+    if (g_host && g_host->high_rooms && len >= ((size_t)4 << 30) && prot == PROT_NONE && (flags & MAP_ANON) &&
+        !(flags & MAP_FIXED)) {
+        void *r = room_place(len);
+        if (r) return r;
+    }
     uint64_t max = max_map_bytes();
     if (max && len > max) {
         tl_log("refused a %llu GB mapping (TL_MAX_MAP_GB)", (unsigned long long)(len >> 30));
         errno = ENOMEM;
         return MAP_FAILED;
-    }
-    if (g_host && g_host->large_reservation && len >= ((size_t)16 << 30) && prot == PROT_NONE && (flags & MAP_ANON) &&
-        !(flags & MAP_FIXED)) {
-        void *slot = g_host->large_reservation(len);
-        if (slot) {
-            void *r = mmap(slot, len, prot, flags, fd, off);
-            tl_log("a %.1f GB reservation in the host's slot at %p: %s", (double)len / (1 << 30), slot,
-                   r == slot ? "placed" : r == MAP_FAILED ? strerror(errno) : "placed elsewhere");
-            if (r != MAP_FAILED) return r;
-        }
     }
     void *r = mmap(addr, len, prot, flags, fd, off);
     if (len >= ((size_t)1 << 30)) {
@@ -2581,6 +2685,7 @@ void *tl_runtime_lookup(const char *sym) {
         {"_dlopen", (void *)rt_dlopen},
         {"_mmap", (void *)rt_mmap},
         {"_mprotect", (void *)rt_mprotect},
+        {"_munmap", (void *)rt_munmap},
 #if TARGET_OS_OSX
         {"_mach_vm_allocate", (void *)rt_mach_vm_allocate},
         {"_mach_vm_map", (void *)rt_mach_vm_map},

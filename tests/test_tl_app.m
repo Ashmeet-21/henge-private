@@ -9,6 +9,7 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
 #include <dlfcn.h>
+#include <sys/mman.h>
 #include <stdatomic.h>
 
 #include "henge-ios-jit.h"
@@ -20,7 +21,19 @@ static HengeDualMapping mapping;
 _Atomic int henge_tl_ran;
 int henge_vm_state(void) { return 0; }
 HengeDualMapping *henge_ios_jit_get_mapping(void) { return &mapping; }
-void *henge_ios_take_high_hold(size_t bytes) { return NULL; } /* the Mac has room enough */
+/* The Mac has room enough; TEST_TL_ROOM=1 holds what the phone holds (with TL_MAX_MAP_GB=8, about as tight as iOS):
+   64 GB aligned to 32, blocks at +0 (40 GB) and +48 GB (16 GB), the 8 GB between them left for others. */
+int henge_ios_take_high_room(void **base, size_t *bytes) {
+    if (!getenv("TEST_TL_ROOM")) return 0;
+    size_t all = (size_t)96 << 30;
+    void *p = mmap(NULL, all, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (p == MAP_FAILED) return 0;
+    uint8_t *b = (uint8_t *)(((uintptr_t)p + ((size_t)32 << 30) - 1) & ~(((uintptr_t)32 << 30) - 1));
+    munmap(b + ((size_t)40 << 30), (size_t)8 << 30); /* the unheld middle */
+    base[0] = b, bytes[0] = (size_t)40 << 30;
+    base[1] = b + ((size_t)48 << 30), bytes[1] = (size_t)16 << 30;
+    return 2;
+}
 
 static NSString *g_dir;
 static int g_n;
