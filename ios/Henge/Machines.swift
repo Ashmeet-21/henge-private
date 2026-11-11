@@ -22,13 +22,9 @@ struct VirtualMac: Identifiable, Codable, Hashable {
     /// keeps decoding unchanged because both fields are optional.
     var profileLandscape: String?
     var profilePortrait: String?
-    /// The remembered profile for a posture class. Absent or unrecognised: Full, except on a device with
-    /// little memory (6 GB), where a Mac that never chose gets Perf (Henge fork): Full there is every panel
-    /// pixel (2360x1640 on an 11th-gen iPad, 1.9x a 1080p screen's GPU work and heat), Perf about 1080p's,
-    /// in the panel's shape. A Retina Mac keeps Full: it asked for the panel's own pixels.
+    /// The remembered profile for a posture class; absent or unrecognised means Full.
     func displayProfile(landscape: Bool) -> DisplayProfile {
-        if let chosen = DisplayProfile(rawValue: (landscape ? profileLandscape : profilePortrait) ?? "") { return chosen }
-        return Device.hasLittleMemory && !isRetina ? .perf : .full
+        DisplayProfile(rawValue: (landscape ? profileLandscape : profilePortrait) ?? "") ?? .full
     }
     /// m4 fork: the iPad's own panel at Retina density. On by default on iPad, for Macs that never chose.
     var retina: Bool?
