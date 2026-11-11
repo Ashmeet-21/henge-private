@@ -68,7 +68,7 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     /* Planes over PVG_FULL_HASH_MAX: a full hash of each eighth, checked one eighth per sync (see sync_iosurface). */
     uint64_t window_hash[4][8];
     uint8_t window_next[4];
-    uint32_t window_valid; /* bit i: plane i's eighths are noted */
+    uint8_t window_noted[4]; /* plane i: bit w set once eighth w has a baseline since the last copy */
 }
 @end
 @implementation HvPlaneState
@@ -126,7 +126,7 @@ static NSCountedSet<NSNumber *> *wb_unmapping; /* mapping ids unmapped by the gu
        the strided sample misses is still caught within 8 syncs (the planes' own are in HvPlaneState, shared). */
     uint64_t content_window_hash[8];
     uint8_t window_next;
-    BOOL content_windows_valid;
+    uint8_t content_noted; /* bit w: eighth w has a baseline since the last copy */
     /* A heap: private memory, a buffer over all of it. */
     id<MTLBuffer> heap_whole;
     /* A heap's or a private texture's copy in guest memory, and which side has the newest bytes. */
@@ -136,6 +136,7 @@ static NSCountedSet<NSNumber *> *wb_unmapping; /* mapping ids unmapped by the gu
     BOOL upload_deferred; /* an upload was skipped (stale claim or incomplete copy); logged once until it lands */
     uint64_t upload_hash; /* FNV hash of the guest source at the last content-guard check (large textures) */
     BOOL upload_hash_set;
+    uint8_t guard_quiet; /* execs left after a download whose blit may still be landing: re-baseline, never invalidate */
     /* What this one is made from, kept for as long as it lives. */
     HvObject *parent;
     /* A multi-plane surface's key in the replay's planar table, while it counts as one of its users. */
@@ -919,7 +920,10 @@ static uint64_t hash_bytes(const uint8_t *from, uint64_t len) {
    keep the strided sample as a base and add, per sync, a full hash of one rotating eighth
    of the range (hash_window_bytes + the window tables on HvObject): each sync covers a
    different eighth, so worst-case staleness for a missed change is bounded at 8 syncs. */
-#define PVG_FULL_HASH_MAX (4ull << 20)
+/* Henge fork: 1 MB (a 512x512 page tile), not upstream's 4 MB, and an eighth's baseline is taken the first
+   time the rotation reaches it after a copy instead of all eight at once: a sync never hashes more than the
+   strided sample plus one eighth, so a full-screen surface drawn every frame costs no more than that. */
+#define PVG_FULL_HASH_MAX (1ull << 20)
 static uint64_t hash_bytes_full(const uint8_t *from, uint64_t len) {
     uint64_t hash = 0xcbf29ce484222325ull;
     uint64_t i = 0;
@@ -955,20 +959,14 @@ static uint64_t plane_hash_now(HvObject *s, uint32_t i) {
                                     : hash_bytes(s->mapped + s->first + s->plane_from[i], len);
 }
 
-static void note_content_windows(HvObject *s) {
-    for (unsigned w = 0; w < 8; w++)
-        s->content_window_hash[w] = hash_window_bytes(s->mapped + s->first, s->alloc, w);
-    s->content_windows_valid = YES;
-    s->window_next = 0;
-}
+/* After a copy: every eighth takes a fresh baseline when the rotation next reaches it. */
+static void note_content_windows(HvObject *s) { s->content_noted = 0; }
 
 /* Plane i's eighths as the guest has them now (large planes only; under wb_lock when the state is shared). */
 static void note_plane_windows(HvObject *s, uint32_t i) {
     uint64_t len = plane_bytes(s, i);
     if (!s->planes || len <= PVG_FULL_HASH_MAX) return;
-    for (unsigned w = 0; w < 8; w++)
-        s->planes->window_hash[i][w] = hash_window_bytes(s->mapped + s->first + s->plane_from[i], len, w);
-    s->planes->window_valid |= 1u << i;
+    s->planes->window_noted[i] = 0;
 }
 
 /* Every plane's hash as the guest has it now, for a host surface already holding those pixels. */
@@ -1005,8 +1003,9 @@ static void sync_iosurface_locked(HvObject *s) {
                 HvPlaneState *st = s->planes;
                 unsigned w = st->window_next[i] & 7;
                 st->window_next[i] = (uint8_t)((w + 1) & 7);
-                if (!(st->window_valid & 1u << i) || hash_window_bytes(from + s->plane_from[i], len, w) != st->window_hash[i][w])
-                    changed |= 1u << i;
+                uint64_t now = hash_window_bytes(from + s->plane_from[i], len, w);
+                if (!(st->window_noted[i] & 1u << w)) st->window_hash[i][w] = now, st->window_noted[i] |= 1u << w;
+                else if (now != st->window_hash[i][w]) changed |= 1u << i;
             }
         }
         if (!changed) return;
@@ -1017,7 +1016,8 @@ static void sync_iosurface_locked(HvObject *s) {
             unsigned w = s->window_next;
             uint64_t win = hash_window_bytes(from, s->alloc, w);
             s->window_next = (uint8_t)((w + 1) & 7);
-            if (s->content_windows_valid && win != s->content_window_hash[w]) win_changed = YES;
+            if (!(s->content_noted & 1u << w)) s->content_window_hash[w] = win, s->content_noted |= 1u << w;
+            else if (win != s->content_window_hash[w]) win_changed = YES;
         }
         if (hash == s->content_hash && !win_changed) return;
         s->content_hash = hash;
@@ -1489,7 +1489,7 @@ static void set_host_valid(HvObject *o, BOOL valid, const char *mech, uint32_t r
         /* The guest copy is current only if the download
            was actually enqueued; on a NO it stays stale, honestly. */
         if ([self page:o toGuest:YES task:task blit:&blit commandBuffer:cb])
-            o->guest_stale = NO, o->upload_hash_set = NO; /* the guard re-baselines: not a guest write */
+            o->guest_stale = NO, o->upload_hash_set = NO, o->guard_quiet = 3; /* the guard re-baselines: not a guest write */
     }
     [blit endEncoding];
     if (cb) {
@@ -2534,11 +2534,12 @@ static NSData *insp_slice(id<MTLBuffer> b, NSUInteger from, NSUInteger length) {
                     const uint8_t *src = o->mapped + o->tex_base;
                     uint64_t stride = region / 512, hh = 0xcbf29ce484222325ull;
                     for (uint64_t si = 0; si < 512; si++) { uint64_t v; memcpy(&v, src + si * stride, 8); hh = (hh ^ v) * 0x100000001b3ull; }
-                    if (o->upload_hash_set && hh != o->upload_hash) {
+                    if (o->upload_hash_set && hh != o->upload_hash && !o->guard_quiet) {
                         if (valid_log()) fprintf(stderr, "hengevm: pvg-metal: v1: source of ref %u changed: hash %llx -> %llx, host_valid %d\n", res[i * 2], (unsigned long long)o->upload_hash, (unsigned long long)hh, (int)o->host_valid);
                         set_host_valid(o, NO, "content-hash guard: guest source changed", res[i * 2]);
                     }
                     o->upload_hash = hh, o->upload_hash_set = YES;
+                    if (o->guard_quiet) o->guard_quiet--;
                 }
             }
         }
@@ -2667,7 +2668,7 @@ static NSData *insp_slice(id<MTLBuffer> b, NSUInteger from, NSUInteger length) {
             if (!o || !o->guest_backed) continue;
             /* guest_stale clears only on a real download. */
             if ([self page:o toGuest:YES task:task blit:&back commandBuffer:cb])
-                o->guest_stale = NO, o->upload_hash_set = NO; /* the guard re-baselines: not a guest write */
+                o->guest_stale = NO, o->upload_hash_set = NO, o->guard_quiet = 3; /* the guard re-baselines: not a guest write */
         }
         [back endEncoding];
     }

@@ -92,6 +92,7 @@ typedef struct HvXhci {
     uint16_t tab_x, tab_y;
     int tab_wheel;               /* accumulated wheel delta awaiting emission */
     int tab_dirty;
+    int tab_btn_pending; /* a button change not yet in a report the guest took (see hv_xhci_tablet_button) */
     uint64_t tab_delivered;
 } HvXhci;
 

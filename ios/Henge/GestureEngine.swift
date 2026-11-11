@@ -223,7 +223,10 @@ final class GestureEngine {
         switch state {
         case .deciding:
             let duration = time - startTime
-            if duration < GestureTimings.tapMaxDuration && pathLength < slop(for: kind) {
+            /* Henge fork: a still press lifted before the hold threshold is a click (upstream dropped 0.3 s to the
+               hold): the deciding state only lasts until the hold fires, so no duration check is needed. */
+            _ = duration
+            if pathLength < slop(for: kind) {
                 lastTap = (point: lastPoint, upTime: time)
                 actions.append(.click(0, at: direct ? lastPoint : nil))
                 actions.append(.ended(.tap))

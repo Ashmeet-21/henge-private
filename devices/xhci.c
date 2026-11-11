@@ -1,3 +1,4 @@
+#include <unistd.h>
 #include "xhci.h"
 
 #include <stdio.h>
@@ -628,6 +629,7 @@ static void run_ep_in(HvXhci *x, int slot) {
             if (x->tab_wheel == 0) x->tab_dirty = 0; /* a wheel remainder stays dirty for the next transfer */
             uint32_t n = want < 6 ? want : 6;
             wr(x, buf, report, n);
+            x->tab_btn_pending = 0;
             x->tab_delivered++;
             transfer_event(x, at, n < want ? CC_SHORT_PACKET : CC_SUCCESS, want - n, slot, dci);
         }
@@ -888,6 +890,7 @@ static void reset(HvXhci *x) {
     x->tab_x = x->tab_y = 0;
     x->tab_wheel = 0;
     x->tab_dirty = 0;
+    x->tab_btn_pending = 0;
     x->tab_delivered = 0;
     for (int p = 0; p < HV_XHCI_PORTS; p++)
         x->portsc[p] = PORT_PP | PORT_CCS | PORT_CSC | (uint32_t)(p ? SPEED_HIGH : SPEED_FULL) << PORT_SPEED_SHIFT | 7u << PORT_PLS_SHIFT;
@@ -1260,11 +1263,22 @@ void hv_xhci_tablet_move(HvXhci *x, uint16_t px, uint16_t py) {
     hv_machine_wake(x->m);
 }
 
+/* Henge fork: the tablet's slot holds only the newest state, so a tap's down and up sent back to back merged
+   into one report with no button, and the click was lost. A button change now first waits (up to 40 ms, polling
+   1 ms) for the guest to take the report with the previous change. Called from the pointer queue, never a CPU. */
 void hv_xhci_tablet_button(HvXhci *x, int button, int down) {
     if (!x || button < 0 || button > 2) return;
     pthread_mutex_lock(&x->mu);
+    for (int waited = 0; x->tab_btn_pending && waited < 40; waited++) {
+        pthread_mutex_unlock(&x->mu);
+        hv_machine_wake(x->m);
+        usleep(1000);
+        pthread_mutex_lock(&x->mu);
+    }
     uint8_t bit = (uint8_t)(1u << button);
+    uint8_t before = x->tab_buttons;
     x->tab_buttons = down ? (uint8_t)(x->tab_buttons | bit) : (uint8_t)(x->tab_buttons & ~bit);
+    if (x->tab_buttons != before) x->tab_btn_pending = 1;
     x->tab_dirty = 1;
     pthread_mutex_unlock(&x->mu);
     hv_machine_wake(x->m);

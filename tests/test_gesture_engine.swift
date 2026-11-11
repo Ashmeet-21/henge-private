@@ -112,12 +112,12 @@ struct GestureEngineTests {
             check(e.tick(time: 1.0).isEmpty, "A5 no right-fire after drag commit")
             expect(e.up(time: 0.4), [.buttonUp(0), .ended(.drag)], "A5 drag lift")
         }
-        // A6: dead-band press (between tap window and hold threshold)
-        // fires nothing, as the old recognizer behaved.
+        // A6 (Henge fork): a still press lifted after the tap window but before
+        // the hold threshold is still a click; there is no dead band.
         do {
             let e = directEngine()
             _ = e.down(kind: .finger, point: pt(10, 10), time: 0)
-            expect(e.up(time: 0.32), [.ended(.none)], "A6 dead band")
+            expect(e.up(time: 0.32), [.click(0, at: pt(10, 10)), .ended(.tap)], "A6 no dead band")
         }
         // A7: a lift arriving after the threshold with no timer tick
         // still converts to a right click, then releases it.

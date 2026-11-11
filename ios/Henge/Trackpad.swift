@@ -305,8 +305,18 @@ struct Trackpad: UIViewRepresentable {
             sendAbs(surfacePoint: precise ? touch.preciseLocation(in: self) : touch.location(in: self))
         }
 
+        /// Henge fork: a touch that lands beside the Mac's screen (the bars around it, the bar above it while
+        /// typing) is not a touch on the Mac; clamped to the edge it would click the menu bar or the Dock.
+        private func onScreen(_ touch: UITouch) -> Bool {
+            guard screenRect.width > 0, screenRect.height > 0 else { return true }
+            let p = touch.location(in: self)
+            return screenRect.contains(CGPoint(x: p.x + touchOrigin.x, y: p.y + touchOrigin.y))
+        }
+
         private func directBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
             for touch in touches where touch.type != .indirectPointer {
+                // A first contact off the screen is ignored; a second finger anywhere still joins a gesture.
+                if fingers.isEmpty, !onScreen(touch) { continue }
                 if touch.type == .pencil {
                     // A pen landing ends any finger drag: release it, then the pen drives.
                     if engaged { henge_vm_mouse_button(0, 0); engaged = false }
@@ -314,6 +324,7 @@ struct Trackpad: UIViewRepresentable {
                     cancelHold()
                     pencilActive = true
                     if fingers.isEmpty { started = Date(); travelled = 0; hadTwoFingers = false }
+                    mostFingers = 0 /* the pen takes over: an earlier four-finger tap is not this stroke's */
                     fingers.append(Finger(touch: touch, id: 0))
                     // Pen-down semantics: the button engages on first contact, and the
                     // move first puts the cursor under the pen (and makes the tablet

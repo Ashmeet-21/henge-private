@@ -19,6 +19,7 @@
    values of the same width, so nothing after them moves: the triple's characters (each printable character takes the
    same width in every encoding LLVM uses for one), and the version nodes' operands, each pointed at another metadata
    constant of the same type already holding the wanted number (the constants themselves may be shared with code). */
+#include <stdint.h>
 #include "metallib.h"
 
 #include <CommonCrypto/CommonDigest.h>
@@ -271,6 +272,7 @@ typedef struct {
 
 static int grow(void **p, size_t *cap, size_t need, size_t each) {
     if (need <= *cap) return 0;
+    if (!each || need > SIZE_MAX / each / 2) return -1; /* a count from the bitcode: never overflow or spin */
     size_t c = *cap ? *cap : 64;
     while (c < need) c *= 2;
     void *q = realloc(*p, c * each);
@@ -312,7 +314,7 @@ static void on_constant(Module *m, const Record *r) {
 static void on_metadata(Module *m, const Record *r) {
     switch (r->code) {
     case 35: /* STRINGS: count, offsets size, blob */
-        if (r->n && !grow((void **)&m->meta, &m->capmeta, m->nmeta + r->f[0].v, sizeof *m->meta)) {
+        if (r->n && r->f[0].v <= (1u << 24) && !grow((void **)&m->meta, &m->capmeta, m->nmeta + r->f[0].v, sizeof *m->meta)) {
             memset(m->meta + m->nmeta, 0, (size_t)r->f[0].v * sizeof *m->meta);
             m->nmeta += (size_t)r->f[0].v;
         }
@@ -484,11 +486,11 @@ static int relabel_bitcode(uint8_t *code, size_t len, const HvMetallibTarget *t,
     {
         uint32_t ty;
         int64_t maj, min;
-        if (m->version_node >= 0 && m->meta[m->version_node].kind == 2 && m->meta[m->version_node].nops == 3 &&
+        if (m->version_node >= 0 && m->meta && (uint64_t)m->version_node < m->nmeta && m->meta[m->version_node].kind == 2 && m->meta[m->version_node].nops == 3 &&
             !meta_int(m, m->meta[m->version_node].op[0].v - 1, &ty, &maj) && !meta_int(m, m->meta[m->version_node].op[1].v - 1, &ty, &min) &&
             (maj < t->air_major || (maj == t->air_major && min <= t->air_minor)))
             ver[0] = ver[1] = -1;
-        if (m->language_node >= 0 && m->meta[m->language_node].kind == 2 && m->meta[m->language_node].nops == 4 &&
+        if (m->language_node >= 0 && m->meta && (uint64_t)m->language_node < m->nmeta && m->meta[m->language_node].kind == 2 && m->meta[m->language_node].nops == 4 &&
             !meta_int(m, m->meta[m->language_node].op[1].v - 1, &ty, &maj) && !meta_int(m, m->meta[m->language_node].op[2].v - 1, &ty, &min) &&
             (maj < t->lang_major || (maj == t->lang_major && min <= t->lang_minor)))
             lang[1] = lang[2] = -1;

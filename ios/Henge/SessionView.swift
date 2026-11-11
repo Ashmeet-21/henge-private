@@ -23,6 +23,9 @@ struct SessionView: View {
     @State private var started = Date()
     @State private var thermalState = ProcessInfo.processInfo.thermalState
     @AppStorage("henge.cpus") private var cpus = 4
+    /// The shape of the screen this session started with, when a Display profile chose it (not mac.screen).
+    @State private var bootAspect: CGFloat?
+    private var screenAspect: CGFloat { bootAspect ?? mac.aspect }
     /// Pointing mode: "auto" (the default when nothing is stored), "direct", or
     /// "trackpad". A person-and-posture preference, readable before any machine
     /// is chosen, so it lives here and not in the machine record.
@@ -77,7 +80,7 @@ struct SessionView: View {
             let full = CGSize(width: geo.size.width + insets.leading + insets.trailing,
                               height: geo.size.height + insets.top + insets.bottom)
             let landscape = full.width > full.height
-            let layout = Layout(full: full, insets: insets, landscape: landscape, zoomed: zoomed, typing: typing, centre: zoomCentre, aspect: mac.aspect,
+            let layout = Layout(full: full, insets: insets, landscape: landscape, zoomed: zoomed, typing: typing, centre: zoomCentre, aspect: screenAspect,
                                 kb: kbLayoutInput(full: full, insets: insets, landscape: landscape))
             /// An explicit choice wins; auto is direct when the pane fills the phone
             /// and trackpad in the portrait split. Henge fork: on an iPad a finger is always a touch on the
@@ -303,7 +306,7 @@ struct SessionView: View {
             HardwareKeys.stop()
             VolumeClicks.shared.stop()
         }
-        .modifier(ExternalMacDisplayModifier(presentation: MacPresentation(display: display, aspect: mac.aspect)))
+        .modifier(ExternalMacDisplayModifier(presentation: MacPresentation(display: display, aspect: screenAspect)))
         .task(id: bootAttempt) { await run() }
         .task { await kbSignalSampler() }
         .task { await Sharing.followMacClipboard() }
@@ -437,7 +440,7 @@ struct SessionView: View {
 
     private func kbLayoutInput(full: CGSize, insets: EdgeInsets, landscape: Bool) -> Layout.KBInput? {
         guard kbZoomEnabled, kbActive, let info = kbKeyboard, let target = kbTarget else { return nil }
-        let base = Layout(full: full, insets: insets, landscape: landscape, zoomed: false, typing: typing, centre: zoomCentre, aspect: mac.aspect, kb: nil)
+        let base = Layout(full: full, insets: insets, landscape: landscape, zoomed: false, typing: typing, centre: zoomCentre, aspect: screenAspect, kb: nil)
         return Layout.KBInput(band: kbBand(info: info, full: full, insets: insets, baseScreen: base.screen, target: target), target: target, baseScreen: base.screen)
     }
 
@@ -592,7 +595,7 @@ struct SessionView: View {
                     VStack(spacing: 6) {
                         hint("Drag", "to move")
                         hint("Tap", "to click")
-                        hint("Hold, then drag", "to grab")
+                        hint("Double-tap, hold", "to drag")
                         hint("Two fingers", "to scroll")
                     }
                     .allowsHitTesting(false)
@@ -695,7 +698,7 @@ struct SessionView: View {
 
     /// The whole screen, small, with where the zoomed view is on it.
     private func zoomMap(_ layout: Layout) -> some View {
-        let width: CGFloat = 112, height = width / mac.aspect
+        let width: CGFloat = 112, height = width / screenAspect
         let viewW = min(layout.touch.width / layout.screen.width, 1) * width
         let viewH = min(layout.touch.height / layout.screen.height, 1) * height
         let left = (-layout.screen.minX / layout.screen.width) * width
@@ -731,8 +734,10 @@ struct SessionView: View {
     /// Keeps the pointer in view: the view moves when the pointer nears its edge.
     private func followPointer() async {
         var tick = 0
-        let guest = bootGuest() // the size this session booted with; it cannot change mid-session
         while !Task.isCancelled {
+            /* The size this session booted with (set at start; a rotation since does not change it). */
+            let guest = Trackpad.guestScreenWidth > 0 && Trackpad.guestScreenHeight > 0
+                ? (width: Trackpad.guestScreenWidth, height: Trackpad.guestScreenHeight) : (width: mac.screen.width, height: mac.screen.height)
             var x: Int32 = 0, y: Int32 = 0
             if henge_vm_pointer(&x, &y) == 0, !kbActive {
                 moveZoom(toward: CGPoint(x: CGFloat(x) / CGFloat(guest.width), y: CGFloat(y) / CGFloat(guest.height)))
@@ -917,6 +922,7 @@ struct SessionView: View {
         // starting in (folded, unfolded, portrait or landscape); the display mode is boot-time
         // only, so a fold or rotation mid-session aspect-fits until the next start.
         let guest = bootGuest()
+        bootAspect = guest.fromProfile && guest.height > 0 ? CGFloat(guest.width) / CGFloat(guest.height) : nil
         Trackpad.guestScreenWidth = guest.width
         Trackpad.guestScreenHeight = guest.height
         KeyboardSignals.shared.resetSession()
