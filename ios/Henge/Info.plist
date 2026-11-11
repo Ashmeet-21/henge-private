@@ -60,6 +60,7 @@
 	<array>
 		<string>_remotepairing-pairable-host._tcp</string>
 		<string>_remotepairing._tcp</string>
+		<string>_henge-remote._tcp</string>
 	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>Share this device’s camera with apps in your virtual Mac when you enable Camera. The volume-button mouse mode can also use the camera to receive button presses.</string>

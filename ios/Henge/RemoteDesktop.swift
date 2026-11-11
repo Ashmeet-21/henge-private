@@ -98,6 +98,11 @@ final class RemoteDesktop: ObservableObject {
             DispatchQueue.main.async { self.code = code }
             do {
                 let l = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: Self.port)!)
+                // With Wi-Fi allowed, say so on the network (Bonjour), so the computer finds the iPad without its
+                // address. Only that: the code is never in the announcement.
+                if UserDefaults.standard.bool(forKey: Self.wifiKey) {
+                    l.service = NWListener.Service(name: "Henge \(Device.name)", type: "_henge-remote._tcp")
+                }
                 l.newConnectionHandler = { [weak self] c in self?.accept(c) }
                 l.stateUpdateHandler = { state in HengeLog.log("remote", "listener: \(state)") }
                 l.start(queue: queue)
