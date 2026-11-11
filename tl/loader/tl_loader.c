@@ -11,6 +11,7 @@
 #include <mach-o/loader.h>
 #include <mach/mach.h>
 #include <pthread.h>
+#include <dispatch/dispatch.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,6 +65,7 @@ struct TlImage {
     int initialized, visiting;
     pthread_key_t tlv_key;
     uint64_t tlv_start, tlv_size, tlv_init_size; /* vmaddrs */
+    int ns;          /* the "process" it belongs to: 0 the program, 1.. what it started (processes as threads) */
     TlImage *next;
 };
 
@@ -72,6 +74,24 @@ uint64_t tl_missing_data(const char *sym);     /* tl_stubs.m: a stand-in if the 
 uint64_t tl_missing_data_any(const char *sym); /* tl_stubs.m: a stand-in for something known to be data */
 void *tl_runtime_lookup(const char *symbol);
 static TlImage *g_images, *g_main;
+#define TL_MAX_NS 64
+static TlImage *g_ns_main[TL_MAX_NS]; /* each namespace's executable */
+static int g_loading_ns;              /* the namespace being loaded and bound (under g_lock) */
+static TlImage *main_of(int ns) { return ns >= 0 && ns < TL_MAX_NS ? g_ns_main[ns] : NULL; }
+
+/* A process started inside the app (processes as threads). */
+typedef struct TlProc {
+    int ns, parent_ns;
+    pid_t pid;
+    TlImage *exe;
+    int argc;
+    char **argv, **envp;
+    pthread_t thread;
+    int done, status, kill_requested;
+    void *exit_watchers[16]; /* dispatch sources standing in for DISPATCH_SOURCE_TYPE_PROC on this pid */
+    int nexit_watchers;
+} TlProc;
+static TlProc *g_procs[TL_MAX_NS];
 static TlImage *g_order[1024]; /* every image, in the order it was loaded */
 static _Atomic int g_norder;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -405,11 +425,12 @@ static int file_exists(const char *p) {
 
 /* @executable_path, @loader_path and @rpath against this image and the executable. */
 static int expand_path(TlImage *im, const char *in, char *out, size_t len) {
-    const char *exe_dir = g_main ? g_main->dir : im->dir;
+    TlImage *exe = main_of(im->ns);
+    const char *exe_dir = exe ? exe->dir : im->dir;
     if (!strncmp(in, "@executable_path/", 17)) return snprintf(out, len, "%s/%s", exe_dir, in + 17) < (int)len;
     if (!strncmp(in, "@loader_path/", 13)) return snprintf(out, len, "%s/%s", im->dir, in + 13) < (int)len;
     if (!strncmp(in, "@rpath/", 7)) {
-        TlImage *owners[2] = {im, g_main && g_main != im ? g_main : NULL};
+        TlImage *owners[2] = {im, exe && exe != im ? exe : NULL};
         for (int o = 0; o < 2; o++) {
             TlImage *who = owners[o];
             if (!who) continue;
@@ -534,7 +555,8 @@ static uint64_t image_export(TlImage *im, const char *sym, int *found) {
 
 static uint64_t host_symbol(void *handle, const char *install_name, const char *sym, int *found) {
     *found = 0;
-    if (!install_name || strstr(install_name, "libSystem") || !strncmp(install_name, "/usr/lib/system/", 16)) {
+    if (!install_name || strstr(install_name, "libSystem") || !strncmp(install_name, "/usr/lib/system/", 16) ||
+        strstr(install_name, "/libbsm.") || strstr(install_name, "/libsandbox.")) {
         void *s = tl_runtime_lookup(sym);
         if (s) { *found = 1; return (uint64_t)s; }
     }
@@ -551,6 +573,7 @@ static uint64_t host_symbol(void *handle, const char *install_name, const char *
 
 static uint64_t flat_lookup(const char *sym, int *found) {
     for (TlImage *im = g_images; im; im = im->next) {
+        if (im->ns != g_loading_ns) continue;
         uint64_t v = image_export(im, sym, found);
         if (*found) return v;
     }
@@ -560,7 +583,7 @@ static uint64_t flat_lookup(const char *sym, int *found) {
 static uint64_t resolve_in_dep(TlImage *im, int ordinal, const char *sym, int *found) {
     *found = 0;
     if (ordinal == BIND_SPECIAL_DYLIB_SELF) return image_export(im, sym, found);
-    if (ordinal == BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE) return g_main ? image_export(g_main, sym, found) : 0;
+    if (ordinal == BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE) return main_of(im->ns) ? image_export(main_of(im->ns), sym, found) : 0;
     if (ordinal == BIND_SPECIAL_DYLIB_FLAT_LOOKUP) return flat_lookup(sym, found);
     if (ordinal == BIND_SPECIAL_DYLIB_WEAK_LOOKUP) {
         uint64_t v = host_symbol(RTLD_DEFAULT, NULL, sym, found);
@@ -1071,6 +1094,8 @@ static void run_initializers(TlImage *im) {
     }
     ProgramVars vars = {im->base, _NSGetArgc(), (const char ***)_NSGetArgv(), (const char ***)_NSGetEnviron(),
                         (const char **)_NSGetProgname()};
+    TlProc *proc = im->ns > 0 && im->ns < TL_MAX_NS ? g_procs[im->ns] : NULL;
+    if (proc) vars.NXArgcPtr = &proc->argc, vars.NXArgvPtr = (const char ***)&proc->argv, vars.environPtr = (const char ***)&proc->envp;
     static const char *apple_storage[] = {NULL};
     const char **apple = apple_storage;
     each_section(im, ^(const struct section_64 *sect, uint8_t *addr) {
@@ -1095,8 +1120,9 @@ static int g_npending;
 
 static TlImage *load_one(const char *path, char *err, size_t errlen) {
     for (TlImage *im = g_images; im; im = im->next)
-        if (!strcmp(im->path, path)) return im;
+        if (!strcmp(im->path, path) && im->ns == g_loading_ns) return im;
     TlImage *im = calloc(1, sizeof *im);
+    im->ns = g_loading_ns;
     im->path = strdup(path);
     im->dir = strdup(path);
     char *slash = strrchr(im->dir, '/');
@@ -1108,7 +1134,10 @@ static TlImage *load_one(const char *path, char *err, size_t errlen) {
     im->map = mmap(NULL, im->maplen, PROT_READ, MAP_PRIVATE, im->fd, 0);
     if (im->map == MAP_FAILED) { set_err(err, errlen, "cannot read %s", path); return NULL; }
     if (parse(im, err, errlen) || map_segments(im, err, errlen)) return NULL;
-    if (!g_main && im->fmh->filetype == MH_EXECUTE) g_main = im;
+    if (im->fmh->filetype == MH_EXECUTE && !main_of(im->ns)) {
+        if (im->ns < TL_MAX_NS) g_ns_main[im->ns] = im;
+        if (im->ns == 0 && !g_main) g_main = im;
+    }
     /* Listed before its libraries load, so a cycle finds it. */
     im->next = g_images;
     g_images = im;
@@ -1119,10 +1148,34 @@ static TlImage *load_one(const char *path, char *err, size_t errlen) {
     return im;
 }
 
+/* A started process's copy of a library keeps only the categories on its own classes: one on a class the process
+   shares (Foundation's, Henge's AppKit's, the first copy's) would re-point that class's methods at this copy's code
+   and globals, under the program that already uses them. Such a category's class is cleared, which the runtime
+   skips (as for a weak class that is missing); the copy's calls reach the program's copy of the same methods. */
+static void keep_own_categories(TlImage *im) {
+    static const char *const lists[] = {"__objc_catlist", "__objc_catlist2", "__objc_nlcatlist"};
+    static const char *const segs[] = {"__DATA_CONST", "__DATA"};
+    for (int l = 0; l < 3; l++)
+        for (int g = 0; g < 2; g++) {
+            uint64_t size = 0;
+            uint8_t *sect = find_section(im, segs[g], lists[l], &size);
+            if (!sect) continue;
+            for (uint64_t off = 0; off + 8 <= size; off += 8) {
+                uint64_t *cat = *(uint64_t **)(sect + off);
+                if (!cat) continue;
+                void *cls = (void *)cat[1]; /* category_t: name, cls, ... */
+                TlImage *owner = cls ? tl_image_containing(cls) : NULL;
+                if (owner && owner->ns == im->ns) continue;
+                cat[1] = 0;
+            }
+        }
+}
+
 /* Loads path and what it links; fixes up, registers and initializes whatever was new. Takes g_lock itself. */
-static TlImage *load_and_link(const char *path, char *err, size_t errlen) {
+static TlImage *load_and_link(const char *path, int ns, char *err, size_t errlen) {
     pthread_mutex_lock(&g_lock);
     g_npending = 0;
+    g_loading_ns = ns;
     char real[PATH_MAX];
     if (!realpath(path, real)) {
         set_err(err, errlen, "cannot find %s", path);
@@ -1140,6 +1193,8 @@ static TlImage *load_and_link(const char *path, char *err, size_t errlen) {
     if (g_host->image_linked)
         for (int i = 0; i < n; i++) g_host->image_linked(batch[i]);
     for (int i = 0; i < n; i++) register_swift(batch[i]);
+    for (int i = 0; i < n; i++)
+        if (batch[i]->ns) keep_own_categories(batch[i]);
     const struct mach_header *mhs[512];
     const char *paths[512];
     int nobjc = 0;
@@ -1157,12 +1212,17 @@ static TlImage *load_and_link(const char *path, char *err, size_t errlen) {
 
 TlImage *tl_load(TlHost *host, const char *path, char *err, size_t errlen) {
     g_host = host;
-    return load_and_link(path, err, errlen);
+    return load_and_link(path, 0, err, errlen);
 }
 
 TlImage *tl_load_library(const char *path, char *err, size_t errlen) {
     if (!g_host) { set_err(err, errlen, "nothing loaded yet"); return NULL; }
-    return load_and_link(path, err, errlen);
+    return load_and_link(path, 0, err, errlen);
+}
+
+static TlImage *load_library_in(const char *path, int ns, char *err, size_t errlen) {
+    if (!g_host) { set_err(err, errlen, "nothing loaded yet"); return NULL; }
+    return load_and_link(path, ns, err, errlen);
 }
 
 int tl_run_main(TlImage *exe, int argc, const char **argv, const char **envp) {
@@ -1196,6 +1256,13 @@ TlImage *tl_image_containing(const void *addr) {
     return NULL;
 }
 
+/* The namespace ("process") of the code at addr: 0 for the program and for anything not loaded here. */
+static int ns_of(const void *addr) {
+    TlImage *im = tl_image_containing(addr);
+    return im ? im->ns : 0;
+}
+int tl_ns_of_address(const void *addr) { return ns_of(addr); }
+
 static TlImage *as_image(void *handle) {
     int n = g_norder;
     for (int i = 0; i < n; i++)
@@ -1228,26 +1295,33 @@ static int is_system_path(const char *p) {
 }
 
 static void *rt_dlopen(const char *path, int mode) {
-    if (!path) return g_main ? (void *)g_main : dlopen(NULL, mode);
+    int ns = ns_of(__builtin_return_address(0));
+    TlImage *exe = main_of(ns);
+    if (!path) return exe ? (void *)exe : dlopen(NULL, mode);
     char expanded[PATH_MAX];
-    if (path[0] == '@' && g_main) {
-        if (!expand_path(g_main, path, expanded, sizeof expanded)) { rt_set_dlerror("cannot find %s", path); return NULL; }
+    if (path[0] == '@' && exe) {
+        if (!expand_path(exe, path, expanded, sizeof expanded)) { rt_set_dlerror("cannot find %s", path); return NULL; }
         path = expanded;
     }
     if (!is_system_path(path)) {
         struct stat st;
         if (stat(path, &st) == 0) {
             char err[1024] = "";
-            TlImage *im = tl_load_library(path, err, sizeof err);
+            TlImage *im = load_library_in(path, ns, err, sizeof err);
             if (!im) { rt_set_dlerror("%s", err); tl_log("dlopen %s: %s", path, err); return NULL; }
-            if (g_host->verbose) tl_log("dlopen %s: loaded here", path);
+            if (g_host->verbose) tl_log("dlopen %s: loaded here (namespace %d)", path, ns);
             return im;
         }
         /* A bare name ("libfoo.dylib"): look beside the program, as dyld's fallback paths would. */
-        if (!strchr(path, '/') && g_main) {
+        if (!strchr(path, '/') && exe) {
             char beside[PATH_MAX];
-            snprintf(beside, sizeof beside, "%s/%s", g_main->dir, path);
-            if (stat(beside, &st) == 0) return rt_dlopen(beside, mode);
+            snprintf(beside, sizeof beside, "%s/%s", exe->dir, path);
+            if (stat(beside, &st) == 0) {
+                char err[1024] = "";
+                TlImage *im = load_library_in(beside, ns, err, sizeof err);
+                if (!im) rt_set_dlerror("%s", err);
+                return im;
+            }
         }
     }
     char buf[PATH_MAX];
@@ -1289,8 +1363,10 @@ static void *rt_dlsym(void *handle, const char *name) {
         return NULL;
     }
     if (handle == RTLD_DEFAULT || handle == RTLD_NEXT || handle == RTLD_SELF || handle == RTLD_MAIN_ONLY) {
+        int ns = ns_of(__builtin_return_address(0));
         int n = g_norder;
         for (int i = 0; i < n; i++) {
+            if (g_order[i]->ns != ns) continue;
             uint64_t v = image_export(g_order[i], sym, &found);
             if (found) return (void *)v;
         }
@@ -1319,15 +1395,17 @@ static int rt_dladdr(const void *addr, Dl_info *info) {
 }
 
 static int rt_NSGetExecutablePath(char *buf, uint32_t *size) {
-    if (!g_main) return _NSGetExecutablePath(buf, size);
-    uint32_t need = (uint32_t)strlen(g_main->path) + 1;
+    TlImage *exe = main_of(ns_of(__builtin_return_address(0)));
+    if (!exe) return _NSGetExecutablePath(buf, size);
+    uint32_t need = (uint32_t)strlen(exe->path) + 1;
     if (*size < need) { *size = need; return -1; }
-    memcpy(buf, g_main->path, need);
+    memcpy(buf, exe->path, need);
     return 0;
 }
 
 static const struct mach_header *rt_NSGetMachExecuteHeader(void) {
-    return g_main ? (const void *)g_main->base : (const void *)_dyld_get_image_header(0);
+    TlImage *exe = main_of(ns_of(__builtin_return_address(0)));
+    return exe ? (const void *)exe->base : (const void *)_dyld_get_image_header(0);
 }
 
 /* The image list: the program in place of the host's main executable, then the host's libraries, then the
@@ -1373,19 +1451,406 @@ static void rt_dyld_register_func_for_remove_image(void (*fn)(const struct mach_
     _dyld_register_func_for_remove_image(fn);
 }
 
+/* ---- processes as threads ---- */
+
+/* bootstrap_look_up is in libSystem on iOS too, without its header. */
+extern kern_return_t bootstrap_look_up(mach_port_t bp, const char *name, mach_port_t *sp);
+#include <sys/wait.h>
+#include <signal.h>
+
+
+static int g_next_ns = 1;
+static pthread_mutex_t g_proc_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_proc_cond = PTHREAD_COND_INITIALIZER;
+/* Started processes that looked up their parent's rendezvous name, in order: the parent's server takes them in the
+   same order as their requests arrive. */
+static pid_t g_rendezvous_fifo[64];
+static int g_rendezvous_head, g_rendezvous_tail;
+static pthread_mutex_t g_rendezvous_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static pid_t fake_pid(int ns) { return (pid_t)(0x70000000 | ns); }
+static TlProc *proc_of_pid(pid_t pid) {
+    if ((pid & 0x7FFFFF00) != 0x70000000) return NULL;
+    int ns = pid & 0xFF;
+    return ns > 0 && ns < TL_MAX_NS ? g_procs[ns] : NULL;
+}
+static pid_t pid_of_ns(int ns) { return ns > 0 ? fake_pid(ns) : getpid(); }
+
+static char **copy_strings(char *const *v, int *count) {
+    int n = 0;
+    while (v && v[n]) n++;
+    char **out = calloc((size_t)n + 1, sizeof *out);
+    for (int i = 0; i < n; i++) out[i] = strdup(v[i]);
+    if (count) *count = n;
+    return out;
+}
+
+/* A program of the app's own (inside its bundle, or beside a bare program): one we start as a process here. */
+static int is_guest_program(const char *path) {
+    if (!path || is_system_path(path) || !strncmp(path, "/usr/", 5) || !strncmp(path, "/bin/", 5) || !strncmp(path, "/sbin/", 6) ||
+        !strncmp(path, "/Library/Apple/", 15))
+        return 0;
+    TlImage *exe = main_of(0);
+    if (!exe) return 0;
+    const char *app = strstr(exe->path, ".app/");
+    size_t root = app ? (size_t)(app - exe->path + 5) : strlen(exe->dir) + 1;
+    return !strncmp(path, exe->path, root);
+}
+
+static void proc_finish(TlProc *p, int status) {
+    pthread_mutex_lock(&g_proc_lock);
+    p->status = status;
+    p->done = 1;
+    int n = p->nexit_watchers;
+    p->nexit_watchers = 0;
+    pthread_cond_broadcast(&g_proc_cond);
+    pthread_mutex_unlock(&g_proc_lock);
+    for (int i = 0; i < n; i++) {
+        dispatch_source_merge_data((dispatch_source_t)p->exit_watchers[i], DISPATCH_PROC_EXIT);
+        dispatch_release((dispatch_source_t)p->exit_watchers[i]);
+    }
+}
+
+/* A process started here has no kernel pid: the kernel would report a watch on it as "already exited" at once (so
+   Chrome's rendezvous server dropped a child's ports before the child asked for them). The watch becomes a source
+   this loader fires when the process ends. */
+static dispatch_source_t rt_dispatch_source_create(dispatch_source_type_t type, uintptr_t handle, uintptr_t mask,
+                                                   dispatch_queue_t queue) {
+    if (type == DISPATCH_SOURCE_TYPE_PROC && (handle & ~(uintptr_t)0xFFFF) == 0x70000000 && (handle & 0xFFFF) < TL_MAX_NS) {
+        TlProc *p = g_procs[handle & 0xFFFF];
+        if (p) {
+            dispatch_source_t s = dispatch_source_create(DISPATCH_SOURCE_TYPE_DATA_OR, 0, 0, queue);
+            pthread_mutex_lock(&g_proc_lock);
+            if (p->done)
+                dispatch_source_merge_data(s, DISPATCH_PROC_EXIT & mask);
+            else if (p->nexit_watchers < 16) {
+                dispatch_retain(s);
+                p->exit_watchers[p->nexit_watchers++] = s;
+            }
+            pthread_mutex_unlock(&g_proc_lock);
+            return s;
+        }
+    }
+    return dispatch_source_create(type, handle, mask, queue);
+}
+
+static void *proc_thread(void *arg) {
+    TlProc *p = arg;
+    const char *base = strrchr(p->exe->path, '/');
+    char name[64];
+    snprintf(name, sizeof name, "proc %d %s", p->ns, base ? base + 1 : p->exe->path);
+    pthread_setname_np(name);
+    tl_log("process %d (pid %#x) runs %s", p->ns, p->pid, p->exe->path);
+    int rc = tl_run_main(p->exe, p->argc, (const char **)p->argv, (const char **)p->envp);
+    tl_log("process %d returned %d", p->ns, rc);
+    proc_finish(p, rc & 0xFF);
+    return NULL;
+}
+
+/* Loads path as a new process (namespace) started by the namespace parent_ns. NULL with errno set. */
+static TlProc *proc_load(const char *path, int parent_ns, char *const argv[], char *const envp[]) {
+    pthread_mutex_lock(&g_proc_lock);
+    int ns = g_next_ns < TL_MAX_NS ? g_next_ns++ : 0;
+    pthread_mutex_unlock(&g_proc_lock);
+    if (!ns) { errno = EAGAIN; return NULL; }
+    TlProc *p = calloc(1, sizeof *p);
+    p->ns = ns, p->parent_ns = parent_ns, p->pid = fake_pid(ns);
+    p->argv = copy_strings(argv, &p->argc);
+    p->envp = copy_strings(envp, NULL);
+    g_procs[ns] = p; /* before loading: its initializers and _NSGetArgv see its own arguments */
+    char err[1024] = "";
+    TlImage *exe = load_library_in(path, ns, err, sizeof err);
+    if (!exe) {
+        tl_log("process %d: %s", ns, err);
+        g_procs[ns] = NULL;
+        errno = ENOEXEC;
+        return NULL;
+    }
+    p->exe = exe;
+    if (g_host->process_started) g_host->process_started(ns, path);
+    return p;
+}
+
+static int spawn_in_process(pid_t *pid, const char *path, int parent_ns, char *const argv[], char *const envp[]) {
+    TlProc *p = proc_load(path, parent_ns, argv, envp);
+    if (!p) return errno ? errno : ENOEXEC;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 16u << 20); /* a process's main thread gets a big stack */
+    int rc = pthread_create(&p->thread, &attr, proc_thread, p);
+    pthread_attr_destroy(&attr);
+    if (rc) return rc;
+    if (pid) *pid = p->pid;
+    return 0;
+}
+
+/* malloc zones in a started process: the program's allocator zones are already installed by the program, and a
+   second copy of its allocator must not install its own (one malloc per process): a copy sees none of the program's
+   zones of those names, and its zone (un)registration does nothing. Its code then mallocs through the program's. */
+#include <malloc/malloc.h>
+static int zone_is_programs(malloc_zone_t *z) {
+    const char *n = z ? malloc_get_zone_name(z) : NULL;
+    return n && (!strcmp(n, "PartitionAlloc") || !strcmp(n, "DelegatingDefaultZoneForPartitionAlloc"));
+}
+/* Each started process sees the zones it registered first, in its own order (the allocator checks its zone came
+   out first), then the real ones without the program's; nothing it does reaches the real zone list. */
+static malloc_zone_t *g_ns_zones[TL_MAX_NS][8];
+static int g_ns_nzones[TL_MAX_NS];
+static void ns_zone_remove(int ns, malloc_zone_t *z) {
+    int n = g_ns_nzones[ns], k = 0;
+    for (int i = 0; i < n; i++)
+        if (g_ns_zones[ns][i] != z) g_ns_zones[ns][k++] = g_ns_zones[ns][i];
+    g_ns_nzones[ns] = k;
+}
+static kern_return_t rt_malloc_get_all_zones(task_t task, memory_reader_t reader, vm_address_t **addresses, unsigned *count) {
+    kern_return_t kr = malloc_get_all_zones(task, reader, addresses, count);
+    int ns = ns_of(__builtin_return_address(0));
+    if (kr || !ns || ns >= TL_MAX_NS || !addresses || !*addresses) return kr;
+    static __thread vm_address_t view[80];
+    unsigned n = 0;
+    for (int i = 0; i < g_ns_nzones[ns] && n < 80; i++) view[n++] = (vm_address_t)g_ns_zones[ns][i];
+    for (unsigned i = 0; i < *count && n < 80; i++) {
+        malloc_zone_t *z = (malloc_zone_t *)(*addresses)[i];
+        int mine = 0;
+        for (int j = 0; j < g_ns_nzones[ns]; j++) mine |= g_ns_zones[ns][j] == z;
+        if (!mine && !zone_is_programs(z)) view[n++] = (*addresses)[i];
+    }
+    *addresses = view;
+    *count = n;
+    return kr;
+}
+static void rt_malloc_zone_register(malloc_zone_t *zone) {
+    int ns = ns_of(__builtin_return_address(0));
+    if (!ns || ns >= TL_MAX_NS) { malloc_zone_register(zone); return; }
+    ns_zone_remove(ns, zone);
+    if (g_ns_nzones[ns] < 8) g_ns_zones[ns][g_ns_nzones[ns]++] = zone;
+}
+static void rt_malloc_zone_unregister(malloc_zone_t *zone) {
+    int ns = ns_of(__builtin_return_address(0));
+    if (!ns || ns >= TL_MAX_NS) { malloc_zone_unregister(zone); return; }
+    ns_zone_remove(ns, zone);
+}
+
+/* Which programs start as processes here: Chromium's child processes (--type=renderer, utility, gpu-process...).
+   Anything else a program starts (a notification helper app, an updater) is refused as on iOS. */
+static int wanted_process(char *const argv[]) {
+    if (getenv("TL_ALL_PROCESSES")) return 1; /* a test switch */
+    /* Each started process holds its own copy of the program's code (Chrome's is 245 MB): only the helpers a
+       window needs. Renderers and the GPU process draw; of Chromium's utility services, storage (kept out of the
+       browser unless it runs as one process), network and audio. Others (unzipping, macOS notifications, ...) are
+       refused as on iOS, and Chromium copes. */
+    static const char *const utilities[] = {"storage.mojom.StorageService", "network.mojom.NetworkService",
+                                            "audio.mojom.AudioService", NULL};
+    int utility = 0;
+    const char *sub = NULL;
+    for (int i = 1; argv && argv[i]; i++) {
+        if (!strcmp(argv[i], "--type=renderer") || !strcmp(argv[i], "--type=gpu-process")) return 1;
+        if (!strcmp(argv[i], "--type=utility")) utility = 1;
+        if (!strncmp(argv[i], "--utility-sub-type=", 19)) sub = argv[i] + 19;
+    }
+    if (utility && sub)
+        for (int i = 0; utilities[i]; i++)
+            if (!strcmp(sub, utilities[i])) return 1;
+    return 0;
+}
+
+/* A started process's own command line and environment (its libraries read them through _NSGetArgv). */
+static int *rt__NSGetArgc(void) {
+    int ns = ns_of(__builtin_return_address(0));
+    TlProc *p = ns > 0 && ns < TL_MAX_NS ? g_procs[ns] : NULL;
+    return p ? &p->argc : _NSGetArgc();
+}
+static char ***rt__NSGetArgv(void) {
+    int ns = ns_of(__builtin_return_address(0));
+    TlProc *p = ns > 0 && ns < TL_MAX_NS ? g_procs[ns] : NULL;
+    return p ? &p->argv : _NSGetArgv();
+}
+static char ***rt__NSGetEnviron(void) {
+    int ns = ns_of(__builtin_return_address(0));
+    TlProc *p = ns > 0 && ns < TL_MAX_NS ? g_procs[ns] : NULL;
+    return p ? &p->envp : _NSGetEnviron();
+}
+
+/* Seatbelt: a program sandboxing "itself" here would sandbox the whole app (and Henge); iOS apps are sandboxed
+   already and cannot change it. Every call succeeds and does nothing. */
+static int rt_sandbox_ok(void) {
+    static int said;
+    if (!said++) tl_log("the program asked for a sandbox (ignored: the app is iOS's sandbox already)");
+    return 0;
+}
+
+static pid_t rt_getpid(void) { return pid_of_ns(ns_of(__builtin_return_address(0))); }
+static pid_t rt_getppid(void) {
+    int ns = ns_of(__builtin_return_address(0));
+    if (!ns) return getppid();
+    TlProc *p = g_procs[ns];
+    return p ? pid_of_ns(p->parent_ns) : getpid();
+}
+
+static int rt_kill(pid_t pid, int sig) {
+    TlProc *p = proc_of_pid(pid);
+    if (!p) return kill(pid, sig);
+    if (p->done) { errno = ESRCH; return -1; }
+    if (sig) {
+        p->kill_requested = sig; /* a thread cannot be killed; it is left to end on its own */
+        tl_log("process %d asked to stop (signal %d)", p->ns, sig);
+    }
+    return 0;
+}
+
+static pid_t rt_waitpid(pid_t pid, int *status, int options) {
+    int ns = ns_of(__builtin_return_address(0));
+    TlProc *only = pid > 0 ? proc_of_pid(pid) : NULL;
+    if (pid > 0 && !only) return waitpid(pid, status, options);
+    pthread_mutex_lock(&g_proc_lock);
+    for (;;) {
+        int children = 0;
+        for (int i = 1; i < TL_MAX_NS; i++) {
+            TlProc *p = g_procs[i];
+            if (!p || (only && p != only) || (!only && p->parent_ns != ns)) continue;
+            children++;
+            if (p->done && p->done != 2) {
+                p->done = 2; /* reaped */
+                if (status) *status = W_EXITCODE(p->status, 0);
+                pid_t r = p->pid;
+                pthread_mutex_unlock(&g_proc_lock);
+                return r;
+            }
+        }
+        if (!children) {
+            pthread_mutex_unlock(&g_proc_lock);
+            if (!only) return waitpid(pid, status, options); /* real children, if any */
+            errno = ECHILD;
+            return -1;
+        }
+        if (options & WNOHANG) {
+            pthread_mutex_unlock(&g_proc_lock);
+            return 0;
+        }
+        pthread_cond_wait(&g_proc_cond, &g_proc_lock);
+    }
+}
+
+/* exit in a started process ends its thread, not the app. */
+static void rt_exit(int code) {
+    int ns = ns_of(__builtin_return_address(0));
+    TlProc *p = ns ? g_procs[ns] : NULL;
+    if (!p) exit(code);
+    tl_log("process %d called exit(%d)", ns, code);
+    fflush(NULL);
+    proc_finish(p, code & 0xFF);
+    pthread_exit(NULL);
+}
+static void rt__exit(int code) {
+    int ns = ns_of(__builtin_return_address(0));
+    TlProc *p = ns ? g_procs[ns] : NULL;
+    if (!p) _exit(code);
+    proc_finish(p, code & 0xFF);
+    pthread_exit(NULL);
+}
+
+/* Mach bootstrap names within the app: a server checking in a name and a client looking it up both live here. */
+typedef struct TlBootName { char name[128]; mach_port_t port; } TlBootName;
+static TlBootName g_boot_names[64];
+static int g_nboot;
+static pthread_mutex_t g_boot_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static mach_port_t boot_find(const char *name) {
+    for (int i = 0; i < g_nboot; i++)
+        if (!strcmp(g_boot_names[i].name, name)) return g_boot_names[i].port;
+    return MACH_PORT_NULL;
+}
+
+static kern_return_t rt_bootstrap_check_in(mach_port_t bp, const char *name, mach_port_t *sp) {
+    mach_port_t port = MACH_PORT_NULL;
+    kern_return_t kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+    if (kr) return kr;
+    mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND); /* the table's send right */
+    pthread_mutex_lock(&g_boot_lock);
+    if (g_nboot < 64) {
+        snprintf(g_boot_names[g_nboot].name, sizeof g_boot_names[0].name, "%s", name);
+        g_boot_names[g_nboot++].port = port;
+    }
+    pthread_mutex_unlock(&g_boot_lock);
+    if (g_host->verbose || getenv("TL_BOOT_TRACE")) tl_log("bootstrap name %s checked in here", name);
+    *sp = port;
+    return KERN_SUCCESS;
+}
+
+static kern_return_t rt_bootstrap_register(mach_port_t bp, const char *name, mach_port_t sp) {
+    mach_port_mod_refs(mach_task_self(), sp, MACH_PORT_RIGHT_SEND, 1);
+    pthread_mutex_lock(&g_boot_lock);
+    if (g_nboot < 64) {
+        snprintf(g_boot_names[g_nboot].name, sizeof g_boot_names[0].name, "%s", name);
+        g_boot_names[g_nboot++].port = sp;
+    }
+    pthread_mutex_unlock(&g_boot_lock);
+    return KERN_SUCCESS;
+}
+
+static kern_return_t rt_bootstrap_look_up(mach_port_t bp, const char *name, mach_port_t *sp) {
+    pthread_mutex_lock(&g_boot_lock);
+    mach_port_t port = boot_find(name);
+    pthread_mutex_unlock(&g_boot_lock);
+    if (getenv("TL_BOOT_TRACE")) tl_log("bootstrap_look_up %s (namespace %d): %s", name, ns_of(__builtin_return_address(0)), port ? "here" : "system");
+    if (port) {
+        mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_SEND, 1);
+        if (strstr(name, "MachPortRendezvousServer")) {
+            pthread_mutex_lock(&g_rendezvous_lock);
+            g_rendezvous_fifo[g_rendezvous_tail++ % 64] = pid_of_ns(ns_of(__builtin_return_address(0)));
+            pthread_mutex_unlock(&g_rendezvous_lock);
+        }
+        *sp = port;
+        return KERN_SUCCESS;
+    }
+    return bootstrap_look_up(bp, name, sp);
+}
+
+/* A message from this process names this process as its sender; a parent's rendezvous server asks which started
+   process it is: the one that just looked it up. */
+static pid_t rt_audit_token_to_pid(audit_token_t token) {
+    pid_t pid = (pid_t)token.val[5]; /* audit_token_to_pid's own reading (libbsm, which this need not link) */
+    if (pid != getpid()) return pid;
+    pthread_mutex_lock(&g_rendezvous_lock);
+    if (g_rendezvous_head < g_rendezvous_tail) pid = g_rendezvous_fifo[g_rendezvous_head++ % 64];
+    pthread_mutex_unlock(&g_rendezvous_lock);
+    if (getenv("TL_BOOT_TRACE")) tl_log("audit_token_to_pid -> %#x", pid);
+    return pid;
+}
+
 static int rt_refuse(void) {
     errno = EPERM;
     return -1;
 }
 
 static int rt_posix_spawn(pid_t *pid, const char *path, const void *fa, const void *attr, char *const argv[], char *const envp[]) {
-    (void)pid, (void)fa, (void)attr, (void)argv, (void)envp;
+    (void)fa, (void)attr;
+    if (getenv("TL_SPAWN_TRACE")) {
+        tl_log("posix_spawn %s", path ? path : "?");
+        for (int i = 0; argv && argv[i] && i < 6; i++) tl_log("  argv[%d] %.120s", i, argv[i]);
+        tl_log("  guest %d", is_guest_program(path));
+        tl_log("  wanted %d", wanted_process(argv));
+    }
+    if (g_host->processes_as_threads && !getenv("TL_NO_SPAWN_PATH") && is_guest_program(path) && wanted_process(argv))
+        return spawn_in_process(pid, path, ns_of(__builtin_return_address(0)), argv, envp);
     tl_log("the program tried to start another process: %s (refused, as on iOS)", path ? path : "?");
     return EPERM;
 }
 
+/* exec of the program's own Mach-O: the new program is loaded as a process of its own and runs on this thread; this
+   one's code is never returned to. */
 static int rt_execve(const char *path, char *const argv[], char *const envp[]) {
-    (void)argv, (void)envp;
+    if (g_host->processes_as_threads && is_guest_program(path)) {
+        int ns = ns_of(__builtin_return_address(0));
+        TlProc *p = proc_load(path, ns, argv, envp);
+        if (!p) return rt_refuse();
+        tl_log("exec %s as process %d on this thread", path, p->ns);
+        p->thread = pthread_self();
+        int rc = tl_run_main(p->exe, p->argc, (const char **)p->argv, (const char **)p->envp);
+        proc_finish(p, rc & 0xFF);
+        if (!ns) exit(rc);
+        pthread_exit(NULL);
+    }
     tl_log("the program tried to exec %s (refused, as on iOS)", path ? path : "?");
     return rt_refuse();
 }
@@ -1492,6 +1957,40 @@ void *tl_runtime_lookup(const char *sym) {
     };
     for (size_t i = 0; i < sizeof table / sizeof *table; i++)
         if (!strcmp(sym, table[i].name)) return table[i].fn;
+    if (g_host && (g_host->processes_as_threads || g_host->ios_kernel_rules)) {
+        static const char *const sandbox[] = {"_sandbox_init", "_sandbox_init_with_parameters", "_sandbox_init_with_extensions",
+                                              "_sandbox_apply", "_sandbox_apply_container"};
+        for (size_t i = 0; i < sizeof sandbox / sizeof *sandbox; i++)
+            if (!strcmp(sym, sandbox[i])) return (void *)rt_sandbox_ok;
+    }
+    if (g_host && g_host->processes_as_threads) {
+        if (!strcmp(sym, "__NSGetArgc")) return (void *)rt__NSGetArgc;
+        if (!strcmp(sym, "__NSGetArgv")) return (void *)rt__NSGetArgv;
+        if (!strcmp(sym, "__NSGetEnviron")) return (void *)rt__NSGetEnviron;
+    }
+    /* Mach bootstrap names: kept inside the app wherever iOS's rules apply (an app may not register services there,
+       and only the app itself can reach them anyway). */
+    if (g_host && (g_host->processes_as_threads || g_host->ios_kernel_rules)) {
+        if (!strcmp(sym, "_bootstrap_check_in")) return (void *)rt_bootstrap_check_in;
+        if (!strcmp(sym, "_bootstrap_look_up")) return (void *)rt_bootstrap_look_up;
+        if (!strcmp(sym, "_bootstrap_register")) return (void *)rt_bootstrap_register;
+    }
+    if (g_host && g_host->processes_as_threads) {
+        static const struct { const char *name; void *fn; } pat[] = {
+            {"_getpid", (void *)rt_getpid}, {"_getppid", (void *)rt_getppid}, {"_kill", (void *)rt_kill},
+            {"_waitpid", (void *)rt_waitpid}, {"_exit", (void *)rt_exit}, {"__exit", (void *)rt__exit},
+            {"__Exit", (void *)rt__exit}, {"_bootstrap_check_in", (void *)rt_bootstrap_check_in},
+            {"_bootstrap_look_up", (void *)rt_bootstrap_look_up}, {"_bootstrap_register", (void *)rt_bootstrap_register},
+            {"_audit_token_to_pid", (void *)rt_audit_token_to_pid},
+            {"_dispatch_source_create", (void *)rt_dispatch_source_create},
+            {"_malloc_get_all_zones", (void *)rt_malloc_get_all_zones},
+            {"_malloc_zone_register", (void *)rt_malloc_zone_register},
+            {"_malloc_zone_unregister", (void *)rt_malloc_zone_unregister},
+        };
+        const char *skip = getenv("TL_PAT_SKIP"); /* a test switch: symbols not to answer here */
+        for (size_t i = 0; i < sizeof pat / sizeof *pat; i++)
+            if (!strcmp(sym, pat[i].name) && !(skip && strstr(skip, pat[i].name))) return pat[i].fn;
+    }
     if (g_host && g_host->ios_kernel_rules &&
         (!strcmp(sym, "_bootstrap_check_in") || !strcmp(sym, "_bootstrap_register") || !strcmp(sym, "_bootstrap_register2")))
         return (void *)rt_bootstrap_refused;

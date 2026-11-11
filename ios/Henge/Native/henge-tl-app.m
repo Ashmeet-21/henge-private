@@ -50,9 +50,25 @@ static const char *map_name(const char *name, char *buf, size_t len) {
     return tl_ios_map_install_name(name, buf, len);
 }
 
+/* A process the app starts inside Henge (processes as threads) runs as its own .app: a helper's bundle. */
+static void process_started(int ns, const char *path) {
+    const char *macos = strstr(path, ".app/Contents/MacOS/");
+    if (!macos) return;
+    char app[4096];
+    snprintf(app, sizeof app, "%.*s", (int)(macos - path + 4), path);
+    tl_adopt_ns_bundle(ns, app);
+    fprintf(stderr, "henge: tl: process %d runs %s\n", ns, app);
+}
+
 static void window_changed(NSWindow *window, int visible) {
     (void)window, (void)visible;
     if (g_changed) g_changed();
+}
+
+/* Google Chrome itself (not Chromium): its pages need renderer processes. */
+static BOOL is_branded_chrome(NSString *app) {
+    NSString *fw = [app stringByAppendingPathComponent:@"Contents/Frameworks/Google Chrome Framework.framework"];
+    return [[NSFileManager defaultManager] fileExistsAtPath:fw];
 }
 
 /* What the app's main is given: for a browser built on Chromium (Chrome's open-source build, Electron and CEF apps
@@ -61,21 +77,38 @@ static NSArray<NSString *> *arguments_for(NSString *app, NSString *exe) {
     NSMutableArray *args = [NSMutableArray arrayWithObject:exe];
     NSString *fw = [app stringByAppendingPathComponent:@"Contents/Frameworks"];
     NSArray *names = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:fw error:nil];
-    BOOL chromium = NO;
-    for (NSString *n in names)
+    BOOL chromium = NO, branded = NO;
+    for (NSString *n in names) {
         if ([n hasSuffix:@"Chromium Framework.framework"] || [n hasSuffix:@"Chrome Framework.framework"] ||
             [n isEqualToString:@"Chromium Embedded Framework.framework"] || [n isEqualToString:@"Electron Framework.framework"])
             chromium = YES;
+        if ([n isEqualToString:@"Google Chrome Framework.framework"] || [n hasPrefix:@"Google Chrome for Testing"]) branded = YES;
+    }
     if (chromium) {
         NSString *data = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject
             stringByAppendingPathComponent:[@"Mac Apps/" stringByAppendingString:app.lastPathComponent.stringByDeletingPathExtension]];
         [[NSFileManager defaultManager] createDirectoryAtPath:data withIntermediateDirectories:YES attributes:nil error:nil];
+        [args addObject:[@"--user-data-dir=" stringByAppendingString:data]];
+        if (branded)
+            /* Google builds Chrome without its in-process renderer (content/browser/browser_main_loop.cc), so its
+               renderers run as processes inside Henge, as few as Chrome allows: the GPU and network services in
+               the browser, one renderer, no site isolation, no extensions, no WebUI toolbar or preloaded WebUI
+               (each would be another renderer, another copy of Chrome's 250 MB of code). */
+            [args addObjectsFromArray:@[
+                @"--in-process-gpu", @"--enable-features=NetworkServiceInProcess2", @"--renderer-process-limit=1",
+                @"--process-per-site", @"--disable-site-isolation-trials", @"--disable-extensions",
+                @"--disable-component-extensions-with-background-pages", @"--disable-default-apps",
+                @"--disable-features=RemoteCoreAnimationAPI,SpareRendererForSitePerProcess,PreloadTopChromeWebUI,"
+                @"WebUIToolbar,WebUIReloadButton,WebUIBackForwardButton,WebUIHomeButton,WebUISplitTabsButton,"
+                @"InitialWebUI,InitialWebUIWithoutExtensions",
+            ]];
+        else
+            [args addObjectsFromArray:@[@"--single-process", @"--disable-features=RemoteCoreAnimationAPI"]];
         [args addObjectsFromArray:@[
-            [@"--user-data-dir=" stringByAppendingString:data], @"--single-process", @"--no-sandbox",
-            @"--js-flags=--jitless", @"--use-mock-keychain", @"--no-first-run", @"--no-default-browser-check",
-            @"--disable-component-update", @"--disable-background-networking", @"--disable-gpu",
-            @"--disable-gpu-compositing", @"--disable-software-rasterizer",
-            @"--disable-features=RemoteCoreAnimationAPI", @"--window-position=0,0",
+            @"--no-sandbox", @"--test-type", /* no "unsupported command-line flag" bar over the page */
+            @"--js-flags=--jitless", @"--use-mock-keychain", @"--no-first-run",
+            @"--no-default-browser-check", @"--disable-component-update", @"--disable-background-networking",
+            @"--disable-gpu", @"--disable-gpu-compositing", @"--disable-software-rasterizer", @"--window-position=0,0",
             [NSString stringWithFormat:@"--window-size=%d,%d", (int)g_presenter.screen_size.width, (int)g_presenter.screen_size.height],
         ]];
     }
@@ -97,6 +130,10 @@ int henge_tl_app_load(const char *app_path, char *err, size_t errlen) {
         HengeDualMapping *jit = henge_ios_jit_get_mapping();
         if (!jit || !jit->rw_addr || !jit->rx_addr) return snprintf(err, errlen, "Turn on JIT first."), -1;
         if (jit->size < (size_t)400 << 20) return snprintf(err, errlen, "The JIT region is too small (Settings > Performance > Code cache: 1 GB or more)."), -1;
+        /* Google Chrome runs a renderer and a storage helper beside the browser, each with its own copy of Chrome's
+           code (about 250 MB): four copies need the largest code cache. */
+        if (is_branded_chrome(@(app_path)) && jit->size < (size_t)1400 << 20)
+            return snprintf(err, errlen, "Google Chrome needs the largest code cache (Settings > Performance > Code cache: 1.5 GB). Chromium runs in less."), -1;
         HengeTlInfo info;
         if (henge_tl_info(app_path, &info, err, errlen)) return -1;
         static TlHost host;
@@ -107,7 +144,9 @@ int henge_tl_app_load(const char *app_path, char *err, size_t errlen) {
         host.shim_lookup = shim_lookup;
         host.log = log_line;
         host.soft_missing = 1;
-        host.no_processes = 1;
+        host.no_processes = 1; /* iOS starts no processes: the app's own programs run inside Henge (below) */
+        host.processes_as_threads = 1;
+        host.process_started = process_started;
         g_presenter.window_changed = window_changed;
         hk_set_presenter(&g_presenter);
 #if !TARGET_OS_OSX

@@ -96,7 +96,7 @@ int main(int argc, char **argv) {
             return 2;
         }
         setenv("HV_JIT_SPLIT", "1", 1);
-        if (hv_jit_region_open(&jit, 1024u << 20)) return 1;
+        if (hv_jit_region_open(&jit, (getenv("TEST_TL_APP_MB") ? atoi(getenv("TEST_TL_APP_MB")) : 1536) << 20)) return 1; /* the phone's largest code cache */
         mapping = (HengeDualMapping){.rx_addr = (uint8_t *)jit.base, .rw_addr = (uint8_t *)jit.base + jit.rw_diff, .size = jit.capacity * 4};
         g_dir = @(argv[2]);
         [[NSFileManager defaultManager] createDirectoryAtPath:g_dir withIntermediateDirectories:YES attributes:nil error:nil];

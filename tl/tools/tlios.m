@@ -120,6 +120,15 @@ static void image_linked(TlImage *im) {
 /* TLIOS_MSGLOG=1: the Objective-C runtime logs every message (to /tmp/msgSends-PID, its own fixed place). */
 extern void instrumentObjcMessageSends(int flag);
 
+/* A process started inside the app runs as its own .app (a helper's bundle). */
+static void process_started(int ns, const char *path) {
+    const char *macos = strstr(path, ".app/Contents/MacOS/");
+    if (!macos) return;
+    char app[4096];
+    snprintf(app, sizeof app, "%.*s", (int)(macos - path + 4), path);
+    tl_adopt_ns_bundle(ns, app);
+}
+
 /* ---- the presenter: windows to PNG files ---- */
 
 static NSString *g_snap_dir;
@@ -306,7 +315,7 @@ static void *input_thread(void *arg) {
 int main(int argc, const char **argv, const char **envp) {
     @autoreleasepool {
         TlHost host;
-        if (tl_host_init_split(&host, 1024u << 20)) {
+        if (tl_host_init_split(&host, (size_t)3 << 30)) { /* room for an app and the processes it starts */
             fprintf(stderr, "tlios: no executable region\n");
             return 120;
         }
@@ -317,6 +326,8 @@ int main(int argc, const char **argv, const char **envp) {
         host.soft_missing = 1;
         host.no_processes = 1;
         host.ios_kernel_rules = 1;
+        host.processes_as_threads = !getenv("TLIOS_NO_PROCS"); /* a test switch: refuse processes as before */
+        host.process_started = process_started;
         static HKPresenter presenter = {{1280, 800}, 2, window_changed};
         double every = 0;
         const char *input = NULL;

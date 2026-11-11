@@ -1112,7 +1112,21 @@ static NSInteger g_event_number;
                     modifiers:(NSEventModifierFlags)flags clickCount:(NSInteger)clicks button:(NSInteger)button {
     NSEvent *e = [NSEvent new];
     e->_type = type, e->_window = window, e->_windowNumber = window.windowNumber, e->_location = location;
-    e->_flags = flags, e->_clicks = clicks, e->_button = button, e->_time = now_seconds(), e->_number = ++g_event_number;
+    e->_flags = flags, e->_clicks = clicks, e->_button = button, e->_time = now_seconds();
+    /* AppKit gives a press's down, drags and up one event number, and programs rely on it (cocos2d-x takes it as the
+       touch's id: an up numbered apart from its down ends no touch, and the button stays pressed). */
+    static NSInteger press;
+    switch (type) {
+    case NSEventTypeLeftMouseDown: case NSEventTypeRightMouseDown: case NSEventTypeOtherMouseDown:
+        e->_number = press = ++g_event_number;
+        break;
+    case NSEventTypeLeftMouseUp: case NSEventTypeRightMouseUp: case NSEventTypeOtherMouseUp:
+    case NSEventTypeLeftMouseDragged: case NSEventTypeRightMouseDragged: case NSEventTypeOtherMouseDragged:
+        e->_number = press ? press : ++g_event_number;
+        break;
+    default:
+        e->_number = ++g_event_number;
+    }
     e->_pressure = (type == NSEventTypeLeftMouseDown || type == NSEventTypeLeftMouseDragged) ? 1 : 0;
     return e;
 }
