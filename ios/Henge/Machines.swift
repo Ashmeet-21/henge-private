@@ -16,6 +16,16 @@ struct VirtualMac: Identifiable, Codable, Hashable {
     /// The size macOS is told its screen is. Macs made before this was a choice have none: 16:9.
     var screenWidth: Int?
     var screenHeight: Int?
+    /// The per-start display profile remembered for each posture class (DisplayProfile raw
+    /// values, Hardware.swift). Macs made before profiles have neither field: absent means
+    /// Full, which is the pre-profile behaviour bit-for-bit, and every existing machines.json
+    /// keeps decoding unchanged because both fields are optional.
+    var profileLandscape: String?
+    var profilePortrait: String?
+    /// The remembered profile for a posture class; absent or unrecognised means Full.
+    func displayProfile(landscape: Bool) -> DisplayProfile {
+        DisplayProfile(rawValue: (landscape ? profileLandscape : profilePortrait) ?? "") ?? .full
+    }
     /// m4 fork: the iPad's own panel at Retina density. On by default on iPad, for Macs that never chose.
     var retina: Bool?
     var isRetina: Bool { Device.isPad && (retina ?? false) }

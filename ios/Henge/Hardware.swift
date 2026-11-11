@@ -7,10 +7,11 @@ enum Device {
     static let isPad = UIDevice.current.userInterfaceIdiom == .pad
     static let name = isPad ? "iPad" : "iPhone"
 
-    /// A Mac's screen that fills this device on its side: 1920 wide, as tall as the shape asks. iPads and
-    /// squarer phones (iPhone Duo, about 1.46:1) would get bars above and below at 16:9. Phones wider
-    /// than 16:9 come out at 1920×1080, as before.
+    /// A Mac's screen that fills this device on its side: 1920 wide, as tall as the shape asks. iPads are
+    /// squarer than 16:9, which would leave bars above and below. Phones use the full-screen viewport
+    /// plan instead: the guest is the display's own native pixels, so it fills the device exactly.
     static var fittingScreen: (width: Int, height: Int) {
+        guard isPad else { return ViewportPlan.fullScreenGuest }
         let size = UIScreen.main.bounds.size
         let shape = max(size.width, size.height) / max(min(size.width, size.height), 1)
         return (1920, min(max(Int((1920 / shape / 8).rounded()) * 8, 1080), 1440))
@@ -66,6 +67,151 @@ enum Device {
     }()
 
     static let chipTooOldText = "macOS won't run on this \(name). Henge needs an A14 or M1 chip or newer."
+}
+
+/// A per-start display profile: a named Start-time choice of guest size, resolved through
+/// ViewportPlan and remembered per machine, per posture class (VirtualMac.profileLandscape /
+/// profilePortrait). Profiles are behaviour, not data: the definitions live here in code, the
+/// machine record stores only the chosen raw value, and an absent choice means Full.
+/// Sizing is boot-time only, exactly like the display mode itself: a profile applies at the
+/// next Start and never changes a running session.
+enum DisplayProfile: String, CaseIterable {
+    case full, perf, splitCompact
+
+    /// The guest-size scale against the Full guest size. Split-compact does not scale the
+    /// guest; it shrinks the portrait pane instead (portraitPaneFraction).
+    var scale: CGFloat {
+        switch self {
+        case .full, .splitCompact: return 1
+        case .perf: return 0.75
+        }
+    }
+
+    /// The fraction of the scene height the portrait split pane takes. Today's split is the
+    /// top half; Split-compact takes the top 0.42, giving the bottom surface the difference.
+    var portraitPaneFraction: CGFloat { self == .splitCompact ? 0.42 : 0.5 }
+
+    var displayName: String {
+        switch self {
+        case .full: return "Full"
+        case .perf: return "Perf"
+        case .splitCompact: return "Split-compact"
+        }
+    }
+
+    /// The profile's scale applied to a stored screen size (the record-size surface, e.g. the
+    /// host default 1920x1080): multiply by the scale, floored to an even dimension.
+    /// 1920x1080 at Perf is 1440x810. ViewportPlan's own Perf derivation floors to a
+    /// multiple of 8 instead, as pane-derived guest sizes always have (2664x1872 at Perf
+    /// is 1992x1400); the two surfaces keep their own granularity, the scale is the same.
+    static func scaledScreenSize(width: Int, height: Int, profile: DisplayProfile) -> (width: Int, height: Int) {
+        guard profile == .perf else { return (width, height) }
+        func scaled(_ dimension: Int) -> Int { max(64, Int(CGFloat(dimension) * profile.scale) / 2 * 2) }
+        return (scaled(width), scaled(height))
+    }
+}
+
+/// How a Mac's screen maps onto this device for one session: the pane it occupies (points, in the
+/// session's full-geometry coordinates) and the size macOS is told its screen is (physical pixels).
+/// One plan, from the active window scene, gives both the size handed to the engine at boot and
+/// the guest size pointer following normalizes against, so the two always describe the same
+/// rectangle: the guest framebuffer is the pane at the scene screen's native scale, and the pane
+/// is the guest back in points, each guest dimension rounded down to a multiple of 8 (the
+/// granularity the iPad fitting size already used). Nothing is aspect-fitted or letterboxed:
+/// full-screen sessions take the whole display, and in portrait the pane is the full width and
+/// the top half of the height (the little-laptop split), so the Mac is edge to edge in both. The
+/// pane is re-derived from the guest, so it can never exceed the scene bounds it was made from.
+/// The boot path and pointer following derive the plan from the same scene geometry and the
+/// scene screen's native scale, so the guest size they use cannot diverge.
+struct ViewportPlan {
+    let pane: CGRect          // in scene-bounds points; never larger than bounds
+    let bounds: CGSize        // the scene bounds the pane sits inside
+    let guestWidth: Int
+    let guestHeight: Int
+    let scale: CGFloat        // the scene screen's native scale
+    let nativeBounds: CGSize  // the scene screen's native bounds, in pixels
+    let landscape: Bool
+    let profile: DisplayProfile // the per-start display profile this plan was resolved with
+
+    var aspect: CGFloat { CGFloat(guestWidth) / CGFloat(max(guestHeight, 1)) }
+    var guest: (width: Int, height: Int) { (guestWidth, guestHeight) }
+
+    /// The plan for a scene of `bounds` points on a screen of the given native scale. In portrait
+    /// a session shows the split layout, so the pane is the top half; `split` says so.
+    static func make(bounds: CGSize, scale: CGFloat, nativeBounds: CGSize, split: Bool = true,
+                     profile: DisplayProfile = .full) -> ViewportPlan {
+        let s = scale > 0 ? scale : 2
+        let landscape = bounds.width > bounds.height
+        func pixels(_ points: CGFloat) -> Int { max(64, Int(points * s) / 8 * 8) }
+        // The Full guest size, exactly as before profiles: the whole scene, or in the portrait
+        // split the pane's fraction of the height (the top half, or Split-compact's 0.42).
+        let fullW = pixels(bounds.width)
+        let fullH = pixels(!landscape && split ? bounds.height * profile.portraitPaneFraction : bounds.height)
+        // Perf derives the guest FROM the Full pane size at the profile's scale, floored to a
+        // multiple of 8; the pane itself is never derived from the reduced guest, so the pane
+        // stays the Full pane, edge to edge, and the presenter draws the smaller framebuffer
+        // into it. Deriving the pane from the reduced guest would shrink it to 75% and leave
+        // bars, defeating the profile.
+        var guestW = fullW, guestH = fullH
+        if profile == .perf {
+            guestW = max(64, Int(CGFloat(fullW) * profile.scale) / 8 * 8)
+            guestH = max(64, Int(CGFloat(fullH) * profile.scale) / 8 * 8)
+        }
+        let paneW = CGFloat(fullW) / s, paneH = CGFloat(fullH) / s
+        let pane = CGRect(x: (bounds.width - paneW) / 2, y: landscape ? (bounds.height - paneH) / 2 : 0,
+                          width: paneW, height: paneH)
+        return ViewportPlan(pane: pane, bounds: bounds, guestWidth: guestW, guestHeight: guestH,
+                            scale: s, nativeBounds: nativeBounds, landscape: landscape, profile: profile)
+    }
+
+    /// The active window scene: the only trustworthy source on a foldable. UIScreen.main on the
+    /// unfolded Duo reports a different screen than the session runs on (466x678 pt and
+    /// 1398x2034 px in a landscape session on the inner panel), so nothing sizes from it.
+    private static var activeScene: UIWindowScene? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        return scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+    }
+
+    /// `profileFor` resolves the per-start display profile from the scene's posture class
+    /// (true = landscape), which only the scene itself knows; a caller passes the machine's
+    /// remembered choice as `{ mac.displayProfile(landscape: $0) }`. Nil means Full, so every
+    /// pre-profile call site keeps its exact behaviour.
+    private static func scenePlan(split: Bool, profileFor: ((Bool) -> DisplayProfile)? = nil) -> ViewportPlan {
+        let scene = activeScene
+        let bounds = scene?.coordinateSpace.bounds ?? UIScreen.main.bounds
+        let screen = scene?.screen ?? UIScreen.main
+        let profile = profileFor?(bounds.width > bounds.height) ?? .full
+        return make(bounds: bounds.size, scale: screen.nativeScale,
+                    nativeBounds: screen.nativeBounds.size, split: split, profile: profile)
+    }
+
+    /// The plan for the device's current window scene: what run() boots with and what pointer
+    /// following normalizes against, one plan from one source. A session started folded,
+    /// unfolded or on its side is sized for the screen it actually starts on. run() logs the
+    /// plan at boot, so the session log records the pane and the guest size the session used.
+    static func current(observing size: CGSize? = nil, insets: EdgeInsets? = nil,
+                        profileFor: ((Bool) -> DisplayProfile)? = nil) -> ViewportPlan {
+        if let size, let insets { observedGeometry = (size, insets) }
+        return scenePlan(split: true, profileFor: profileFor)
+    }
+
+    /// The guest size for a Mac filling the whole display in the current orientation (new Macs).
+    static var fullScreenGuest: (width: Int, height: Int) { scenePlan(split: false).guest }
+
+    /// The geometry SessionView last laid out with, for the session log.
+    static var observedGeometry: (size: CGSize, insets: EdgeInsets)?
+
+    /// Everything the session log needs to prove the fit, in one line. The renderer's own
+    /// drawableSize line (pvg_metal, "[pvg] drawableSize ...") completes the proof.
+    func describe() -> String {
+        var text = "scene bounds \(Int(bounds.width))x\(Int(bounds.height)) pt, scene screen nativeBounds \(Int(nativeBounds.width))x\(Int(nativeBounds.height)) px, nativeScale \(scale)"
+        if let g = Self.observedGeometry {
+            text += "; geo \(Int(g.size.width))x\(Int(g.size.height)) pt, insets (top \(Int(g.insets.top)), leading \(Int(g.insets.leading)), bottom \(Int(g.insets.bottom)), trailing \(Int(g.insets.trailing)))"
+        }
+        text += "; pane \(Int(pane.width))x\(Int(pane.height)) pt at (\(Int(pane.minX)),\(Int(pane.minY))); guest \(guestWidth)x\(guestHeight) px (\(landscape ? "landscape" : "portrait"))"
+        text += "; profile \(profile.rawValue), scale \(String(format: "%g", Double(profile.scale)))"
+        return text
+    }
 }
 
 /// A keyboard attached to the device, by HID usage, which is what the Mac's USB keyboard sends, so every

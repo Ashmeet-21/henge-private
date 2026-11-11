@@ -69,6 +69,7 @@ void henge_vm_set_display_mm(uint32_t width_mm, uint32_t height_mm);
 void henge_vm_key(uint16_t code, int down);
 void henge_vm_key_hid(uint8_t usage, int down); /* a hardware keyboard: iOS gives each key's HID usage */
 void henge_vm_mouse_move(int dx, int dy);
+void henge_vm_mouse_move_abs(int x, int y);
 void henge_vm_mouse_button(int button, int down);
 /* Wheel units: dy > 0 up, dx > 0 right. */
 void henge_vm_mouse_scroll(int dx, int dy);

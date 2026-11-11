@@ -214,3 +214,12 @@ $(B)/test_jit_advice: ios/Henge/JIT/JITNetworkAdvice.swift tests/test_jit_advice
 test-jit-advice: $(B)/test_jit_advice
 	$(B)/test_jit_advice
 .PHONY: test-jit-advice
+
+# Keyboard-viewport solver + signal chain: the shipped
+# KeyboardViewport.swift compiled unchanged, exercised headlessly.
+$(B)/test_kb_viewport: ios/Henge/KeyboardViewport.swift tests/test_kb_viewport.swift | $(B)
+	xcrun --sdk macosx swiftc $^ -o $@
+
+test-kb-viewport: $(B)/test_kb_viewport
+	$(B)/test_kb_viewport
+.PHONY: test-kb-viewport

@@ -17,6 +17,7 @@ struct SettingsView: View {
     @AppStorage(EngineTuning.superblocksKey) private var superblocks = true
     @AppStorage(JITBootstrap.codeCacheKey) private var codeCacheMB = JITBootstrap.defaultCodeCacheMB
     @AppStorage(DeskAppearance.key) private var appearance = DeskAppearance.system
+    @AppStorage("henge.keyboardZoom") private var keyboardZoom = true
 
     /// The second footer paragraph: how you click, given the selected input mode.
     private var inputDescription: String {
@@ -136,6 +137,12 @@ struct SettingsView: View {
                     }
                     .pickerStyle(.segmented)
                     Text("System follows the \(Device.name)'s Light or Dark setting. Henge stays dark while a Mac is running.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                .listRowBackground(Desk.card)
+                Section("Keyboard") {
+                    Toggle("Zoom to keyboard focus", isOn: $keyboardZoom)
+                    Text("When the on-screen keyboard opens over a Mac, Henge pans and zooms so the text field being used stays visible above the keyboard. Turning this off leaves the Mac where it is, as before.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 .listRowBackground(Desk.card)

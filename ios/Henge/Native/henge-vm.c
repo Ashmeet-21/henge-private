@@ -286,6 +286,11 @@ void henge_vm_mouse_move(int dx, int dy) {
     hv_vm_mouse_move(dx, dy);
     pthread_rwlock_unlock(&api_lock);
 }
+void henge_vm_mouse_move_abs(int x, int y) {
+    if (!lock_running()) return;
+    hv_vm_mouse_move_abs(x, y);
+    pthread_rwlock_unlock(&api_lock);
+}
 void henge_vm_mouse_button(int button, int down) {
     if (!lock_running()) return;
     hv_vm_mouse_button(button, down);

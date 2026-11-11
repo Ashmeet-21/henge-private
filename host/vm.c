@@ -507,6 +507,13 @@ void hv_vm_key_hid(uint8_t usage, int down) {
     else hv_xhci_key(board.usb, usage, down);
 }
 
+/* Which pointing device buttons and wheel go to: the one most recently
+   moved. 0 is the virtio mouse (relative), 1 the USB tablet (absolute).
+   Both are enumerated on every boot; macOS merges them into one cursor. */
+static int active_abs;
+static int virtio_buttons; /* bits of the buttons down on the virtio mouse, as sent (the right button goes out as left: see button_now); only the pointer queue touches this */
+static int tablet_buttons; /* bitmask of buttons currently down on the tablet */
+
 static void move_now(void *ctx) {
     if (atomic_load(&input_stopping)) return;
     int64_t packed = (int64_t)(intptr_t)ctx;
@@ -518,15 +525,12 @@ static void move_now(void *ctx) {
     hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
 }
 
-void hv_vm_mouse_move(int dx, int dy) {
-    int64_t packed = (int64_t)((uint64_t)(uint32_t)dx << 32 | (uint32_t)dy);
-    dispatch_async_f(pointer_queue(), (void *)(intptr_t)packed, move_now);
-}
-
 static void left_update(void) {
     int down = left_user || left_click;
     if (down == left_sent) return;
     left_sent = down;
+    if (down) virtio_buttons |= 1 << 0;
+    else virtio_buttons &= ~(1 << 0);
     hv_virtio_input_send(board.mouse, HV_EV_KEY, HV_BTN_LEFT, down);
     hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
 }
@@ -550,18 +554,88 @@ static void button_now(void *ctx) {
             rctrl_hold(&rctrl_click, 0);
         }
     } else if (button == 2) {
+        if (down) virtio_buttons |= 1 << 2;
+        else virtio_buttons &= ~(1 << 2);
         hv_virtio_input_send(board.mouse, HV_EV_KEY, HV_BTN_MIDDLE, down);
         hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
     }
 }
 
+/* Runs on the pointer queue, behind any presses already on their way: lifts every
+   virtio button still down, so a switch to the tablet never strands one on the mouse.
+   The click side of the right Control hold is dropped too, or a Control-click caught
+   mid-switch would leave Control down on the keyboard with nobody to lift it. */
+static void release_virtio_now(void *ctx) {
+    (void)ctx;
+    left_user = 0;
+    left_click = 0;
+    left_update();
+    if (virtio_buttons & (1 << 2)) {
+        virtio_buttons &= ~(1 << 2);
+        hv_virtio_input_send(board.mouse, HV_EV_KEY, HV_BTN_MIDDLE, 0);
+        hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
+    }
+    virtio_buttons = 0;
+    rctrl_hold(&rctrl_click, 0);
+}
+
+/* A switch first releases any button still down on the outgoing device,
+   so no button is ever stranded on a device nobody will release. */
+static void release_outgoing(int to_abs) {
+    if (to_abs) {
+        dispatch_async_f(pointer_queue(), NULL, release_virtio_now);
+    } else {
+        for (int b = 0; b < 3; b++)
+            if (tablet_buttons & (1 << b)) hv_xhci_tablet_button(board.usb, b, 0);
+        tablet_buttons = 0;
+    }
+}
+
+static void set_active(int abs_mode) {
+    if (abs_mode == active_abs) return;
+    release_outgoing(abs_mode);
+    active_abs = abs_mode;
+}
+
+void hv_vm_mouse_move(int dx, int dy) {
+    set_active(0);
+    int64_t packed = (int64_t)((uint64_t)(uint32_t)dx << 32 | (uint32_t)dy);
+    dispatch_async_f(pointer_queue(), (void *)(intptr_t)packed, move_now);
+}
+
+void hv_vm_mouse_move_abs(int x, int y) {
+    uint32_t w = 0, h = 0;
+    hv_pvg_lite_display_size(&w, &h);
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (w >= 1 && x > (int)w - 1) x = (int)w - 1;
+    if (h >= 1 && y > (int)h - 1) y = (int)h - 1;
+    set_active(1);
+    hv_xhci_tablet_move(board.usb, (uint16_t)x, (uint16_t)y);
+}
+
 void hv_vm_mouse_button(int button, int down) {
     if (button < 0 || button > 2) return;
+    if (active_abs) {
+        if (down) tablet_buttons |= 1 << button;
+        else tablet_buttons &= ~(1 << button);
+        hv_xhci_tablet_button(board.usb, button, down);
+        return;
+    }
     dispatch_async_f(pointer_queue(), (void *)(intptr_t)(button << 1 | !!down), button_now);
 }
 
 /* The guest takes a wheel event as 8 bits: -200 arrives as +56, the wrong way. So big moves go in pieces. */
 static void wheel(uint16_t axis, int amount) {
+    if (active_abs) {
+        if (axis == HV_REL_HWHEEL) return; /* the v1 tablet descriptor has no horizontal wheel field */
+        while (amount) {
+            int piece = amount > 100 ? 100 : amount < -100 ? -100 : amount;
+            hv_xhci_tablet_wheel(board.usb, piece);
+            amount -= piece;
+        }
+        return;
+    }
     while (amount) {
         int piece = amount > 100 ? 100 : amount < -100 ? -100 : amount;
         hv_virtio_input_send(board.mouse, HV_EV_REL, axis, piece);
@@ -572,7 +646,6 @@ static void wheel(uint16_t axis, int amount) {
 
 void hv_vm_mouse_wheel(int dy) { wheel(HV_REL_WHEEL, dy); }
 void hv_vm_mouse_hwheel(int dx) { wheel(HV_REL_HWHEEL, dx); }
-
 void hv_vm_touch(int id, int phase, int x, int y, uint32_t ts_ms) {
     if (x < 0) x = 0;
     if (x > HV_TP_SENSOR_X) x = HV_TP_SENSOR_X;

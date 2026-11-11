@@ -229,6 +229,11 @@ static void prof_dump(const char *path) {
 /* Walks the pointer to a spot on the screen, watching where the display says
    it is, in small steps as a hand makes: macOS accelerates big ones past the target. */
 static void pointer_to(int x, int y) {
+    if (getenv("HV_POINTER_ABS")) { /* absolute fast path: one report, one settle */
+        hv_vm_mouse_move_abs(x, y);
+        usleep(30000);
+        return;
+    }
     const uint8_t *page = hv_pvg_lite_display_page(board.pvg);
     for (int i = 0; page && i < 1500; i++) {
         uint32_t at = *(const volatile uint32_t *)(page + 0xe00);
@@ -243,6 +248,12 @@ static void pointer_to(int x, int y) {
 }
 
 static void click_here(void) {
+    if (getenv("HV_POINTER_ABS")) { /* click on the active device (the tablet, after an absolute move) */
+        hv_vm_mouse_button(0, 1);
+        usleep(120000);
+        hv_vm_mouse_button(0, 0);
+        return;
+    }
     hv_virtio_input_send(board.mouse, HV_EV_KEY, HV_BTN_LEFT, 1);
     hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
     usleep(120000);
@@ -527,7 +538,14 @@ static void *input_thread(void *unused) {
         at = ftell(f);
         line[strcspn(line, "\n")] = 0;
         int x, y;
-        if (sscanf(line, "click %d %d", &x, &y) == 2) pointer_to(x, y), click_here();
+        if (sscanf(line, "absmove %d %d", &x, &y) == 2) hv_vm_mouse_move_abs(x, y);
+        else if (sscanf(line, "absclick %d %d", &x, &y) == 2) {
+            hv_vm_mouse_move_abs(x, y);
+            hv_vm_mouse_button(0, 1);
+            usleep(120000);
+            hv_vm_mouse_button(0, 0);
+        }
+        else if (sscanf(line, "click %d %d", &x, &y) == 2) pointer_to(x, y), click_here();
         else if (sscanf(line, "move %d %d", &x, &y) == 2) pointer_to(x, y);
         else if (sscanf(line, "scroll %d %d", &x, &y) == 2) {
             if (y) hv_vm_mouse_wheel(y);
@@ -580,8 +598,7 @@ static void *input_thread(void *unused) {
         else if (!strncmp(line, "tpclick ", 8)) /* "tpclick 1|0": the Magic Trackpad 2's own press (testing) */
             hv_xhci_touch_button(board.usb, atoi(line + 8));
         else if (!strncmp(line, "press", 5) || !strncmp(line, "release", 7)) {
-            hv_virtio_input_send(board.mouse, HV_EV_KEY, HV_BTN_LEFT, line[0] == 'p');
-            hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
+            hv_vm_mouse_button(0, line[0] == 'p'); /* the active device: virtio at boot, the tablet after an absmove */
         }
         else if (!strncmp(line, "clip ", 5)) hv_share_set_clipboard(line + 5);
         else if (!strncmp(line, "getclip", 7)) {

@@ -61,6 +61,8 @@ int hv_pvg_trace_on(void);
 
 /* The size macOS is told its screen is. Set before the machine starts; default 1920 x 1080. */
 void hv_pvg_lite_set_mode(uint32_t width, uint32_t height);
+/* The size most recently set (or the default), for the tablet descriptor. */
+void hv_pvg_lite_display_size(uint32_t *w, uint32_t *h);
 void hv_pvg_lite_set_size_mm(uint32_t width_mm, uint32_t height_mm);
 
 #endif

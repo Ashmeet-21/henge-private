@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import GameController
 import UIKit
 
@@ -22,6 +23,10 @@ struct SessionView: View {
     @State private var started = Date()
     @State private var thermalState = ProcessInfo.processInfo.thermalState
     @AppStorage("henge.cpus") private var cpus = 4
+    /// Pointing mode: "auto" (the default when nothing is stored), "direct", or
+    /// "trackpad". A person-and-posture preference, readable before any machine
+    /// is chosen, so it lives here and not in the machine record.
+    @AppStorage("henge.pointing") private var pointing = "auto"
     @AppStorage("henge.matchScreenColors") private var matchScreenColors = true
     @AppStorage("henge.display.brightness") private var screenBrightness = 1.0
     @AppStorage("henge.cursor.sharp") private var sharpCursor = true
@@ -50,6 +55,15 @@ struct SessionView: View {
     @State private var restartWanted = false // Restart was chosen here: start again once macOS has shut down
     @State private var askedMac: Date? // when macOS was last asked to shut down or restart
     @State private var zoomCentre = CGPoint(x: 0.5, y: 0.5) // where the zoomed view is, 0...1 of the Mac's screen
+    /// Keyboard viewport: app-wide toggle, default ON.
+    @AppStorage("henge.keyboardZoom") private var kbZoomEnabled = true
+    @State private var kbKeyboard: KeyboardInfo?
+    @State private var kbTarget: KBFocusTarget?
+    @State private var kbActive = false
+    @State private var kbArmed = false
+    @State private var kbManualTakeover = false
+    @State private var kbFade = true
+    @State private var kbPhase = "full" // full / focused / returning (bookkeeping)
     @State private var map: UIImage?
     @State private var zoomFollowing: Task<Void, Never>?
     @State private var helperRunning = false
@@ -63,12 +77,16 @@ struct SessionView: View {
             let full = CGSize(width: geo.size.width + insets.leading + insets.trailing,
                               height: geo.size.height + insets.top + insets.bottom)
             let landscape = full.width > full.height
-            let layout = Layout(full: full, insets: insets, landscape: landscape, zoomed: zoomed, typing: typing, centre: zoomCentre, aspect: mac.aspect)
+            let layout = Layout(full: full, insets: insets, landscape: landscape, zoomed: zoomed, typing: typing, centre: zoomCentre, aspect: mac.aspect,
+                                kb: kbLayoutInput(full: full, insets: insets, landscape: landscape))
+            /// An explicit choice wins; auto is direct when the pane fills the phone
+            /// and trackpad in the portrait split.
+            let effectiveDirect = pointing == "direct" || (pointing != "trackpad" && layout.fillsPhone)
             ZStack(alignment: .topLeading) {
                 (landscape || zoomed ? Color.black : Desk.page)
                 // One view in every layout: it holds the layer the engine draws into.
                 BootDisplay(display: display, role: .device)
-                    .opacity(display.isExternal ? 0 : 1)
+                    .opacity(display.isExternal ? 0 : (kbFade ? 1 : 0.35))
                     .overlay {
                         if display.isExternal && state != 2 {
                             VStack(spacing: 8) {
@@ -109,7 +127,7 @@ struct SessionView: View {
                     }
                     .position(x: layout.screen.midX, y: layout.screen.midY)
                 if state != 2 {
-                    Trackpad()
+                    Trackpad(direct: effectiveDirect, screenRect: layout.screen, touchOrigin: layout.touch.origin)
                         .frame(width: layout.touch.width, height: layout.touch.height)
                         .position(x: layout.touch.midX, y: layout.touch.midY)
                     if inputMode == .volumeButtons && volumeMode == .intercept {
@@ -164,7 +182,7 @@ struct SessionView: View {
                         .position(x: layout.touch.midX, y: layout.fillsPhone ? layout.touch.midY : layout.pad.midY)
                 }
                 if let error { errorCard(error, layout) }
-                KeyboardCatcher(active: $typing).frame(width: 0, height: 0)
+                KeyboardCatcher(active: $typing, onKeyboard: { handleKeyboard($0) }).frame(width: 0, height: 0)
             }
             .frame(width: full.width, height: full.height)
             .ignoresSafeArea()
@@ -182,6 +200,9 @@ struct SessionView: View {
             .onReceive(NotificationCenter.default.publisher(for: Trackpad.revealTap)) { _ in
                 controlsHidden = false
                 showRevealHint = false
+            }
+            .onChange(of: landscape) { _ in
+                KeyboardSignals.shared.postureChanged()
             }
             .onAppear { shown = layout.shown }
             .onChange(of: layout.shown) { shown = $0 }
@@ -204,8 +225,24 @@ struct SessionView: View {
                  : "macOS has been asked. If it is stuck, Force Off turns the Mac off at once: anything not saved on it is lost.")
         }
         .onChange(of: zoomed) { on in
+            if on && kbActive {
+                // Manual takeover: the zoom tool ends keyboard focus; the
+                // view adopts the focus target as its centre and this keyboard
+                // session will not auto-return on dismiss.
+                kbManualTakeover = true
+                kbActive = false
+                if let target = kbTarget { zoomCentre = target.point }
+                kbTarget = nil
+            }
             zoomFollowing?.cancel()
             zoomFollowing = on ? Task { await followPointer() } : nil
+        }
+        .onChange(of: kbZoomEnabled) { on in
+            if !on && kbActive {
+                animateKB(duration: 0.25, curve: 0) { kbActive = false; kbKeyboard = nil }
+                kbTarget = nil
+                kbPhase = "full"
+            }
         }
         .onChange(of: pointerNeeded) { PointerLock.set(!$0) }
         .onChange(of: scenePhase) { phase in
@@ -213,9 +250,23 @@ struct SessionView: View {
                 display.refresh()
                 return
             }
+            if kbActive || kbKeyboard != nil {
+                var tx = Transaction()
+                tx.disablesAnimations = true
+                withTransaction(tx) { kbActive = false }
+                kbKeyboard = nil
+                kbTarget = nil
+                kbArmed = false
+                kbPhase = "full"
+            }
             HardwareKeys.releaseAll()
             HardwareMouse.shared.releaseButtons()
             VolumeClicks.shared.releaseButtons()
+            // Blanket release on whichever pointer device is active: no-ops when
+            // nothing is down, and the rescue when a drag is interrupted.
+            henge_vm_mouse_button(0, 0)
+            henge_vm_mouse_button(1, 0)
+            henge_vm_mouse_button(2, 0)
         }
         .onChange(of: showDetails) { showing in
             if showing { HardwareKeys.releaseAll(); StickyKeys.shared.releaseAll() }
@@ -237,15 +288,23 @@ struct SessionView: View {
         .onDisappear {
             RemoteDesktop.shared.stop()
             UIApplication.shared.isIdleTimerDisabled = false
+            KeyboardSignals.shared.endSession()
+            kbActive = false
+            kbKeyboard = nil
+            kbTarget = nil
             zoomFollowing?.cancel()
             StickyKeys.shared.releaseAll()
             HardwareKeys.releaseAll()
+            henge_vm_mouse_button(0, 0)
+            henge_vm_mouse_button(1, 0)
+            henge_vm_mouse_button(2, 0)
             HardwareMouse.shared.stop()
             HardwareKeys.stop()
             VolumeClicks.shared.stop()
         }
         .modifier(ExternalMacDisplayModifier(presentation: MacPresentation(display: display, aspect: mac.aspect)))
         .task(id: bootAttempt) { await run() }
+        .task { await kbSignalSampler() }
         .task { await Sharing.followMacClipboard() }
     }
 
@@ -268,10 +327,31 @@ struct SessionView: View {
             CGSize(width: min(touch.width / max(screen.width, 1), 1), height: min(touch.height / max(screen.height, 1), 1))
         }
 
-        init(full: CGSize, insets: EdgeInsets, landscape: Bool, zoomed: Bool, typing: Bool, centre: CGPoint, aspect: CGFloat) {
+        /// The keyboard viewport's input: the visible band above the keyboard
+        /// (Layout coordinates), the focus target (normalised guest), and the
+        /// base screen rect the solver solves from. Layout derives its
+        /// geometry from the aspect alone, so the caller, which already
+        /// builds the base layout to find the band, supplies that rect.
+        struct KBInput {
+            var band: CGRect
+            var target: KBFocusTarget
+            var baseScreen: CGRect
+        }
+
+        init(full: CGSize, insets: EdgeInsets, landscape: Bool, zoomed: Bool, typing: Bool, centre: CGPoint, aspect: CGFloat, kb: KBInput? = nil) {
             self.insets = insets
             let big = full.height >= 600 // an iPad on its side, or a window on one
-            if zoomed {
+            if let kb, let solved = KeyboardSolver.solve(baseScreen: kb.baseScreen, band: kb.band, fullHeight: full.height, target: kb.target) {
+                // Keyboard viewport: expressed ONLY as this screen rect,
+                // so rendering and Trackpad mapping follow it
+                // together. It wins over manual zoom while active; the manual
+                // state is untouched underneath and returns on hide.
+                screen = solved
+                touch = CGRect(origin: .zero, size: full)
+                fillsPhone = true
+                toolsY = 0
+                pad = .zero
+            } else if zoomed {
                 // Upright, as tall as the device. On its side, bigger than it fits: a big screen needs less.
                 let height = landscape ? full.height * (big ? 1.5 : 2) : max(full.height - insets.bottom, full.width / aspect)
                 let width = height * aspect
@@ -321,6 +401,154 @@ struct SessionView: View {
         }
     }
 
+    // MARK: Keyboard viewport
+
+    /// The band the current keyboard frame leaves visible, in Layout
+    /// coordinates. The band is the pane's own column: coverage is
+    /// about guest content, and the pane sits inside the full geometry with
+    /// a ~1 pt centring margin no layout covers with guest pixels.
+    /// coordinates. The frame Holder reports is in scene (window)
+    /// coordinates; Layout coordinates shift scene coordinates by the same
+    /// centring offset Layout applies between the full geometry and the
+    /// scene bounds.
+    private func kbBand(info: KeyboardInfo, full: CGSize, insets: EdgeInsets, baseScreen: CGRect, target: KBFocusTarget) -> CGRect {
+        // The scene bounds are the full geometry minus its insets, so the
+        // centring offset is half the inset sums on each axis.
+        let offset = CGPoint(x: (insets.leading + insets.trailing) / 2, y: (insets.top + insets.bottom) / 2)
+        let frame = info.frameInLayout.offsetBy(dx: offset.x, dy: offset.y)
+        if info.docked {
+            let top = max(baseScreen.minY, frame.minY)
+            return CGRect(x: baseScreen.minX, y: baseScreen.minY, width: baseScreen.width, height: max(0, top - baseScreen.minY))
+        }
+        // Floating keyboard: no intersection with the target's placement
+        // means no occlusion: the band is the whole screen and the gate
+        // passes. Otherwise the band ends at the frame's top when it spans
+        // the focus column, else at its bottom edge in that column.
+        let targetView = KeyboardSolver.viewRect(forNormalized: target.rect, in: baseScreen).insetBy(dx: -10, dy: -10)
+        if !frame.intersects(targetView) {
+            return CGRect(x: baseScreen.minX, y: baseScreen.minY, width: baseScreen.width, height: baseScreen.height)
+        }
+        let focusX = baseScreen.minX + target.point.x * baseScreen.width
+        let spansColumn = frame.minX <= focusX && focusX <= frame.maxX
+        let bottom = spansColumn ? frame.minY : frame.maxY
+        return CGRect(x: baseScreen.minX, y: baseScreen.minY, width: baseScreen.width, height: max(0, bottom - baseScreen.minY))
+    }
+
+    private func kbLayoutInput(full: CGSize, insets: EdgeInsets, landscape: Bool) -> Layout.KBInput? {
+        guard kbZoomEnabled, kbActive, let info = kbKeyboard, let target = kbTarget else { return nil }
+        let base = Layout(full: full, insets: insets, landscape: landscape, zoomed: false, typing: typing, centre: zoomCentre, aspect: mac.aspect, kb: nil)
+        return Layout.KBInput(band: kbBand(info: info, full: full, insets: insets, baseScreen: base.screen, target: target), target: target, baseScreen: base.screen)
+    }
+
+    /// Drive a keyboard transform change with the keyboard notification's own
+    /// duration and curve (fallback 0.25 s easeInOut). Reduce Motion cuts
+    /// under a 0.12 s crossfade instead.
+    private func animateKB(duration: Double, curve: Int, _ change: () -> Void) {
+        if UIAccessibility.isReduceMotionEnabled {
+            kbFade = false
+            withAnimation(.linear(duration: 0.12), change)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                withAnimation(.linear(duration: 0.12)) { kbFade = true }
+            }
+            return
+        }
+        let d = duration > 0 ? duration : 0.25
+        let animation: Animation
+        switch curve {
+        case 1: animation = .easeIn(duration: d)
+        case 2: animation = .easeOut(duration: d)
+        case 3: animation = .linear(duration: d)
+        default: animation = .easeInOut(duration: d)
+        }
+        withAnimation(animation, change)
+    }
+
+    private func adoptKBTarget(_ target: KBFocusTarget, info: KeyboardInfo) {
+        if target.source == "tap" { KeyboardSignals.shared.consumeTap() }
+        kbArmed = false
+        kbPhase = "focused"
+        animateKB(duration: info.duration, curve: info.curve) {
+            kbTarget = target
+            kbKeyboard = info
+            kbActive = true
+        }
+        HengeLog.log("keyboard", "focus target \(target.source) at \(target.point)")
+    }
+
+    private func handleKeyboard(_ event: KeyboardEvent) {
+        switch event {
+        case .hide(let duration, let curve):
+            KeyboardSignals.shared.kbDidHide()
+            kbArmed = false
+            if kbManualTakeover {
+                kbManualTakeover = false
+                kbTarget = nil
+                kbKeyboard = nil
+                kbPhase = "full"
+                return
+            }
+            if kbActive {
+                kbPhase = "returning"
+                animateKB(duration: duration, curve: curve) {
+                    kbActive = false
+                    kbKeyboard = nil
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + max(duration, 0.12) + 0.05) {
+                    if kbPhase == "returning" { kbPhase = "full" }
+                }
+            } else {
+                kbKeyboard = nil
+            }
+            kbTarget = nil
+        case .show(let info):
+            guard kbZoomEnabled, !showDetails, !confirmStop, error == nil else { return }
+            KeyboardSignals.shared.kbWillShow()
+            guard !kbManualTakeover else { kbKeyboard = info; return }
+            if let target = KeyboardSignals.shared.focusTarget(guestWidth: Trackpad.guestScreenWidth, guestHeight: Trackpad.guestScreenHeight) {
+                adoptKBTarget(target, info: info)
+            } else {
+                kbKeyboard = info
+                kbArmed = true
+                HengeLog.log("keyboard", "no focus signal; staying full, late-focus armed")
+            }
+        case .changeFrame(let info):
+            guard kbZoomEnabled, !showDetails, !confirmStop, error == nil else { return }
+            guard !kbManualTakeover else { kbKeyboard = info; return }
+            if let target = kbTarget {
+                // Same target, new band: Layout re-solves from the
+                // updated kbKeyboard state inside this animation.
+                animateKB(duration: info.duration, curve: info.curve) {
+                    kbKeyboard = info
+                    kbActive = true
+                }
+                _ = target
+            } else if kbArmed, let target = KeyboardSignals.shared.focusTarget(guestWidth: Trackpad.guestScreenWidth, guestHeight: Trackpad.guestScreenHeight) {
+                adoptKBTarget(target, info: info)
+            } else {
+                kbKeyboard = info
+            }
+        }
+    }
+
+    /// The 2 Hz guest-pointer sampler plus late-focus pickup:
+    /// while the keyboard is up with no signal, the first guest
+    /// click becomes the focus target.
+    private func kbSignalSampler() async {
+        while !Task.isCancelled {
+            var x: Int32 = 0, y: Int32 = 0
+            if henge_vm_pointer(&x, &y) == 0, Trackpad.guestScreenWidth > 0, Trackpad.guestScreenHeight > 0 {
+                KeyboardSignals.shared.recordPointer(point: CGPoint(x: CGFloat(x) / CGFloat(Trackpad.guestScreenWidth),
+                                                                    y: CGFloat(y) / CGFloat(Trackpad.guestScreenHeight)))
+            }
+            if kbArmed, let info = kbKeyboard,
+               let target = KeyboardSignals.shared.focusTarget(guestWidth: Trackpad.guestScreenWidth, guestHeight: Trackpad.guestScreenHeight),
+               target.source == "tap" {
+                adoptKBTarget(target, info: info)
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+    }
+
     // MARK: Upright
 
     @ViewBuilder private func uprightControls(_ layout: Layout) -> some View {
@@ -333,6 +561,8 @@ struct SessionView: View {
                 pasteTool
                 Spacer()
                 tool("plus.magnifyingglass", "Zoom in") { zoomed = true }
+                Spacer()
+                pointingToggle(fillsPhone: false)
                 Spacer()
                 tool("info.circle", "Details") { showDetails = true }
                 Spacer()
@@ -407,6 +637,18 @@ struct SessionView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { showRevealHint = false }
     }
 
+    /// The pointing-mode toggle: one tap always flips the effective mode, including
+    /// from auto, because it writes the explicit value opposite to it. Symbol and
+    /// label name the mode a tap switches to, as the zoom tool names its action.
+    /// Returning to auto is done by the absence of a stored value (v1).
+    private func pointingToggle(fillsPhone: Bool, tint: Color = Desk.text) -> some View {
+        let isDirect = pointing == "direct" || (pointing != "trackpad" && fillsPhone)
+        return tool(isDirect ? "cursorarrow.click.2" : "hand.tap.fill",
+                    isDirect ? "Trackpad pointing" : "Direct pointing", tint: tint) {
+            pointing = isDirect ? "trackpad" : "direct"
+        }
+    }
+
     private func tool(_ symbol: String, _ label: String, tint: Color = Desk.text, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
@@ -428,6 +670,7 @@ struct SessionView: View {
             tool("keyboard", "Keyboard", tint: .white) { typing.toggle() }
             pasteTool
             tool(zoomed ? "minus.magnifyingglass" : "plus.magnifyingglass", zoomed ? "Zoom out" : "Zoom in", tint: zoomed ? Desk.accentLight : .white) { zoomed.toggle() }
+            pointingToggle(fillsPhone: true, tint: .white)
             tool("info.circle", "Details", tint: .white) { showDetails = true }
             Rectangle().fill(Color.white.opacity(0.3)).frame(width: 1, height: 22).padding(.horizontal, 4)
             tool("power", "Shut down", tint: Desk.bad) { stopTapped() }
@@ -472,12 +715,13 @@ struct SessionView: View {
     /// Keeps the pointer in view: the view moves when the pointer nears its edge.
     private func followPointer() async {
         var tick = 0
+        let guest = ViewportPlan.current { mac.displayProfile(landscape: $0) }.guest // the size this session booted with; it cannot change mid-session
         while !Task.isCancelled {
             var x: Int32 = 0, y: Int32 = 0
-            if henge_vm_pointer(&x, &y) == 0 {
-                moveZoom(toward: CGPoint(x: CGFloat(x) / CGFloat(mac.screen.width), y: CGFloat(y) / CGFloat(mac.screen.height)))
+            if henge_vm_pointer(&x, &y) == 0, !kbActive {
+                moveZoom(toward: CGPoint(x: CGFloat(x) / CGFloat(guest.width), y: CGFloat(y) / CGFloat(guest.height)))
             }
-            if tick % 60 == 0, let image = MacPreview.capture(width: 224, height: Int(224 / mac.aspect)) { map = UIImage(cgImage: image) }
+            if tick % 60 == 0, let image = MacPreview.capture(width: 224, height: Int(224 / (CGFloat(guest.width) / CGFloat(guest.height)))) { map = UIImage(cgImage: image) }
             tick += 1
             try? await Task.sleep(nanoseconds: 33_000_000)
         }
@@ -531,6 +775,7 @@ struct SessionView: View {
                 }
                 Section("Display") {
                     Toggle("Color matching", isOn: $matchScreenColors)
+                    Toggle("Zoom to keyboard focus", isOn: $kbZoomEnabled)
                     LabeledContent("Brightness", value: "\(Int(screenBrightness * 100))%")
                     Slider(value: $screenBrightness, in: 0.4...1)
                     Text("Brightness dims only the Mac's screen.")
@@ -648,13 +893,22 @@ struct SessionView: View {
         JITBootstrap.releaseLingeringDebugger()
         Sharing.prepare()
         EngineTuning.apply()
-        henge_vm_set_display(UInt32(mac.screen.width), UInt32(mac.screen.height))
+        // The guest size is this session's viewport plan: the pane SessionView lays out, at the
+        // display's native scale. It is worked out now, at start, from the scene the session is
+        // starting in (folded, unfolded, portrait or landscape); the display mode is boot-time
+        // only, so a fold or rotation mid-session aspect-fits until the next start.
+        let plan = ViewportPlan.current { mac.displayProfile(landscape: $0) }
+        HengeLog.log("session", "viewport: \(plan.describe())")
+        Trackpad.guestScreenWidth = plan.guestWidth
+        Trackpad.guestScreenHeight = plan.guestHeight
+        KeyboardSignals.shared.resetSession()
+        henge_vm_set_display(UInt32(plan.guestWidth), UInt32(plan.guestHeight))
         if mac.isRetina {
             henge_vm_set_display_mm(UInt32(Device.retinaMM.width), UInt32(Device.retinaMM.height))
         } else {
             henge_vm_set_display_mm(0, 0)
         }
-        HengeLog.log("session", "screen \(mac.screen.width)x\(mac.screen.height) retina \(mac.isRetina)")
+        HengeLog.log("session", "screen \(plan.guestWidth)x\(plan.guestHeight) retina \(mac.isRetina)")
         let rc = henge_vm_boot(mac.rom.path, mac.disk.path, mac.aux.path, mac.ecid, mac.seed, ram, Int32(cpus), &buffer, buffer.count)
         if rc != 0 {
             error = String(cString: buffer)
@@ -663,6 +917,8 @@ struct SessionView: View {
         started = Date()
         var used = mac
         used.lastUsed = started
+        used.screenWidth = plan.guestWidth
+        used.screenHeight = plan.guestHeight
         Machines.shared.update(used)
         var lastBlocks = henge_vm_blocks()
         var lastTime = Date()
