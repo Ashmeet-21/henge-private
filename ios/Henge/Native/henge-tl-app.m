@@ -60,6 +60,11 @@ static void process_started(int ns, const char *path) {
     fprintf(stderr, "henge: tl: process %d runs %s\n", ns, app);
 }
 
+/* Where each of the app's libraries went, for reading a crash's addresses later. */
+static void image_linked(TlImage *im) {
+    fprintf(stderr, "henge: tl: image %s at %p (%zu MB)\n", tl_image_path(im), tl_image_base(im), tl_image_size(im) >> 20);
+}
+
 static void window_changed(NSWindow *window, int visible) {
     (void)window, (void)visible;
     if (g_changed) g_changed();
@@ -163,6 +168,7 @@ int henge_tl_app_load(const char *app_path, char *err, size_t errlen) {
         host.no_processes = 1; /* iOS starts no processes: the app's own programs run inside Henge (below) */
         host.processes_as_threads = 1;
         host.process_started = process_started;
+        host.image_linked = image_linked;
         host.high_rooms = henge_ios_take_high_room(host.high_room, host.high_room_bytes); /* Chromium's large reservations */
         g_presenter.window_changed = window_changed;
         hk_set_presenter(&g_presenter);
