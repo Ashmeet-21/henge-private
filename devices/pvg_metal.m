@@ -2490,8 +2490,7 @@ static NSData *insp_slice(id<MTLBuffer> b, NSUInteger from, NSUInteger length) {
     @try {
         return [queue commandBuffer];
     } @catch (NSException *e) {
-        fprintf(stderr, "hengevm: pvg-metal: commandBuffer failed (%s), waiting for the GPU and retrying
-", e.reason.UTF8String);
+        fprintf(stderr, "hengevm: pvg-metal: commandBuffer failed (%s), waiting for the GPU and retrying\n", e.reason.UTF8String);
         dispatch_group_wait(completions, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
         return [queue commandBuffer];
     }
