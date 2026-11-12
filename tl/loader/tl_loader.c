@@ -2469,6 +2469,24 @@ static uint64_t max_map_bytes(void) {
     }
     return v;
 }
+/* What occupies the high address space (0x7000000000 up), every region of 16 MB or more: where the room went. */
+static void log_high_space(void) {
+    vm_address_t addr = 0x7000000000ull;
+    tl_log("the high address space, regions of 16 MB or more:");
+    for (int i = 0; i < 4096; i++) {
+        vm_size_t size = 0;
+        vm_address_t a = addr;
+        natural_t depth = 0;
+        struct vm_region_submap_info_64 info;
+        mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+        if (vm_region_recurse_64(mach_task_self(), &a, &size, &depth, (vm_region_recurse_info_t)&info, &count) != KERN_SUCCESS) break;
+        if (size >= ((vm_size_t)16 << 20))
+            tl_log("  %#llx-%#llx %.0f MB prot %d/%d tag %u", (unsigned long long)a, (unsigned long long)(a + size),
+                   (double)size / (1 << 20), info.protection, info.max_protection, info.user_tag);
+        addr = a + size;
+    }
+}
+
 /* The free stretches of address space of 1 GB or more, logged once a large mapping fails: how much room the
    system leaves a program's allocator (Chromium's reserves 32 GB at once). */
 static void log_free_address_space(void) {
@@ -2565,7 +2583,10 @@ static int room_still_held(uint8_t *at, size_t len) {
 static TlRoomUse g_room_slack[16];
 static int g_room_nslack;
 
-static void *room_place(size_t len) {
+static void *room_place_prot(size_t len, int prot);
+static void *room_place(size_t len) { return room_place_prot(len, PROT_NONE); }
+
+static void *room_place_prot(size_t len, int prot) {
     /* V8 over-reserves its sandbox for alignment, asking size + 4 GB - a page and unmapping what lies outside the
        aligned block: the block alone is placed, and the unmap of the slack after it is ignored (it is not V8's). */
     size_t slack = 0;
@@ -2620,6 +2641,7 @@ static void *room_place(size_t len) {
         for (int z = 0; z < g_room_nspare && !at && len < ((size_t)4 << 30) && !slack; z++) {
             uint8_t *zlo = g_room_spare[z].at, *zhi = zlo + g_room_spare[z].len;
             size_t a = align > ((size_t)256 << 20) ? ((size_t)256 << 20) : align;
+            if (len < ((size_t)256 << 20) && a > ((size_t)16 << 20)) a = (size_t)16 << 20;
             for (uint8_t *c = (uint8_t *)(((uintptr_t)zlo + a - 1) & ~(uintptr_t)(a - 1)); c + len <= zhi && !at; c += a) {
                 int clash = 0;
                 for (int i = 0; i < nspare_used && !clash; i++)
@@ -2660,8 +2682,8 @@ static void *room_place(size_t len) {
         tl_log("a %.1f GB reservation: the held room at %p is no longer empty; not placed", (double)len / (1 << 30), map);
         return NULL;
     }
-    void *r = mmap(map, maplen, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
-    tl_log("a %.1f GB reservation at %p in the held room%s%s: %s", (double)len / (1 << 30), at, how,
+    void *r = mmap(map, maplen, prot, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
+    tl_log("a %.3f GB reservation at %p in the held room%s%s: %s", (double)len / (1 << 30), at, how,
            slack ? " (its alignment slack left out)" : "", r == map ? "placed" : strerror(errno));
     if (r == map && slack) {
         pthread_mutex_lock(&g_room_lock);
@@ -2705,7 +2727,10 @@ static void *rt_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t 
        phone once Chromium has started. */
     int room_only = g_host && g_host->high_rooms && getenv("TL_ROOM_ONLY") && len >= ((size_t)256 << 20) && prot == PROT_NONE &&
                     (flags & MAP_ANON) && !(flags & MAP_FIXED);
-    void *r = room_only ? (errno = ENOMEM, MAP_FAILED) : mmap(addr, len, prot, flags, fd, off);
+    /* ... and, as iOS does, no mapping hinted past the end of the 64 GB (the lowest held block + 64 GB). */
+    int past_end = g_host && g_host->high_rooms && getenv("TL_ROOM_ONLY") && addr && !(flags & MAP_FIXED) &&
+                   (uint8_t *)addr >= (uint8_t *)g_host->high_room[0] + ((size_t)64 << 30);
+    void *r = room_only || past_end ? (errno = ENOMEM, MAP_FAILED) : mmap(addr, len, prot, flags, fd, off);
     if (r == MAP_FAILED && addr && !(flags & MAP_FIXED) && errno == ENOMEM && !room_only) {
         /* A hint is only a hint (macOS places the mapping elsewhere); iOS fails a mapping hinted past its 64 GB, and
            Chromium's allocator takes that for running out. Again without it. */
@@ -2713,13 +2738,15 @@ static void *rt_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t 
         if (!said++) tl_log("a mapping hinted at %p failed: again without the hint (and from now on)", addr);
         r = mmap(NULL, len, prot, flags, fd, off);
     }
-    if (r == MAP_FAILED && g_host && g_host->high_rooms && len >= ((size_t)256 << 20) && prot == PROT_NONE &&
-        (flags & MAP_ANON) && !(flags & MAP_FIXED)) {
-        /* No room left anywhere for a smaller reservation (V8's TrustedRange, 1 GB on a 4 GB boundary): the held
-           room's spare slots. */
-        void *h = room_place(len);
+    if (r == MAP_FAILED && g_host && g_host->high_rooms && len >= ((size_t)1 << 20) && (flags & MAP_ANON) &&
+        !(flags & MAP_FIXED)) {
+        /* No room left anywhere (iOS's 64 GB run out with Chromium in it): the held room's spare slots, or the
+           never-used tops of the big blocks, with the access asked for. */
+        static int listed;
+        if (!listed++ && len < ((size_t)256 << 20)) log_high_space();
+        void *h = room_place_prot(len, prot);
         if (h) return h;
-        tl_log("no room for %.2f GB anywhere:", (double)len / (1 << 30));
+        tl_log("no room for %.3f GB anywhere:", (double)len / (1 << 30));
         log_free_address_space();
         errno = ENOMEM;
     }
