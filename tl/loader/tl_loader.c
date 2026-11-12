@@ -2728,6 +2728,7 @@ static void *rt_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t 
         if (said++ < 20) tl_log("a %.1f MB mapping (prot %d, flags %#x, at %p) failed: %s", (double)len / (1 << 20), prot, flags, addr, strerror(errno));
     }
     if (len >= ((size_t)1 << 30)) {
+        if (r == MAP_FAILED) {
             int e = errno;
             tl_log("a %.1f GB mapping (prot %d, flags %#x, at %p) failed: %s", (double)len / (1 << 30), prot, flags, addr, strerror(e));
             log_free_address_space();
