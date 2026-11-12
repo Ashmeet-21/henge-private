@@ -69,8 +69,9 @@ jobs:
         run: |
           set -o pipefail
           ulimit -s 65520 || true # test_shutdown runs guest code on big stacks
-          for t in test_classify test_operands test_mmu test_devices test_shutdown test_media; do
+          for t in test_classify test_operands test_mmu test_devices test_shutdown test_media test_vm_lifecycle; do
             echo "::group::$t"
             make "build/$t" >/dev/null && "./build/$t" 2>&1 | tail -15 && echo "PASS $t" || echo "::error::FAIL $t"
             echo "::endgroup::"
           done
+          python3 tests/test_jit_high_room.py && echo "PASS test_jit_high_room" || echo "::error::FAIL test_jit_high_room"
