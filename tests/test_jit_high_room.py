@@ -136,6 +136,7 @@ func henge_largest_mapping_mb() -> UInt64 {
     return 16896
 }
 struct VirtualMac { var directory: URL; var ramMB: Int }
+enum Device { static let hasLittleMemory = false; static let suggestedRAMGB = 3 } // fork: 6 GB cap reads Device
 enum HengeLog { static func log(_ category: String, _ message: String) {} }
 ''' + machines[start:end] + r'''
 let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
