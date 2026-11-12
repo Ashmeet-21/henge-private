@@ -2608,10 +2608,14 @@ static void *room_place(size_t len) {
     }
     pthread_mutex_unlock(&g_room_lock);
     if (!at && slack) {
-        /* The held room is full: an aligned address the system confirms free, from the bottom of the high space up
-           (a hint, never MAP_FIXED: nothing in use is touched). */
+        /* The held room is full: an aligned address the system confirms free, from the bottom of the high space up.
+           vm_allocate at a fixed address fails if any of it is in use, so nothing is touched (iOS ignores mmap's
+           address hint here). */
         for (uint8_t *c = (uint8_t *)(((uintptr_t)lo + align - 1) & ~(uintptr_t)(align - 1)); c + len <= hi + ((size_t)8 << 30); c += align) {
-            void *r = mmap(c, len, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+            vm_address_t a = (vm_address_t)c;
+            if (vm_allocate(mach_task_self(), &a, len, VM_FLAGS_FIXED) != KERN_SUCCESS) continue;
+            vm_protect(mach_task_self(), a, len, FALSE, VM_PROT_NONE);
+            void *r = (void *)a;
             if (r == c) {
                 tl_log("a %.2f GB reservation at %p, free space past the held room (its alignment slack left out): placed",
                        (double)len / (1 << 30), c);
@@ -2620,7 +2624,6 @@ static void *room_place(size_t len) {
                 pthread_mutex_unlock(&g_room_lock);
                 return c;
             }
-            if (r != MAP_FAILED) munmap(r, len);
         }
     }
     if (!at) {
