@@ -2521,6 +2521,10 @@ typedef struct { uint8_t *at; size_t len; } TlRoomUse;
 static TlRoomUse g_room_used[32];
 static int g_room_nused;
 static uint8_t *g_room_pools; /* where the first 32 GB block went: the next 16 GB block overlaps it */
+/* Never-used tops of the big blocks (PartitionAlloc's second pool, Oilpan's cage), for small reservations once the
+   held room is full: their owners use them from the bottom, and reach their top half only past 8 GB. */
+static TlRoomUse g_room_spare[4];
+static int g_room_nspare;
 static pthread_mutex_t g_room_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static int room_held(uint8_t *at, size_t len) {
@@ -2591,11 +2595,15 @@ static void *room_place(size_t len) {
         for (uint8_t *c = first; c + len <= hi && !at; c += align) {
             if (room_held(c, len) && room_unused(c, len)) {
                 at = map = c;
-                if (!g_room_pools) g_room_pools = c;
+                if (!g_room_pools) {
+                    g_room_pools = c;
+                    if (g_room_nspare < 4) g_room_spare[g_room_nspare++] = (TlRoomUse){c + len * 3 / 4, len / 4};
+                }
                 room_use(c, len);
             } else if (room_held(c + len / 2, len / 2) && room_unused(c + len / 2, len / 2)) {
                 at = c, map = c + len / 2, maplen = len / 2; /* only the upper half: the lower stays for others */
                 room_use(map, maplen);
+                if (g_room_nspare < 4) g_room_spare[g_room_nspare++] = (TlRoomUse){c + len * 3 / 4, len / 4};
                 how = " (upper half mapped)";
                 /* Oilpan gives its lower half back at once: that is others' (the hold, the JIT view), not its. */
                 if (g_room_nslack < 16) g_room_slack[g_room_nslack++] = (TlRoomUse){c, len / 2};
@@ -2607,6 +2615,22 @@ static void *room_place(size_t len) {
                 at = map = c;
                 room_use(c, len);
             }
+        static TlRoomUse spare_used[16];
+        static int nspare_used;
+        for (int z = 0; z < g_room_nspare && !at && len < ((size_t)4 << 30) && !slack; z++) {
+            uint8_t *zlo = g_room_spare[z].at, *zhi = zlo + g_room_spare[z].len;
+            size_t a = align > ((size_t)256 << 20) ? ((size_t)256 << 20) : align;
+            for (uint8_t *c = (uint8_t *)(((uintptr_t)zlo + a - 1) & ~(uintptr_t)(a - 1)); c + len <= zhi && !at; c += a) {
+                int clash = 0;
+                for (int i = 0; i < nspare_used && !clash; i++)
+                    clash = c < spare_used[i].at + spare_used[i].len && spare_used[i].at < c + len;
+                if (!clash) {
+                    at = map = c;
+                    if (nspare_used < 16) spare_used[nspare_used++] = (TlRoomUse){c, len};
+                    how = " (over a big block's never-used top)";
+                }
+            }
+        }
     }
     pthread_mutex_unlock(&g_room_lock);
     if (!at && slack) {
