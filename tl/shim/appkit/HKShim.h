@@ -114,6 +114,8 @@ typedef CGFloat NSFontWeight;
 /* ---- the base of every class here: unknown messages are logged once and answer nil/0 ---- */
 @interface HKShimObject : NSObject
 @end
+/* IOSurfaces set as layer contents shown as images of their pixels (iOS; HKSurface.m). */
+void hk_surfaces_as_images(void);
 void hk_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 /* Adds the same "say once, answer 0" fallback to a class that cannot inherit from HKShimObject (NSView descends from
    NSResponder, which must descend from NSObject directly for apps that test it). */
