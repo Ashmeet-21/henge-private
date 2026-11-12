@@ -2676,6 +2676,13 @@ static void *rt_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t 
         return MAP_FAILED;
     }
     void *r = mmap(addr, len, prot, flags, fd, off);
+    if (r == MAP_FAILED && addr && !(flags & MAP_FIXED) && errno == ENOMEM) {
+        /* A hint is only a hint (macOS places the mapping elsewhere); iOS fails a mapping hinted past its 64 GB, and
+           Chromium's allocator takes that for running out. Again without it. */
+        static int said;
+        if (!said++) tl_log("a mapping hinted at %p failed: again without the hint (and from now on)", addr);
+        r = mmap(NULL, len, prot, flags, fd, off);
+    }
     if (len >= ((size_t)1 << 30)) {
         if (r == MAP_FAILED) {
             int e = errno;
