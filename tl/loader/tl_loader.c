@@ -852,8 +852,14 @@ static void chromium_fixups(TlImage *im) {
     }
 }
 
+static void *cf_override(const char *sym);
+
 static uint64_t host_symbol(void *handle, const char *install_name, const char *sym, int *found) {
     *found = 0;
+    if (install_name && strstr(install_name, "/CoreFoundation.framework/")) {
+        void *s = cf_override(sym);
+        if (s) { *found = 1; return (uint64_t)s; }
+    }
     if (!install_name || strstr(install_name, "libSystem") || !strncmp(install_name, "/usr/lib/system/", 16) ||
         strstr(install_name, "/libbsm.") || strstr(install_name, "/libsandbox.")) {
         void *s = tl_runtime_lookup(sym);
@@ -1540,12 +1546,25 @@ static TlImage *load_library_in(const char *path, int ns, char *err, size_t errl
     return load_and_link(path, ns, err, errlen);
 }
 
+extern char **environ;
+
 int tl_run_main(TlImage *exe, int argc, const char **argv, const char **envp) {
     if (!exe->has_main) return -1;
-    if (exe->ns == 0 && !g_main_argv) g_main_argc = argc, g_main_argv = (char **)argv; /* _NSGetArgv's answer */
+    /* As the kernel lays a program's start out: argv, NULL, the environment, NULL, the "apple" strings, NULL, in one
+       vector. Go's runtime walks past argv's end for the environment and the executable's path; given argv alone it
+       read whatever followed (no environment, then a crash on a bad path). An empty environment is this process's. */
+    const char **env = envp && envp[0] ? envp : (const char **)environ;
+    int ne = 0;
+    while (env && env[ne]) ne++;
+    const char **v = calloc((size_t)argc + ne + 4, sizeof *v);
+    if (!v) return -1;
+    memcpy(v, argv, (size_t)argc * sizeof *v);
+    if (ne) memcpy(v + argc + 1, env, (size_t)ne * sizeof *v);
+    char *exe_path = NULL;
+    if (asprintf(&exe_path, "executable_path=%s", exe->path) > 0) v[argc + ne + 2] = exe_path;
+    if (exe->ns == 0 && !g_main_argv) g_main_argc = argc, g_main_argv = (char **)v; /* _NSGetArgv's answer */
     int (*entry)(int, const char **, const char **, const char **) = (void *)(exe->base + exe->entryoff);
-    const char *apple[] = {NULL};
-    return entry(argc, argv, envp, apple);
+    return entry(argc, v, v + argc + 1, v + argc + ne + 2);
 }
 
 void *tl_image_base(const TlImage *im) { return im->base; }
@@ -2973,6 +2992,49 @@ static int rt_mprotect(void *addr, size_t len, int prot) {
 static kern_return_t rt_bootstrap_refused(void) {
     tl_log("refused a Mach service registration (iOS)");
     return 1100; /* BOOTSTRAP_NOT_PRIVILEGED */
+}
+
+/* Carbon's HIToolbox looked up by bundle identifier, as GLFW does for its keyboard-layout functions
+   (TISCopyCurrentKeyboardLayoutInputSource, kTISPropertyUnicodeKeyLayoutData, LMGetKbdType): iOS has no such
+   bundle, and on the Mac test the real one must not answer either (it works only with the real AppKit). So the
+   identifier answers a bundle that is always there (CoreFoundation's), and names looked up in it are answered by
+   Henge's Carbon stand-ins first. */
+#include <CoreFoundation/CoreFoundation.h>
+static CFBundleRef g_hitoolbox;
+static const char *const g_hitoolbox_name =
+    "/System/Library/Frameworks/Carbon.framework/Versions/A/Frameworks/HIToolbox.framework/Versions/A/HIToolbox";
+
+static CFBundleRef rt_CFBundleGetBundleWithIdentifier(CFStringRef ident) {
+    if (ident && (CFEqual(ident, CFSTR("com.apple.HIToolbox")) || CFEqual(ident, CFSTR("com.apple.Carbon")))) {
+        if (!g_hitoolbox) g_hitoolbox = CFBundleGetBundleWithIdentifier(CFSTR("com.apple.CoreFoundation"));
+        return g_hitoolbox;
+    }
+    return CFBundleGetBundleWithIdentifier(ident);
+}
+
+static void *hitoolbox_symbol(CFBundleRef bundle, CFStringRef name) {
+    if (!bundle || bundle != g_hitoolbox || !name || !g_host || !g_host->shim_lookup) return NULL;
+    char buf[256] = "_";
+    if (!CFStringGetCString(name, buf + 1, sizeof buf - 1, kCFStringEncodingUTF8)) return NULL;
+    return g_host->shim_lookup(g_hitoolbox_name, buf);
+}
+
+static void *rt_CFBundleGetFunctionPointerForName(CFBundleRef bundle, CFStringRef name) {
+    void *p = hitoolbox_symbol(bundle, name);
+    return p ? p : CFBundleGetFunctionPointerForName(bundle, name);
+}
+
+static void *rt_CFBundleGetDataPointerForName(CFBundleRef bundle, CFStringRef name) {
+    void *p = hitoolbox_symbol(bundle, name);
+    return p ? p : CFBundleGetDataPointerForName(bundle, name);
+}
+
+/* CoreFoundation's functions answered here (imports from CoreFoundation). */
+static void *cf_override(const char *sym) {
+    if (!strcmp(sym, "_CFBundleGetBundleWithIdentifier")) return (void *)rt_CFBundleGetBundleWithIdentifier;
+    if (!strcmp(sym, "_CFBundleGetFunctionPointerForName")) return (void *)rt_CFBundleGetFunctionPointerForName;
+    if (!strcmp(sym, "_CFBundleGetDataPointerForName")) return (void *)rt_CFBundleGetDataPointerForName;
+    return NULL;
 }
 
 void *tl_runtime_lookup(const char *sym) {

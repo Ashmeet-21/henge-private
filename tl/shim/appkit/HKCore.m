@@ -535,7 +535,10 @@ static NSRect rect_of(NSPoint a, NSPoint b) {
 - (void)updateTrackingAreas {}
 
 - (NSTextInputContext *)inputContext {
-    if (!_inputContext && [self conformsToProtocol:NSProtocolFromString(@"NSTextInputClient")]) {
+    /* A text input client by protocol, or by its methods (a Rust (objc2) view declares the protocol by name, which
+       need not resolve without AppKit's runtime protocol object). */
+    if (!_inputContext && ([self conformsToProtocol:NSProtocolFromString(@"NSTextInputClient")] ||
+                           [self respondsToSelector:NSSelectorFromString(@"insertText:replacementRange:")])) {
         Class c = [NSTextInputContext class];
         _inputContext = ((id(*)(id, SEL, id))objc_msgSend)([c alloc], @selector(initWithClient:), self);
     }
@@ -1288,7 +1291,7 @@ static NSArray<NSString *> *app_notifications(void) {
     pthread_mutex_t _qlock;
     CFRunLoopSourceRef _wake;
     CFRunLoopRef _loop;
-    BOOL _running, _active, _launched, _stopRequested;
+    BOOL _running, _active, _launched, _stopRequested, _terminating;
     NSEvent *_current;
     NSApplicationActivationPolicy _policy;
 }
@@ -1416,9 +1419,11 @@ static void wake_perform(void *info) {}
 }
 
 - (void)run {
-    [self finishLaunching];
+    /* A stop: during finishLaunching (GLFW's delegate stops the run it started from applicationDidFinishLaunching:)
+       ends this run, as in AppKit: the request is cleared before launching, not after. */
     _running = YES;
     _stopRequested = NO;
+    [self finishLaunching];
     while (_running && !_stopRequested) {
         @autoreleasepool {
             NSEvent *e = [self nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate distantFuture] inMode:NSDefaultRunLoopMode dequeue:YES];
@@ -1426,6 +1431,9 @@ static void wake_perform(void *info) {}
         }
     }
     _running = NO;
+    /* The stop ended this run only: an app that goes on taking events itself (GLFW, SDL poll after their launch
+       run) gets them, and the run loop runs, unless the app is quitting. */
+    if (!_terminating) _stopRequested = NO;
 }
 
 - (void)stop:(id)sender {
@@ -1447,6 +1455,7 @@ static void wake_perform(void *info) {}
 }
 
 - (void)hk_finishTerminate {
+    _terminating = YES;
     [self hk_post:@"NSApplicationWillTerminateNotification"];
     for (NSWindow *w in [g_windows copy]) [w orderOut:nil];
     hk_log("the application terminated");
