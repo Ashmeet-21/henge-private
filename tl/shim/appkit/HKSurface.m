@@ -77,3 +77,75 @@ void hk_surfaces_as_images(void) {
         else class_addMethod([CALayer class], changed, (IMP)contents_changed, "v@:");
     });
 }
+
+/* Layer autoresizing (macOS's CALayer.autoresizingMask, which iOS's layers ignore). Chromium puts its composited frame
+   in a flipped layer that is never sized, only told to follow its parent's size (width and height sizable); on iOS it
+   stayed 0 by 0, and a flipped layer of no height turns its content up and out of the window. So, once a Mac app runs
+   on iOS, a layer's mask is kept, and when a layer's size changes its sublayers with one are resized as macOS does it
+   (each flexible margin or size takes an equal share of the change). */
+static char g_mask_key;
+static IMP g_set_mask, g_set_bounds, g_set_frame;
+
+static void set_mask(CALayer *self, SEL _cmd, unsigned mask) {
+    objc_setAssociatedObject(self, &g_mask_key, mask ? @(mask) : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (g_set_mask) ((void (*)(id, SEL, unsigned))g_set_mask)(self, _cmd, mask);
+}
+
+static unsigned get_mask(CALayer *self, SEL _cmd) { return [objc_getAssociatedObject(self, &g_mask_key) unsignedIntValue]; }
+
+static void resize_sublayers(CALayer *layer, CGSize old) {
+    CGSize now = layer.bounds.size;
+    if (CGSizeEqualToSize(old, now)) return;
+    NSArray<CALayer *> *subs = layer.sublayers;
+    for (CALayer *c in subs) {
+        unsigned m = [objc_getAssociatedObject(c, &g_mask_key) unsignedIntValue];
+        if (!m) continue;
+        CGRect f = c.frame;
+        int n = !!(m & 1) + !!(m & 2) + !!(m & 4); /* min x margin, width, max x margin */
+        if (n) {
+            CGFloat d = (now.width - old.width) / n;
+            if (m & 1) f.origin.x += d;
+            if (m & 2) f.size.width += d;
+        }
+        n = !!(m & 8) + !!(m & 16) + !!(m & 32); /* min y margin, height, max y margin */
+        if (n) {
+            CGFloat d = (now.height - old.height) / n;
+            if (m & 8) f.origin.y += d;
+            if (m & 16) f.size.height += d;
+        }
+        c.frame = f;
+    }
+}
+
+/* setFrame: may set the bounds itself: the sublayers are resized once, by the outer call. */
+static __thread __unsafe_unretained CALayer *g_framing;
+
+static void set_bounds(CALayer *self, SEL _cmd, CGRect b) {
+    CGSize old = self.bounds.size;
+    ((void (*)(id, SEL, CGRect))g_set_bounds)(self, _cmd, b);
+    if (g_framing != self) resize_sublayers(self, old);
+}
+
+static void set_frame(CALayer *self, SEL _cmd, CGRect f) {
+    CGSize old = self.bounds.size;
+    CALayer *outer = g_framing;
+    g_framing = self;
+    ((void (*)(id, SEL, CGRect))g_set_frame)(self, _cmd, f);
+    g_framing = outer;
+    resize_sublayers(self, old);
+}
+
+void hk_layer_autoresizing(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Class cls = [CALayer class];
+        Method m = class_getInstanceMethod(cls, @selector(setAutoresizingMask:));
+        if (m) g_set_mask = method_setImplementation(m, (IMP)set_mask);
+        else class_addMethod(cls, @selector(setAutoresizingMask:), (IMP)set_mask, "v@:I");
+        Method g = class_getInstanceMethod(cls, @selector(autoresizingMask));
+        if (g) method_setImplementation(g, (IMP)get_mask);
+        else class_addMethod(cls, @selector(autoresizingMask), (IMP)get_mask, "I@:");
+        g_set_bounds = method_setImplementation(class_getInstanceMethod(cls, @selector(setBounds:)), (IMP)set_bounds);
+        g_set_frame = method_setImplementation(class_getInstanceMethod(cls, @selector(setFrame:)), (IMP)set_frame);
+    });
+}

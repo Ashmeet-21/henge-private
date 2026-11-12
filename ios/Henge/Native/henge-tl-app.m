@@ -177,6 +177,7 @@ int henge_tl_app_load(const char *app_path, char *err, size_t errlen) {
            there CoreText fonts are plain CF objects, and macOS's UIFoundation would take them for AppKit's. */
         hk_font_adopt(nil);
         hk_surfaces_as_images(); /* a compositor's IOSurface frames, shown */
+        hk_layer_autoresizing(); /* and layers sized by their autoresizing masks, as on a Mac */
 #else
         if (getenv("HK_SURFACE_COPY")) hk_surfaces_as_images(); /* the Mac test of the iOS way */
 #endif
