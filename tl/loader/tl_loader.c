@@ -2701,8 +2701,12 @@ static void *rt_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t 
         errno = ENOMEM;
         return MAP_FAILED;
     }
-    void *r = mmap(addr, len, prot, flags, fd, off);
-    if (r == MAP_FAILED && addr && !(flags & MAP_FIXED) && errno == ENOMEM) {
+    /* TL_ROOM_ONLY=1 (a test switch for Mac runs): no room for large reservations outside the held room, as on the
+       phone once Chromium has started. */
+    int room_only = g_host && g_host->high_rooms && getenv("TL_ROOM_ONLY") && len >= ((size_t)256 << 20) && prot == PROT_NONE &&
+                    (flags & MAP_ANON) && !(flags & MAP_FIXED);
+    void *r = room_only ? (errno = ENOMEM, MAP_FAILED) : mmap(addr, len, prot, flags, fd, off);
+    if (r == MAP_FAILED && addr && !(flags & MAP_FIXED) && errno == ENOMEM && !room_only) {
         /* A hint is only a hint (macOS places the mapping elsewhere); iOS fails a mapping hinted past its 64 GB, and
            Chromium's allocator takes that for running out. Again without it. */
         static int said;
@@ -2719,8 +2723,11 @@ static void *rt_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t 
         log_free_address_space();
         errno = ENOMEM;
     }
+    if (r == MAP_FAILED && len < ((size_t)1 << 30) && g_host && g_host->high_rooms) {
+        static int said;
+        if (said++ < 20) tl_log("a %.1f MB mapping (prot %d, flags %#x, at %p) failed: %s", (double)len / (1 << 20), prot, flags, addr, strerror(errno));
+    }
     if (len >= ((size_t)1 << 30)) {
-        if (r == MAP_FAILED) {
             int e = errno;
             tl_log("a %.1f GB mapping (prot %d, flags %#x, at %p) failed: %s", (double)len / (1 << 30), prot, flags, addr, strerror(e));
             log_free_address_space();
@@ -2757,7 +2764,12 @@ static int rt_mprotect(void *addr, size_t len, int prot) {
         errno = EPERM;
         return -1;
     }
-    return mprotect(addr, len, prot);
+    int r = mprotect(addr, len, prot);
+    if (r && g_host && g_host->high_rooms) { /* where the phone's address space runs short: every failure, for the log */
+        static int said;
+        if (said++ < 20) tl_log("mprotect %p +%zu prot %d failed: %s", addr, len, prot, strerror(errno));
+    }
+    return r;
 }
 
 /* bootstrap_check_in, bootstrap_register, bootstrap_register2: an app on iOS may not offer Mach services. */
