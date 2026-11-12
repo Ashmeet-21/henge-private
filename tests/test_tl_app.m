@@ -77,8 +77,9 @@ static void input_line(NSString *line) {
     } else if ([cmd isEqualToString:@"key"]) {
         NSString *c = f.count > 2 ? f[2] : @"";
         if ([c isEqualToString:@"RET"]) c = @"\r";
-        henge_tl_app_key(1, (unsigned short)a, c.UTF8String, 0);
-        henge_tl_app_key(0, (unsigned short)a, c.UTF8String, 0);
+        unsigned long flags = f.count > 3 ? strtoul(f[3].UTF8String, NULL, 0) : 0; /* key CODE CHARS FLAGS: 0x100000 is Command */
+        henge_tl_app_key(1, (unsigned short)a, c.UTF8String, flags);
+        henge_tl_app_key(0, (unsigned short)a, c.UTF8String, flags);
     } else if ([cmd isEqualToString:@"type"] && line.length > 5) {
         NSString *text = [line substringFromIndex:5];
         for (NSUInteger i = 0; i < text.length; i++) {
