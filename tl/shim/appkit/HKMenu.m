@@ -104,7 +104,7 @@ static NSString *key_text(NSMenuItem *i) {
   @public
     NSMenu *_menu;
     NSMutableArray<NSMenuItem *> *_items;
-    NSMutableArray<NSValue *> *_rows; /* each item's rectangle, in the view (y up) */
+    NSMutableData *_rows; /* each item's rectangle (NSRect), in the view (y up) */
     NSInteger _hi;
     CGFloat _w, _h;
     NSWindow *_window;
@@ -135,12 +135,14 @@ static NSString *key_text(NSMenuItem *i) {
         _menu = menu;
         _items = items;
         _w = w, _h = h, _hi = -1;
-        _rows = [NSMutableArray array];
+        _rows = [NSMutableData dataWithLength:items.count * sizeof(NSRect)];
+        NSRect *rr = _rows.mutableBytes;
+        NSUInteger n = 0;
         CGFloat y = h - kPad;
         for (NSMenuItem *i in items) {
             CGFloat rh = i.isSeparatorItem ? kSepH : kRowH;
             y -= rh;
-            [_rows addObject:[NSValue valueWithRect:NSMakeRect(0, y, w, rh)]];
+            rr[n++] = NSMakeRect(0, y, w, rh);
         }
     }
     return self;
@@ -149,12 +151,12 @@ static NSString *key_text(NSMenuItem *i) {
 - (BOOL)isFlipped { return NO; }
 - (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
 
-- (NSRect)rowRect:(NSInteger)i { return [_rows[(NSUInteger)i] rectValue]; }
+- (NSRect)rowRect:(NSInteger)i { return ((const NSRect *)_rows.bytes)[i]; }
 
 /* The row a point in the view is on, or -1. */
 - (NSInteger)rowAt:(NSPoint)p {
-    for (NSUInteger i = 0; i < _rows.count; i++)
-        if (NSPointInRect(p, _rows[i].rectValue)) return (NSInteger)i;
+    for (NSUInteger i = 0; i < _items.count; i++)
+        if (NSPointInRect(p, [self rowRect:(NSInteger)i])) return (NSInteger)i;
     return -1;
 }
 
