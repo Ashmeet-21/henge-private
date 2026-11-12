@@ -119,6 +119,10 @@ static NSArray<NSString *> *arguments_for(NSString *app, NSString *exe) {
                 @"WebUIToolbar,WebUIReloadButton,WebUIBackForwardButton,WebUIHomeButton,WebUISplitTabsButton,"
                 @"InitialWebUI,InitialWebUIWithoutExtensions",
             ]];
+        else if (electron)
+            /* Electron as one process (HENGE_TL_ELECTRON_SINGLE): its Node.js has already enabled V8's WebAssembly
+               trap handler in this process, and the renderer's second enabling would be fatal. */
+            [args addObjectsFromArray:@[@"--single-process", @"--disable-features=RemoteCoreAnimationAPI,WebAssemblyTrapHandler"]];
         else
             [args addObjectsFromArray:@[@"--single-process", @"--disable-features=RemoteCoreAnimationAPI"]];
         [args addObjectsFromArray:@[

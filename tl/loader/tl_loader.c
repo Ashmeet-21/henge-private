@@ -694,6 +694,164 @@ static uint64_t image_export(TlImage *im, const char *sym, int *found) {
     return (uint64_t)(im->base + e.value);
 }
 
+/* ---- Chromium-family code run as one process ----
+   Electron in --single-process (Node.js in the browser, Blink's renderer on a thread of the same process) sets cppgc,
+   the heap both use, up twice: once for Node, once as the renderer starts, and cppgc::InitializeProcess CHECKs that
+   it was not set up before. In one process they share it, so the second call just returns: the branch to the
+   CHECK's trap is pointed at the function's return instead. Every instruction involved is checked first; code that
+   does not look as expected is left alone. */
+static int is_brk(uint32_t i) { return (i & 0xFFE0001Fu) == 0xD4200000u; }
+static int is_ldp_sp(uint32_t i) { return (i & 0xFC4003E0u) == 0xA84003E0u; }
+
+/* Electron in one process, continued: Node's platform (node::NodePlatform) is V8's platform for the whole process,
+   and it knows only the isolates Node registered with it. Blink's isolates, created on the renderer's thread, are
+   not among them, and the first time V8 asks the platform for such an isolate's task runner Node aborts
+   (ForIsolate: "Assertion failed: (data.first) != nullptr"). So the platform's GetForegroundTaskRunner and
+   IdleTasksEnabled are taken over in its vtable: an isolate Node registered (through the vtable's RegisterIsolate,
+   or one used on the main thread, where Node's own runs) gets Node's answer as before; any other gets a task runner
+   of Henge's that takes no tasks (V8 then garbage-collects as allocation goes, without its scheduled steps) and no
+   idle tasks. The vtables are found by their exported names and each slot is checked against the exported
+   function before it is changed. */
+void *tl_np_gftr, *tl_np_fallback[2];
+static void *g_np_ite, *g_np_reg_loop, *g_np_reg_dlg, *g_np_unreg;
+static void *g_np_isolates[512];
+static int g_np_n;
+static pthread_mutex_t g_np_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void np_note(void *iso, int add) {
+    pthread_mutex_lock(&g_np_lock);
+    for (int i = 0; i < g_np_n; i++)
+        if (g_np_isolates[i] == iso) {
+            if (!add) g_np_isolates[i] = g_np_isolates[--g_np_n];
+            pthread_mutex_unlock(&g_np_lock);
+            return;
+        }
+    if (add && g_np_n < 512) g_np_isolates[g_np_n++] = iso;
+    pthread_mutex_unlock(&g_np_lock);
+}
+
+int tl_np_known(void *platform, void *iso) {
+    (void)platform;
+    if (pthread_main_np()) return 1;
+    pthread_mutex_lock(&g_np_lock);
+    int known = 0;
+    for (int i = 0; i < g_np_n && !known; i++) known = g_np_isolates[i] == iso;
+    pthread_mutex_unlock(&g_np_lock);
+    return known;
+}
+
+static void np_reg_loop(void *self, void *iso, void *loop) {
+    np_note(iso, 1);
+    ((void (*)(void *, void *, void *))g_np_reg_loop)(self, iso, loop);
+}
+static void np_reg_dlg(void *self, void *iso, void *dlg) {
+    np_note(iso, 1);
+    ((void (*)(void *, void *, void *))g_np_reg_dlg)(self, iso, dlg);
+}
+static void np_unreg(void *self, void *iso) {
+    np_note(iso, 0);
+    ((void (*)(void *, void *))g_np_unreg)(self, iso);
+}
+static int np_ite(void *self, void *iso) {
+    if (!tl_np_known(self, iso)) return 0;
+    return ((int (*)(void *, void *))g_np_ite)(self, iso);
+}
+
+/* GetForegroundTaskRunner returns a std::shared_ptr through x8: Node's for a known isolate, else Henge's. */
+void tl_np_gftr_thunk(void);
+__asm__(".text\n.p2align 2\n"
+        "_tl_np_gftr_thunk:\n"
+        "  stp x29, x30, [sp, #-64]!\n"
+        "  mov x29, sp\n"
+        "  stp x0, x1, [sp, #16]\n"
+        "  stp x2, x8, [sp, #32]\n"
+        "  bl _tl_np_known\n"
+        "  mov w9, w0\n"
+        "  ldp x0, x1, [sp, #16]\n"
+        "  ldp x2, x8, [sp, #32]\n"
+        "  ldp x29, x30, [sp], #64\n"
+        "  cbz w9, 1f\n"
+        "  adrp x16, _tl_np_gftr@PAGE\n"
+        "  ldr x16, [x16, _tl_np_gftr@PAGEOFF]\n"
+        "  br x16\n"
+        "1:\n"
+        "  adrp x16, _tl_np_fallback@PAGE\n"
+        "  add x16, x16, _tl_np_fallback@PAGEOFF\n"
+        "  ldp x9, x10, [x16]\n"
+        "  stp x9, x10, [x8]\n"
+        "  ret\n");
+
+/* Henge's task runner: v8::TaskRunner's slots in V8's order (IdleTasksEnabled, NonNestableTasksEnabled,
+   NonNestableDelayedTasksEnabled, two destructors, PostTaskImpl, PostNonNestableTaskImpl, PostDelayedTaskImpl,
+   PostNonNestableDelayedTaskImpl, PostIdleTaskImpl). A task comes as a pointer to the caller's unique_ptr, which the
+   caller destroys: leaving it there drops the task. Its shared_ptr's count starts too high ever to reach zero. */
+static long np_false(void) { return 0; }
+static void np_nothing(void) {}
+static void *g_np_runner_vtbl[10] = {(void *)np_false, (void *)np_false, (void *)np_false, (void *)np_nothing, (void *)np_nothing,
+                                     (void *)np_nothing, (void *)np_nothing, (void *)np_nothing, (void *)np_nothing, (void *)np_nothing};
+static void *g_np_runner[1] = {g_np_runner_vtbl};
+static void *g_np_ctrl_vtbl[6] = {(void *)np_nothing, (void *)np_nothing, (void *)np_nothing, (void *)np_false, (void *)np_nothing, (void *)np_nothing};
+static struct { void *vtbl; long shared, weak; } g_np_ctrl = {g_np_ctrl_vtbl, 1L << 50, 1L << 50};
+
+static int np_slot(void **vt, int n, uint64_t want, void *with, void **orig) {
+    for (int i = 0; i < n; i++)
+        if ((uint64_t)vt[i] == want) {
+            *orig = vt[i];
+            vt[i] = with;
+            return 1;
+        }
+    return 0;
+}
+
+static void node_platform_fixups(TlImage *im) {
+    int f[6] = {0};
+    uint64_t vt = image_export(im, "__ZTVN4node12NodePlatformE", &f[0]);
+    uint64_t gftr = image_export(im, "__ZN4node12NodePlatform23GetForegroundTaskRunnerEPN2v87IsolateENS1_12TaskPriorityE", &f[1]);
+    uint64_t ite = image_export(im, "__ZN4node12NodePlatform16IdleTasksEnabledEPN2v87IsolateE", &f[2]);
+    uint64_t rl = image_export(im, "__ZN4node12NodePlatform15RegisterIsolateEPN2v87IsolateEP9uv_loop_s", &f[3]);
+    uint64_t rd = image_export(im, "__ZN4node12NodePlatform15RegisterIsolateEPN2v87IsolateEPNS_23IsolatePlatformDelegateE", &f[4]);
+    uint64_t ur = image_export(im, "__ZN4node12NodePlatform17UnregisterIsolateEPN2v87IsolateE", &f[5]);
+    for (int i = 0; i < 6; i++)
+        if (!f[i]) return;
+    if (tl_np_gftr) return; /* one Electron in the process is all this handles */
+    void **slots = (void **)(uintptr_t)vt + 2; /* past offset-to-top and type info */
+    void *o[5];
+    if (!np_slot(slots, 64, gftr, (void *)tl_np_gftr_thunk, &o[0])) return;
+    np_slot(slots, 64, ite, (void *)np_ite, &o[1]);
+    np_slot(slots, 64, rl, (void *)np_reg_loop, &o[2]);
+    np_slot(slots, 64, rd, (void *)np_reg_dlg, &o[3]);
+    np_slot(slots, 64, ur, (void *)np_unreg, &o[4]);
+    tl_np_gftr = o[0], g_np_ite = o[1], g_np_reg_loop = o[2], g_np_reg_dlg = o[3], g_np_unreg = o[4];
+    tl_np_fallback[0] = g_np_runner, tl_np_fallback[1] = &g_np_ctrl;
+    tl_log("node::NodePlatform in %s: isolates it does not know get a task runner of Henge's (one process)", im->path);
+}
+
+static void chromium_fixups(TlImage *im) {
+    int found = 0;
+    uint64_t at = image_export(im, "__ZN5cppgc17InitializeProcessEPN2v813PageAllocatorEm", &found);
+    if (!found || !at) return;
+    const uint32_t *ins = (const uint32_t *)(uintptr_t)at;
+    int ret = -1;
+    for (int i = 0; i < 48; i++)
+        if (ins[i] == 0xD65F03C0u) { ret = i; break; }
+    if (ret < 2) return;
+    int epi = ret;
+    while (epi > 0 && is_ldp_sp(ins[epi - 1])) epi--;
+    if (epi == ret) return;
+    for (int i = 0; i < ret; i++) {
+        uint32_t w = ins[i];
+        if ((w & 0xFF000000u) != 0xB5000000u) continue; /* cbnz Xn */
+        int32_t off = (int32_t)(w << 8) >> 13;           /* imm19, sign-extended */
+        int t = i + off;
+        if (t <= ret || t >= 48 || !is_brk(ins[t])) continue;
+        uint32_t patched = (w & 0xFF00001Fu) | ((uint32_t)(epi - i) & 0x7FFFFu) << 5;
+        code_write((void *)(ins + i), &patched, 4);
+        code_finish((void *)(ins + i), 4);
+        tl_log("cppgc::InitializeProcess in %s: a second set-up returns (one process)", im->path);
+        return;
+    }
+}
+
 static uint64_t host_symbol(void *handle, const char *install_name, const char *sym, int *found) {
     *found = 0;
     if (!install_name || strstr(install_name, "libSystem") || !strncmp(install_name, "/usr/lib/system/", 16) ||
@@ -1343,6 +1501,10 @@ static TlImage *load_and_link(const char *path, int ns, char *err, size_t errlen
     for (int i = 0; i < n; i++)
         if (fixup(batch[i], err, errlen) || setup_tlv(batch[i], err, errlen)) { pthread_mutex_unlock(&g_lock); return NULL; }
     register_unwinder();
+    for (int i = 0; i < n; i++) {
+        chromium_fixups(batch[i]);
+        node_platform_fixups(batch[i]);
+    }
     if (g_host->image_linked)
         for (int i = 0; i < n; i++) g_host->image_linked(batch[i]);
     for (int i = 0; i < n; i++) register_swift(batch[i]);
@@ -1685,6 +1847,10 @@ static int is_guest_program(const char *path) {
 
 static void proc_finish(TlProc *p, int status) {
     pthread_mutex_lock(&g_proc_lock);
+    if (p->done) { /* already ended for its parent (SIGKILL): its thread has now ended too */
+        pthread_mutex_unlock(&g_proc_lock);
+        return;
+    }
     p->status = status;
     p->done = 1;
     int n = p->nexit_watchers;
@@ -1917,6 +2083,9 @@ static int rt_kill(pid_t pid, int sig) {
     if (sig) {
         p->kill_requested = sig; /* a thread cannot be killed; it is left to end on its own */
         tl_log("process %d asked to stop (signal %d)", p->ns, sig);
+        /* SIGKILL cannot be ignored: for its parent (waiting in waitpid, as Chromium does after it) the process has
+           ended, as the kernel would make it; its thread finishes when it can. */
+        if (sig == SIGKILL) proc_finish(p, 128 + SIGKILL);
     }
     return 0;
 }
