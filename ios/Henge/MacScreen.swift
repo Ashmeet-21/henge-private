@@ -82,6 +82,9 @@ final class MacScreenUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         rightClick.buttonMaskRequired = .secondary
         rightClick.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
         for g in [wheel, hover, drag, click, rightClick] as [UIGestureRecognizer] { addGestureRecognizer(g) }
+        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:)))
+        pinch.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        addGestureRecognizer(pinch)
         // The pointer: the Mac's arrow, white with a dark edge, its tip at the point.
         let path = UIBezierPath()
         path.move(to: .zero)
@@ -127,6 +130,7 @@ final class MacScreenUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         cursor = CGPoint(x: min(max(p.x, 0), screen.width - 1), y: min(max(p.y, 0), screen.height - 1))
         arrow.isHidden = false
         placeArrow()
+        if trackpad { followPointer() }
     }
 
     private func pointerEvent(_ type: Int32, clicks: Int32 = 1, flags: UInt = 0) {
@@ -142,7 +146,7 @@ final class MacScreenUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
 
     /// Finger movement in this view to the pointer's: as far on the screen as the finger went, a little more.
     private func pointerDelta(_ d: CGPoint) -> CGPoint {
-        let s = 1.6 / max(fit, 0.01)
+        let s = 1.6 / max(shown, 0.01)
         return CGPoint(x: d.x * s, y: -d.y * s) // the Mac's y runs up
     }
 
@@ -174,7 +178,7 @@ final class MacScreenUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         let t = g.translation(in: self)
         let phase: Int32 = g.state == .began ? 1 : (g.state == .ended || g.state == .cancelled) ? 8 : 4
         if g.state == .began { lastPadScroll = .zero }
-        let s = max(fit, 0.01)
+        let s = max(shown, 0.01)
         henge_tl_app_scroll(cursor.x, cursor.y, (t.x - lastPadScroll.x) / s, (t.y - lastPadScroll.y) / s, phase)
         lastPadScroll = t
     }
@@ -209,16 +213,70 @@ final class MacScreenUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
 
     private var fit: CGFloat { min(bounds.width / max(screen.width, 1), bounds.height / max(screen.height, 1)) }
 
+    /// Pinch zoom (1x: the whole screen fits) and where the zoomed screen is moved to (from centred, view points).
+    private var zoom: CGFloat = 1
+    private var offset = CGPoint.zero
+    private var shown: CGFloat { fit * zoom }
+
     override func layoutSubviews() {
         super.layoutSubviews()
+        placeStage()
+    }
+
+    /// The screen at the zoom, centred where it is smaller than the view, else moved by the offset but always
+    /// covering the view.
+    private func placeStage() {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        let s = fit
+        let s = shown, w = screen.width * s, h = screen.height * s
+        var x = (bounds.width - w) / 2 + offset.x, y = (bounds.height - h) / 2 + offset.y
+        x = w > bounds.width ? min(0, max(bounds.width - w, x)) : (bounds.width - w) / 2
+        y = h > bounds.height ? min(0, max(bounds.height - h, y)) : (bounds.height - h) / 2
+        offset = CGPoint(x: x - (bounds.width - w) / 2, y: y - (bounds.height - h) / 2)
         stage.bounds = CGRect(origin: .zero, size: screen)
         stage.transform = CATransform3DMakeScale(s, s, 1)
-        stage.position = CGPoint(x: (bounds.width - screen.width * s) / 2, y: (bounds.height - screen.height * s) / 2)
+        stage.position = CGPoint(x: x, y: y)
         CATransaction.commit()
         placeArrow()
+    }
+
+    /// Two fingers pinching zoom in and out about the point between them, which stays under them (moving them
+    /// moves the zoomed screen).
+    private var pinchAnchor = CGPoint.zero
+    @objc private func pinched(_ g: UIPinchGestureRecognizer) {
+        let c = g.location(in: self)
+        switch g.state {
+        case .began:
+            pinchAnchor = mac(c)
+        case .changed:
+            zoom = min(max(zoom * g.scale, 1), 4)
+            g.scale = 1
+            placeStage()
+            let now = layer.convert(pinchAnchor, from: stage)
+            offset.x += c.x - now.x
+            offset.y += c.y - now.y
+            placeStage()
+        case .ended, .cancelled:
+            if zoom < 1.05 {
+                zoom = 1
+                offset = .zero
+                placeStage()
+            }
+        default: break
+        }
+    }
+
+    /// Zoomed in, the screen moves to keep the pointer in view.
+    private func followPointer() {
+        guard zoom > 1 else { return }
+        let v = layer.convert(cursor, from: stage), m: CGFloat = 36
+        var d = CGPoint.zero
+        if v.x < m { d.x = m - v.x } else if v.x > bounds.width - m { d.x = bounds.width - m - v.x }
+        if v.y < m { d.y = m - v.y } else if v.y > bounds.height - m { d.y = bounds.height - m - v.y }
+        guard d != .zero else { return }
+        offset.x += d.x
+        offset.y += d.y
+        placeStage()
     }
 
     /// Puts every window the app shows at its place, back to front.
@@ -313,7 +371,7 @@ final class MacScreenUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         let t = g.translation(in: self), p = mac(g.location(in: self))
         let phase: Int32 = g.state == .began ? 1 : (g.state == .ended || g.state == .cancelled) ? 8 : 4
         if g.state == .began { lastScroll = .zero }
-        let s = max(fit, 0.01)
+        let s = max(shown, 0.01)
         henge_tl_app_scroll(p.x, p.y, (t.x - lastScroll.x) / s, (t.y - lastScroll.y) / s, phase)
         lastScroll = t
     }
