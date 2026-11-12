@@ -2473,7 +2473,7 @@ static uint64_t max_map_bytes(void) {
    system leaves a program's allocator (Chromium's reserves 32 GB at once). */
 static void log_free_address_space(void) {
     static int said;
-    if (said++) return;
+    if (said++ >= 3) return;
     vm_address_t addr = 0, prev_end = 0;
     uint64_t total = 0, largest = 0;
     for (int i = 0; i < 100000; i++) {
@@ -2488,8 +2488,8 @@ static void log_free_address_space(void) {
             total += a - prev_end;
             if (a - prev_end > largest) largest = a - prev_end;
         }
-        if (size >= ((vm_size_t)4 << 30))
-            tl_log("  used %#llx-%#llx (%.1f GB, prot %d/%d, tag %u)", (unsigned long long)a, (unsigned long long)(a + size),
+        if (size >= ((vm_size_t)256 << 20) && a >= 0x7000000000ull)
+            tl_log("  used %#llx-%#llx (%.2f GB, prot %d/%d, tag %u)", (unsigned long long)a, (unsigned long long)(a + size),
                    (double)size / (1 << 30), info.protection, info.max_protection, info.user_tag);
         if (a + size > prev_end) prev_end = a + size;
         addr = a + size;
@@ -2569,8 +2569,10 @@ static void *room_place(size_t len) {
         size_t core = len + TL_PAGE - ((size_t)4 << 30);
         if (core >= ((size_t)64 << 20) && !(core & (core - 1))) slack = len - core, len = core; /* 4 GB alignment */
     }
-    size_t align = (size_t)1 << 32; /* at least 4 GB */
+    /* The alignment its size implies (the largest power of two in it, at most 32 GB); 4 GB for V8's padded requests. */
+    size_t align = TL_PAGE;
     while (align * 2 <= len && align < ((size_t)32 << 30)) align *= 2;
+    if (slack && align < ((size_t)4 << 30)) align = (size_t)4 << 30;
     uint8_t *lo = g_host->high_room[0], *hi = lo;
     for (int i = 0; i < g_host->high_rooms; i++) {
         if ((uint8_t *)g_host->high_room[i] < lo) lo = g_host->high_room[i];
@@ -2689,6 +2691,8 @@ static void *rt_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t 
            room's spare slots. */
         void *h = room_place(len);
         if (h) return h;
+        tl_log("no room for %.2f GB anywhere:", (double)len / (1 << 30));
+        log_free_address_space();
         errno = ENOMEM;
     }
     if (len >= ((size_t)1 << 30)) {
