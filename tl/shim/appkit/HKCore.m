@@ -960,6 +960,9 @@ static BOOL is_mouse(NSEventType t) {
         switch (t) {
         case NSEventTypeLeftMouseDown: case NSEventTypeRightMouseDown: case NSEventTypeOtherMouseDown: {
             NSView *v = [self hk_viewAt:p];
+            if (getenv("HK_LOG_EVENTS"))
+                hk_log("mouse down (type %lu, %ld clicks) at %.0f,%.0f in %s to %s", (unsigned long)t, (long)event.clickCount, p.x, p.y,
+                       object_getClassName(self), object_getClassName(v));
             _mouseDownView = v;
             if (g_key != self && [self canBecomeKeyWindow]) [self makeKeyAndOrderFront:nil];
             if ([v acceptsFirstResponder] && _firstResponder != v) [self makeFirstResponder:v];
@@ -970,6 +973,7 @@ static BOOL is_mouse(NSEventType t) {
         }
         case NSEventTypeLeftMouseUp: case NSEventTypeRightMouseUp: case NSEventTypeOtherMouseUp: {
             NSView *v = _mouseDownView ?: [self hk_viewAt:p];
+            if (getenv("HK_LOG_EVENTS")) hk_log("mouse up at %.0f,%.0f to %s", p.x, p.y, object_getClassName(v));
             _mouseDownView = nil;
             if (t == NSEventTypeLeftMouseUp) [v mouseUp:event];
             else if (t == NSEventTypeRightMouseUp) [v rightMouseUp:event];
