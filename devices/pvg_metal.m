@@ -1485,7 +1485,7 @@ static void set_host_valid(HvObject *o, BOOL valid, const char *mech, uint32_t r
     for (uint32_t i = 0; i < count; i++) {
         HvObject *o = objs[@(a[2 + i])];
         if (!o || !o->guest_backed || !o->host_valid) continue;
-        if (!cb) cb = [queue commandBuffer];
+        if (!cb) cb = [self safeCommandBuffer];
         /* The guest copy is current only if the download
            was actually enqueued; on a NO it stays stale, honestly. */
         if ([self page:o toGuest:YES task:task blit:&blit commandBuffer:cb])
@@ -2481,13 +2481,29 @@ static NSData *insp_slice(id<MTLBuffer> b, NSUInteger from, NSUInteger length) {
     if (sync) [cb waitUntilCompleted];
 }
 
+/* A command buffer, without letting the GPU queue grow without limit. When memory is short Metal throws
+   NSMallocException from -commandBuffer (seen on a 6 GB iPad: the whole app aborted). Wait for the GPU to
+   finish what it has, then try again; only a second failure is fatal. */
+- (id<MTLCommandBuffer>)safeCommandBuffer {
+    if (atomic_load(&inflight) >= 24)
+        dispatch_group_wait(completions, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC));
+    @try {
+        return [queue commandBuffer];
+    } @catch (NSException *e) {
+        fprintf(stderr, "hengevm: pvg-metal: commandBuffer failed (%s), waiting for the GPU and retrying
+", e.reason.UTF8String);
+        dispatch_group_wait(completions, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
+        return [queue commandBuffer];
+    }
+}
+
 /* A command that used the GPU not at all, or waited for by others: its stamp after everything before it. */
 - (void)finishChannel:(uint32_t)ch stamp:(uint32_t)stamp {
     if (atomic_load(&inflight) == 0) {
         hv_pvg_lite_complete(lite, ch, stamp);
         return;
     }
-    [self commit:[queue commandBuffer] channel:ch stamp:stamp complete:YES];
+    [self commit:[self safeCommandBuffer] channel:ch stamp:stamp complete:YES];
 }
 
 /* Returns YES if the GPU's completion gives the stamp back. */
@@ -2503,7 +2519,7 @@ static NSData *insp_slice(id<MTLBuffer> b, NSUInteger from, NSUInteger length) {
     if (!tracing) trace_dumped = nil, trace_draws = trace_sliced = 0;
     if (tracing) fprintf(stderr, "trace: exec task %u, %u resources, %u buffers\n", task, nres, nbuf);
     double t_begin = now_seconds();
-    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    id<MTLCommandBuffer> cb = [self safeCommandBuffer];
     trace_cb = tracing ? cb : nil;
     id<MTLBlitCommandEncoder> blit = nil;
     BOOL sync_after = NO;
