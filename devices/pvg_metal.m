@@ -2481,12 +2481,11 @@ static NSData *insp_slice(id<MTLBuffer> b, NSUInteger from, NSUInteger length) {
     if (sync) [cb waitUntilCompleted];
 }
 
-/* A command buffer, without letting the GPU queue grow without limit. When memory is short Metal throws
-   NSMallocException from -commandBuffer (seen on a 6 GB iPad: the whole app aborted). Wait for the GPU to
-   finish what it has, then try again; only a second failure is fatal. */
+/* A command buffer. When memory is short Metal throws NSMallocException from -commandBuffer (seen on a
+   6 GB iPad: the whole app aborted). Then wait for the GPU to finish what it has and try once more; only a
+   second failure is fatal. No throttle before it: waiting on the group drains the whole GPU queue (a stall
+   of up to 200 ms each time), which made the Mac slow. */
 - (id<MTLCommandBuffer>)safeCommandBuffer {
-    if (atomic_load(&inflight) >= 24)
-        dispatch_group_wait(completions, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC));
     @try {
         return [queue commandBuffer];
     } @catch (NSException *e) {
