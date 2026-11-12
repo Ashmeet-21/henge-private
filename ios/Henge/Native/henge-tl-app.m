@@ -321,6 +321,8 @@ void henge_tl_app_mouse(int type, double sx, double sy, int clicks, unsigned lon
     } else {
         w = window_at(sx, sy, &local);
     }
+    if (getenv("HK_LOG_EVENTS") && type != NSEventTypeMouseMoved && type != NSEventTypeLeftMouseDragged)
+        fprintf(stderr, "henge: tl: mouse %d at %.0f,%.0f (%d clicks): %s\n", type, sx, sy, clicks, w ? "a window" : "no window there");
     if (!w) return;
     if (type == NSEventTypeLeftMouseDown) g_grab = w;
     if (type == NSEventTypeLeftMouseUp) g_grab = nil;
