@@ -197,12 +197,66 @@ int henge_tl_app_load(const char *app_path, char *err, size_t errlen) {
     }
 }
 
+/* HENGE_TL_DUMP=1 (henge-env.txt on the phone): each shown window's layer tree, logged 15 and 40 s after the app starts,
+   with where it hangs in Henge's screen: for seeing why something the app draws does not show. */
+static const char *bg_text(CGColorRef c) {
+    static char buf[96];
+    if (!c) return "";
+    const CGFloat *k = CGColorGetComponents(c);
+    size_t n = CGColorGetNumberOfComponents(c);
+    if (n >= 4) snprintf(buf, sizeof buf, " bg(%.2f,%.2f,%.2f a=%.2f)", k[0], k[1], k[2], k[3]);
+    else if (n == 2) snprintf(buf, sizeof buf, " bg(gray %.2f a=%.2f)", k[0], k[1]);
+    else snprintf(buf, sizeof buf, " bg(%zu comps)", n);
+    return buf;
+}
+
+static void dump_layer(CALayer *l, int depth) {
+    if (depth > 14) return;
+    CGRect f = l.frame;
+    id c = l.contents;
+    const char *kind = !c ? "" : CFGetTypeID((__bridge CFTypeRef)c) == CGImageGetTypeID() ? " image" : " contents:other";
+    if (c && CFGetTypeID((__bridge CFTypeRef)c) == CGImageGetTypeID())
+        fprintf(stderr, "%*s%s {%.0f,%.0f,%.0f,%.0f}%s %zux%zu scale=%.1f grav=%s%s%s%s op=%.2f%s\n", depth * 2, "", object_getClassName(l),
+                f.origin.x, f.origin.y, f.size.width, f.size.height, kind, CGImageGetWidth((__bridge CGImageRef)c),
+                CGImageGetHeight((__bridge CGImageRef)c), l.contentsScale, l.contentsGravity.UTF8String, l.hidden ? " HIDDEN" : "",
+                l.geometryFlipped ? " flipped" : "", l.masksToBounds ? " clip" : "", l.opacity,
+                CATransform3DIsIdentity(l.transform) ? "" : " transform");
+    else
+        fprintf(stderr, "%*s%s {%.0f,%.0f,%.0f,%.0f}%s%s%s%s%s op=%.2f%s sub=%lu\n", depth * 2, "", object_getClassName(l), f.origin.x,
+                f.origin.y, f.size.width, f.size.height, kind, bg_text(l.backgroundColor), l.hidden ? " HIDDEN" : "",
+                l.geometryFlipped ? " flipped" : "", l.masksToBounds ? " clip" : "", l.opacity,
+                CATransform3DIsIdentity(l.transform) ? "" : " transform", (unsigned long)l.sublayers.count);
+    for (CALayer *sub in l.sublayers) dump_layer(sub, depth + 1);
+}
+
+static void dump_windows(void) {
+    NSArray<NSWindow *> *ws = hk_visible_windows();
+    fprintf(stderr, "henge: tl: dump: %lu windows\n", (unsigned long)ws.count);
+    for (NSWindow *w in ws) {
+        CALayer *root = [w hk_rootLayer];
+        fprintf(stderr, "henge: tl: dump: window %s frame {%.0f,%.0f,%.0f,%.0f}; hangs in:", object_getClassName(w), w.frame.origin.x,
+                w.frame.origin.y, w.frame.size.width, w.frame.size.height);
+        for (CALayer *up = root.superlayer; up; up = up.superlayer)
+            fprintf(stderr, " %s{%.0f,%.0f,%.0f,%.0f}%s", object_getClassName(up), up.frame.origin.x, up.frame.origin.y, up.frame.size.width,
+                    up.frame.size.height, up.geometryFlipped ? "F" : "");
+        fprintf(stderr, "\n");
+        dump_layer(root, 1);
+    }
+}
+
 int henge_tl_app_run(void) {
     if (!g_exe) return -1;
     int argc = (int)g_args.count;
     const char **argv = calloc((size_t)argc + 1, sizeof *argv);
     for (int i = 0; i < argc; i++) argv[i] = strdup(g_args[i].UTF8String);
     const char *envp[] = {NULL};
+    if (getenv("HENGE_TL_DUMP"))
+        for (int i = 0; i < 2; i++) {
+            CFRunLoopTimerRef d = CFRunLoopTimerCreateWithHandler(NULL, CFAbsoluteTimeGetCurrent() + (i ? 40 : 15), 0, 0, 0,
+                                                                  ^(CFRunLoopTimerRef timer) { dump_windows(); });
+            CFRunLoopAddTimer(CFRunLoopGetMain(), d, kCFRunLoopCommonModes);
+            CFRelease(d);
+        }
     fprintf(stderr, "henge: tl: running the app's main on the main thread\n");
     int rc = tl_run_main(g_exe, argc, argv, envp);
     fprintf(stderr, "henge: tl: the app's main returned %d\n", rc);
