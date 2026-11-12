@@ -86,6 +86,25 @@ static void input_line(NSString *line) {
             henge_tl_app_key(1, 0, c, 0);
             henge_tl_app_key(0, 0, c, 0);
         }
+    } else if ([cmd isEqualToString:@"menus"]) { /* the menu bar's menus, as the screen's menu button gets them */
+        const void *raw = henge_tl_app_main_menu();
+        NSArray *items = raw ? (__bridge_transfer NSArray *)raw : nil;
+        __block void (^show)(NSArray *, int);
+        void (^__block __weak weak)(NSArray *, int);
+        weak = show = ^(NSArray *list, int depth) {
+            for (NSDictionary *d in list) {
+                if ([d[@"separator"] boolValue]) { fprintf(stderr, "test_tl_app: menu %*s----\n", depth * 2, ""); continue; }
+                fprintf(stderr, "test_tl_app: menu %*s%s%s%s [%s]\n", depth * 2, "", [d[@"title"] UTF8String], [d[@"enabled"] boolValue] ? "" : " (off)",
+                        [d[@"state"] intValue] ? " (on)" : "", [[d[@"path"] componentsJoinedByString:@"."] UTF8String]);
+                if (d[@"children"] && depth < 1) weak(d[@"children"], depth + 1);
+            }
+        };
+        show(items, 0);
+    } else if ([cmd isEqualToString:@"choose"] && f.count > 1) { /* choose 2.5: an item of the menu bar's menus */
+        NSArray<NSString *> *parts = [f[1] componentsSeparatedByString:@"."];
+        int path[8], n = 0;
+        for (NSString *p in parts) if (n < 8) path[n++] = p.intValue;
+        henge_tl_app_menu_choose(path, n);
     } else fprintf(stderr, "test_tl_app: unknown input '%s'\n", line.UTF8String);
 }
 

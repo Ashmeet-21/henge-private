@@ -272,7 +272,7 @@ static BOOL g_cancel;
 static NSRect screen_frame(void) { return [NSScreen mainScreen].frame; }
 
 static void opening(NSMenu *menu) {
-    [menu update]; /* menuNeedsUpdate: and the items' enabling */
+    [menu hk_prepare]; /* menuNeedsUpdate: and the items' enabling */
     id d = menu.delegate;
     if ([d respondsToSelector:@selector(menuWillOpen:)]) ((void (*)(id, SEL, id))objc_msgSend)(d, @selector(menuWillOpen:), menu);
 }
@@ -292,6 +292,7 @@ static void show_view(HKMenuView *v, NSPoint top_left) {
     if (NSMaxY(f) > NSMaxY(s)) f.origin.y = fmax(s.origin.y, NSMaxY(s) - f.size.height);
     NSWindow *w = [[NSWindow alloc] initWithContentRect:f styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO];
     w.backgroundColor = [NSColor clearColor];
+    w.level = 101; /* NSPopUpMenuWindowLevel: above every other window */
     w.contentView = v;
     v->_window = w;
     [w orderFront:nil];

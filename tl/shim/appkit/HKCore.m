@@ -800,10 +800,40 @@ static SEL delegate_selector(NSString *note, NSString *prefix) {
 }
 
 /* ---- ordering ---- */
+/* AppKit's stacking: windows of a higher level above those of a lower one, and a child window just above its parent
+   (Chromium's bubbles, such as "Restore pages?", are child windows: they stayed behind the browser window when it
+   came to the front). Order is otherwise kept. */
+static NSWindow *top_parent(NSWindow *w) {
+    for (int n = 0; w.parentWindow && n < 16; n++) w = w.parentWindow;
+    return w;
+}
+static void add_family(NSMutableArray *out, NSWindow *w, NSArray *order, int depth) {
+    [out addObject:w];
+    if (depth > 16) return;
+    for (NSWindow *c in order)
+        if (c.parentWindow == w && ![out containsObject:c]) add_family(out, c, order, depth + 1);
+}
+static void restack(void) {
+    NSArray *order = [g_windows copy];
+    NSMutableArray *tops = [NSMutableArray array];
+    for (NSWindow *w in order) {
+        NSWindow *t = top_parent(w);
+        if (![tops containsObject:t]) [tops addObject:t];
+    }
+    NSArray *byLevel = [tops sortedArrayWithOptions:NSSortStable usingComparator:^NSComparisonResult(NSWindow *a, NSWindow *b) {
+        return a.level < b.level ? NSOrderedAscending : a.level > b.level ? NSOrderedDescending : NSOrderedSame;
+    }];
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSWindow *t in byLevel) add_family(out, t, order, 0);
+    for (NSWindow *w in order) /* any left out (a parent cycle) keep their place at the end */
+        if (![out containsObject:w]) [out addObject:w];
+    [g_windows setArray:out];
+}
 - (void)hk_show {
     BOOL was = _visible;
     [g_windows removeObjectIdenticalTo:self];
     [g_windows addObject:self];
+    restack();
     _visible = YES;
     tell_presenter(self, 1);
     if (!was) [self hk_post:@"NSWindowDidChangeOcclusionStateNotification"];

@@ -348,7 +348,7 @@ static BOOL g_uses_user_key_equivalents;
     NSMutableArray<NSMenuItem *> *_items;
     NSFont *_font;
     CGFloat _minimumWidth;
-    BOOL _showsStateColumn, _allowsContextMenuPlugIns;
+    BOOL _showsStateColumn, _allowsContextMenuPlugIns, _updating, _preparing;
     NSInteger _layoutDirection;
 }
 @synthesize title = _title, delegate = _delegate, autoenablesItems = _autoenablesItems, supermenu = _supermenu;
@@ -486,12 +486,22 @@ static BOOL g_menu_bar_visible = YES;
     if ([target respondsToSelector:@selector(validateUserInterfaceItem:)]) return [target validateUserInterfaceItem:item];
     return YES;
 }
+/* As AppKit's: the items' enabling only (validation can call back into update: once at a time). */
 - (void)update {
-    id d = _delegate;
-    if ([d respondsToSelector:@selector(menuNeedsUpdate:)]) [d menuNeedsUpdate:self];
-    if (!_autoenablesItems) return;
+    if (!_autoenablesItems || _updating) return;
+    _updating = YES;
     for (NSMenuItem *i in [_items copy])
         if (!i.isSeparatorItem) i.enabled = [self hk_validate:i];
+    _updating = NO;
+}
+/* Before a menu shows: the delegate fills it (menuNeedsUpdate:, once at a time), then its items are enabled. */
+- (void)hk_prepare {
+    if (_preparing) return;
+    _preparing = YES;
+    id d = _delegate;
+    if ([d respondsToSelector:@selector(menuNeedsUpdate:)]) [d menuNeedsUpdate:self];
+    _preparing = NO;
+    [self update];
 }
 - (void)performActionForItemAtIndex:(NSInteger)index {
     NSMenuItem *item = [self itemAtIndex:index];

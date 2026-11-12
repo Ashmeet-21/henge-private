@@ -455,6 +455,60 @@ struct MacScreenView: UIViewRepresentable {
     func updateUIView(_ v: MacScreenUIView, context: Context) { v.refresh() }
 }
 
+/// The app's menu bar menus (a Mac app's menu bar has no place on the phone), as an iOS menu: built afresh each time
+/// it opens, so items are enabled, ticked and filled in as the app has them then.
+struct MacMenuButton: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIButton {
+        var c = UIButton.Configuration.plain()
+        c.image = UIImage(systemName: "menubar.rectangle", withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .medium))
+        c.baseForegroundColor = UIColor.white.withAlphaComponent(0.9)
+        c.background.backgroundColor = UIColor.black.withAlphaComponent(0.45)
+        c.background.cornerRadius = 19
+        c.contentInsets = .zero
+        let b = UIButton(configuration: c)
+        b.showsMenuAsPrimaryAction = true
+        b.menu = UIMenu(children: [UIDeferredMenuElement.uncached { done in done(MacMenuButton.elements()) }])
+        return b
+    }
+
+    func updateUIView(_ b: UIButton, context: Context) {}
+
+    static func elements() -> [UIMenuElement] {
+        guard let raw = henge_tl_app_main_menu(),
+              let items = Unmanaged<NSArray>.fromOpaque(raw).takeRetainedValue() as? [[String: Any]], !items.isEmpty else {
+            return [UIAction(title: "This app has no menus", attributes: .disabled) { _ in }]
+        }
+        return build(items)
+    }
+
+    /// Items as iOS menu elements; a Mac menu's separators become iOS's inline groups.
+    private static func build(_ items: [[String: Any]]) -> [UIMenuElement] {
+        var groups: [[UIMenuElement]] = [[]]
+        for it in items {
+            if it["separator"] as? Bool == true {
+                groups.append([])
+                continue
+            }
+            let title = it["title"] as? String ?? ""
+            let path = (it["path"] as? [NSNumber] ?? []).map { Int32(truncating: $0) }
+            if let kids = it["children"] as? [[String: Any]] {
+                groups[groups.count - 1].append(UIMenu(title: title, children: build(kids)))
+                continue
+            }
+            let enabled = it["enabled"] as? Bool ?? true
+            let state = it["state"] as? Int ?? 0
+            let a = UIAction(title: title, attributes: enabled ? [] : .disabled,
+                             state: state > 0 ? .on : state < 0 ? .mixed : .off) { _ in
+                path.withUnsafeBufferPointer { henge_tl_app_menu_choose($0.baseAddress, Int32(path.count)) }
+            }
+            groups[groups.count - 1].append(a)
+        }
+        let filled = groups.filter { !$0.isEmpty }
+        if filled.count == 1 { return filled[0] }
+        return filled.map { UIMenu(title: "", options: .displayInline, children: $0) }
+    }
+}
+
 /// Where Henge's AppKit's "a window changed" lands (a C callback, on the main thread).
 final class MacScreenHub {
     static let shared = MacScreenHub()
@@ -492,6 +546,7 @@ struct MacAppScreen: View {
                         .font(.system(size: 15, weight: .medium)).foregroundStyle(.white.opacity(0.9))
                         .frame(width: 38, height: 38).background(.black.opacity(0.45), in: Circle())
                 }
+                MacMenuButton().frame(width: 38, height: 38)
                 Button { MacScreenHub.shared.view?.toggleKeyboard() } label: {
                     Image(systemName: "keyboard").font(.system(size: 15, weight: .medium)).foregroundStyle(.white.opacity(0.9))
                         .frame(width: 38, height: 38).background(.black.opacity(0.45), in: Circle())

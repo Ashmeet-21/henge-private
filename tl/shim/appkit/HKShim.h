@@ -678,6 +678,8 @@ id hk_font_adopt(id obj);
 - (NSInteger)indexOfItemWithRepresentedObject:(id)object;
 - (NSInteger)indexOfItemWithTarget:(id)target andAction:(SEL)action;
 - (void)update;
+/* Before the menu shows: the delegate's menuNeedsUpdate:, then update. */
+- (void)hk_prepare;
 /* Finds the enabled item whose key equivalent the key-down event is, and sends its action. */
 - (BOOL)performKeyEquivalent:(NSEvent *)event;
 - (void)performActionForItemAtIndex:(NSInteger)index;
