@@ -1294,6 +1294,10 @@ static void wake_perform(void *info) {}
         CFRunLoopAddSource(_loop, _wake, kCFRunLoopCommonModes);
         CFRunLoopAddSource(_loop, _wake, (__bridge CFStringRef) @"NSEventTrackingRunLoopMode");
         CFRunLoopAddSource(_loop, _wake, (__bridge CFStringRef) @"NSModalPanelRunLoopMode");
+        /* As AppKit does: the common modes include its tracking and modal modes, so what an app (Chromium's message
+           pump) and Core Animation's commits put in the common modes also run while a menu is tracked. */
+        CFRunLoopAddCommonMode(_loop, (__bridge CFStringRef) @"NSEventTrackingRunLoopMode");
+        CFRunLoopAddCommonMode(_loop, (__bridge CFStringRef) @"NSModalPanelRunLoopMode");
     }
     return self;
 }

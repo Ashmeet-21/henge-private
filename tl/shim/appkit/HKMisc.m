@@ -358,7 +358,7 @@ static BOOL g_menu_bar_visible = YES;
 + (void)setMenuBarVisible:(BOOL)visible { g_menu_bar_visible = visible; }
 + (CGFloat)menuBarHeight { return 0; }
 + (void)popUpContextMenu:(NSMenu *)menu withEvent:(NSEvent *)event forView:(NSView *)view {
-    hk_log("NSMenu: context menu \"%s\" (%ld items) not shown", menu.title.UTF8String, (long)menu.numberOfItems);
+    hk_menu_context(menu, event, view); /* HKMenu.m */
 }
 + (void)popUpContextMenu:(NSMenu *)menu withEvent:(NSEvent *)event forView:(NSView *)view withFont:(NSFont *)font {
     [self popUpContextMenu:menu withEvent:event forView:view];
@@ -452,7 +452,7 @@ static BOOL g_menu_bar_visible = YES;
 - (void)submenuAction:(id)sender {}
 - (void)itemChanged:(NSMenuItem *)item {}
 - (BOOL)isMainMenu { return NSApp.mainMenu == self; }
-- (NSMenuItem *)highlightedItem { return nil; }
+- (NSMenuItem *)highlightedItem { return hk_menu_highlighted(self); }
 - (NSFont *)font { return _font ?: [NSFont menuFontOfSize:0]; }
 - (void)setFont:(NSFont *)font { _font = font; }
 - (CGFloat)minimumWidth { return _minimumWidth; }
@@ -467,11 +467,10 @@ static BOOL g_menu_bar_visible = YES;
 - (void)setUserInterfaceLayoutDirection:(NSInteger)d { _layoutDirection = d; }
 - (BOOL)isTornOff { return NO; }
 - (NSArray<NSMenuItem *> *)selectedItems { return @[]; }
-- (void)cancelTracking {}
-- (void)cancelTrackingWithoutAnimation {}
+- (void)cancelTracking { hk_menu_cancel(self); }
+- (void)cancelTrackingWithoutAnimation { hk_menu_cancel(self); }
 - (BOOL)popUpMenuPositioningItem:(NSMenuItem *)item atLocation:(NSPoint)location inView:(NSView *)view {
-    hk_log("NSMenu: pop-up menu \"%s\" (%ld items) not shown", _title.UTF8String, (long)_items.count);
-    return NO;
+    return hk_menu_positioned(self, item, location, view);
 }
 
 /* Whether an item's action can be sent now: its own enabled flag, or (autoenabling) whether some target takes the
