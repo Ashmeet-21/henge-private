@@ -2683,6 +2683,14 @@ static void *rt_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t 
         if (!said++) tl_log("a mapping hinted at %p failed: again without the hint (and from now on)", addr);
         r = mmap(NULL, len, prot, flags, fd, off);
     }
+    if (r == MAP_FAILED && g_host && g_host->high_rooms && len >= ((size_t)256 << 20) && prot == PROT_NONE &&
+        (flags & MAP_ANON) && !(flags & MAP_FIXED)) {
+        /* No room left anywhere for a smaller reservation (V8's TrustedRange, 1 GB on a 4 GB boundary): the held
+           room's spare slots. */
+        void *h = room_place(len);
+        if (h) return h;
+        errno = ENOMEM;
+    }
     if (len >= ((size_t)1 << 30)) {
         if (r == MAP_FAILED) {
             int e = errno;
