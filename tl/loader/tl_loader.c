@@ -2743,7 +2743,7 @@ static void *rt_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t 
         /* No room left anywhere (iOS's 64 GB run out with Chromium in it): the held room's spare slots, or the
            never-used tops of the big blocks, with the access asked for. */
         static int listed;
-        if (!listed++ && len < ((size_t)256 << 20)) log_high_space();
+        if (len < ((size_t)256 << 20) && !listed++) log_high_space();
         void *h = room_place_prot(len, prot);
         if (h) return h;
         tl_log("no room for %.3f GB anywhere:", (double)len / (1 << 30));
