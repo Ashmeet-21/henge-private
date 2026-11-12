@@ -801,6 +801,34 @@ HK_FN(OSStatus, SecTrustSettingsCopyTrustSettings, (CFTypeRef certificate, uint3
     SEC_OUT(settings);
     return kHKErrSecNoTrustSettings;
 }
+/* Code-signing requirements (macOS's requirement language, which iOS's Security cannot parse): a requirement is made
+   (its text kept, as a CF string) and every check against one passes; iOS's sandbox is the app's real boundary.
+   Chromium builds one from its own signature at startup and stops if it gets none. */
+HK_FN(OSStatus, SecRequirementCreateWithString, (CFStringRef text, uint32_t flags, CFTypeRef *requirement)) {
+    if (requirement) *requirement = text ? CFStringCreateCopy(NULL, text) : CFSTR("");
+    return 0;
+}
+HK_FN(OSStatus, SecRequirementCreateWithStringAndErrors, (CFStringRef text, uint32_t flags, CFErrorRef *errors,
+                                                         CFTypeRef *requirement)) {
+    if (errors) *errors = NULL;
+    if (requirement) *requirement = text ? CFStringCreateCopy(NULL, text) : CFSTR("");
+    return 0;
+}
+HK_FN(OSStatus, SecRequirementCopyString, (CFTypeRef requirement, uint32_t flags, CFStringRef *text)) {
+    if (text) *text = requirement && CFGetTypeID(requirement) == CFStringGetTypeID() ? CFStringCreateCopy(NULL, requirement) : CFSTR("");
+    return 0;
+}
+HK_FN(OSStatus, SecCodeCheckValidity, (CFTypeRef code, uint32_t flags, CFTypeRef requirement)) { return 0; }
+HK_FN(OSStatus, SecCodeCheckValidityWithErrors, (CFTypeRef code, uint32_t flags, CFTypeRef requirement, CFErrorRef *errors)) {
+    if (errors) *errors = NULL;
+    return 0;
+}
+HK_FN(OSStatus, SecStaticCodeCheckValidity, (CFTypeRef code, uint32_t flags, CFTypeRef requirement)) { return 0; }
+HK_FN(OSStatus, SecStaticCodeCheckValidityWithErrors, (CFTypeRef code, uint32_t flags, CFTypeRef requirement, CFErrorRef *errors)) {
+    if (errors) *errors = NULL;
+    return 0;
+}
+
 HK_FN(OSStatus, SecCodeCopyGuestWithAttributes, (CFTypeRef host, CFDictionaryRef attributes, uint32_t flags, CFTypeRef *guest)) {
     SEC_OUT(guest);
     return kHKErrSecUnimplemented;
