@@ -1147,6 +1147,12 @@ static int do_rebases(TlImage *im, char *err, size_t errlen) {
     return 0;
 }
 
+static int in_section(TlImage *im, const uint8_t *loc, const char *seg, const char *name) {
+    uint64_t size = 0;
+    const uint8_t *s = find_section(im, seg, name, &size);
+    return s && loc >= s && loc < s + size;
+}
+
 static int do_binds(TlImage *im, const uint8_t *p, const uint8_t *end, int lazy, char *err, size_t errlen) {
     int seg = -1, ordinal = 0, weak = 0;
     const char *sym = "";
@@ -1176,7 +1182,14 @@ static int do_binds(TlImage *im, const uint8_t *p, const uint8_t *end, int lazy,
             count = read_uleb(&p, end), skip = read_uleb(&p, end);
         bind: {
             uint64_t v;
-            if (resolve_import(im, ordinal, sym, weak, &v, err, errlen)) return -1;
+            /* A bind into __got is data (constants, classes) or an address taken, never a call (calls go through
+               __la_symbol_ptr): missing, it gets a data stand-in (a string of its name), not a function stub, whose
+               code an app would read as an object (Qt's NSPasteboardType and NSImageHint constants). */
+            uint8_t *first = seg_addr(im, seg, off);
+            g_bind_kind = !lazy && first && (in_section(im, first, "__DATA_CONST", "__got") || in_section(im, first, "__DATA", "__got")) ? 2 : 0;
+            int rc = resolve_import(im, ordinal, sym, weak, &v, err, errlen);
+            g_bind_kind = 0;
+            if (rc) return -1;
             if (v) v += (uint64_t)addend;
             for (uint64_t i = 0; i < count; i++) {
                 uint8_t *loc = seg_addr(im, seg, off);
@@ -3029,8 +3042,16 @@ static void *rt_CFBundleGetDataPointerForName(CFBundleRef bundle, CFStringRef na
     return p ? p : CFBundleGetDataPointerForName(bundle, name);
 }
 
+void *tl_cf_main_bundle(int ns); /* tl_bundle.m */
+static int ns_of(const void *addr);
+static CFBundleRef rt_CFBundleGetMainBundle(void) {
+    CFBundleRef b = tl_cf_main_bundle(ns_of(__builtin_return_address(0)));
+    return b ? b : CFBundleGetMainBundle();
+}
+
 /* CoreFoundation's functions answered here (imports from CoreFoundation). */
 static void *cf_override(const char *sym) {
+    if (!strcmp(sym, "_CFBundleGetMainBundle")) return (void *)rt_CFBundleGetMainBundle;
     if (!strcmp(sym, "_CFBundleGetBundleWithIdentifier")) return (void *)rt_CFBundleGetBundleWithIdentifier;
     if (!strcmp(sym, "_CFBundleGetFunctionPointerForName")) return (void *)rt_CFBundleGetFunctionPointerForName;
     if (!strcmp(sym, "_CFBundleGetDataPointerForName")) return (void *)rt_CFBundleGetDataPointerForName;
