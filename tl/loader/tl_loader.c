@@ -1611,6 +1611,10 @@ static int ns_of(const void *addr) {
 }
 int tl_ns_of_address(const void *addr) { return ns_of(addr); }
 
+/* The handle dlopen gives for OpenGL by path (see rt_dlopen). */
+static char g_opengl_handle;
+static const char *const g_opengl_name = "/System/Library/Frameworks/OpenGL.framework/Versions/A/OpenGL";
+
 static TlImage *as_image(void *handle) {
     int n = g_norder;
     for (int i = 0; i < n; i++)
@@ -1674,6 +1678,12 @@ static void *rt_dlopen(const char *path, int mode) {
     }
     char buf[PATH_MAX];
     const char *host_path = g_host->map_install_name ? g_host->map_install_name(path, buf, sizeof buf) : path;
+    if (!host_path && strstr(path, "/OpenGL.framework/") && g_host->shim_lookup) {
+        /* OpenGL opened by path (SDL loads libGL.dylib, GLFW the framework): the host has none, Henge's AppKit
+           provides its functions; dlsym on this handle finds them there. */
+        if (g_host->verbose) tl_log("dlopen %s: Henge's OpenGL", path);
+        return (void *)&g_opengl_handle;
+    }
     if (!host_path) {
         rt_set_dlerror("%s is not on this system", path);
         if (g_host->verbose) tl_log("dlopen %s: not on this system", path);
@@ -1685,7 +1695,7 @@ static void *rt_dlopen(const char *path, int mode) {
 }
 
 static int rt_dlclose(void *handle) {
-    if (as_image(handle)) return 0;
+    if (as_image(handle) || handle == (void *)&g_opengl_handle) return 0;
     return dlclose(handle);
 }
 
@@ -1703,6 +1713,11 @@ static void *rt_dlsym(void *handle, const char *name) {
     char sym[1024];
     snprintf(sym, sizeof sym, "_%s", name);
     int found = 0;
+    if (handle == (void *)&g_opengl_handle) {
+        void *s = g_host->shim_lookup(g_opengl_name, sym);
+        if (!s) rt_set_dlerror("%s: symbol not found", name);
+        return s;
+    }
     TlImage *im = as_image(handle);
     if (im) {
         uint64_t v = image_lookup_deep(im, sym, &found);
