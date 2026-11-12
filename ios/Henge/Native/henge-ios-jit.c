@@ -517,19 +517,23 @@ static HengeDualMapping henge_ios_jit_allocate_real(size_t bytes);
  * (tl_loader.c, room_place), in two blocks held here from launch before anything else can land in them (zero-fill and
  * untouched: no memory). The layout it ends up with:
  *   0x70-0x78  PartitionAlloc's pools (32 GB, aligned to 32), its 16 GB metadata over their unused halves
- *   0x78-0x7C  Oilpan's unused lower half: V8's 8 GB at 0x78, the JIT region's writable view at 0x7A (not held)
+ *   0x78-0x7C  Oilpan's unused lower half: V8's 8 GB at 0x78, the JIT region's writable view at 0x7A (not held,
+ *              2.5 GB after it free for everything else), V8's TrustedRange at 0x7B (held)
  *   0x7C-0x80  Oilpan's upper half (its 32 GB reservation, aligned to 32, only uses this)
  * Let go when QEMU starts.
  */
 #define HENGE_HIGH_BASE 0x7000000000ull
 #define HENGE_JIT_VIEW_AT 0x7A00000000ull
-static const struct { uint64_t at, bytes; } g_high_parts[2] = {{0x7000000000ull, 40ull << 30}, {0x7C00000000ull, 16ull << 30}};
-static vm_address_t g_high_hold[2];
+static const struct { uint64_t at, bytes; } g_high_parts[3] = {
+    {0x7000000000ull, 40ull << 30}, {0x7C00000000ull, 16ull << 30},
+    {0x7B00000000ull, 4ull << 30}, /* 4 GB-aligned slots for V8's smaller aligned reservations (its TrustedRange) */
+};
+static vm_address_t g_high_hold[3];
 static bool g_high_hold_given;
 
 static void henge_ios_hold_high(void)
 {
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 3; i++) {
         if (g_high_hold[i]) continue;
         vm_address_t a = (vm_address_t)g_high_parts[i].at;
         kern_return_t kr = vm_allocate(mach_task_self(), &a, (vm_size_t)g_high_parts[i].bytes, VM_FLAGS_FIXED);
@@ -545,7 +549,7 @@ static void henge_ios_hold_high(void)
 static void henge_ios_release_high_hold(void)
 {
     if (g_high_hold_given) return;
-    for (int i = 0; i < 2; i++)
+    for (int i = 0; i < 3; i++)
         if (g_high_hold[i]) {
             vm_deallocate(mach_task_self(), g_high_hold[i], (vm_size_t)g_high_parts[i].bytes);
             g_high_hold[i] = 0;
@@ -558,7 +562,7 @@ HENGE_EXPORT int henge_ios_take_high_room(void **base, size_t *bytes)
 {
     if (g_high_hold_given) return 0;
     int n = 0;
-    for (int i = 0; i < 2; i++)
+    for (int i = 0; i < 3; i++)
         if (g_high_hold[i]) {
             base[n] = (void *)g_high_hold[i];
             bytes[n] = (size_t)g_high_parts[i].bytes;
