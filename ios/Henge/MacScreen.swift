@@ -2,12 +2,27 @@ import SwiftUI
 import UIKit
 
 /// A Mac app's screen (Mac apps with windows, experimental): the windows Henge's AppKit hands over, scaled to fit,
-/// with touches as a mouse (tap to click, one finger to scroll, two fingers to drag, long press for a right click)
-/// and the iOS keyboard as a Mac keyboard.
-final class MacScreenUIView: UIView, UIKeyInput {
+/// with the Mac's pointer drawn over them, fingers as a trackpad (or, in touch mode, as a mouse where they land), and
+/// the iOS keyboard as a Mac keyboard.
+final class MacScreenUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     private let stage = CALayer()
     private var holders: [CALayer] = []
     var screen = CGSize(width: 1180, height: 680)
+
+    /// The Mac's pointer, drawn over the screen (fingers have none): in the Mac's points, origin bottom left.
+    private var cursor = CGPoint(x: 590, y: 340)
+    private let arrow = CAShapeLayer()
+    private var touchGestures: [UIGestureRecognizer] = []
+    private var padGestures: [UIGestureRecognizer] = []
+
+    /// Trackpad mode (the default): fingers work the pointer as on a Mac's trackpad. Off: touch where to click.
+    static let trackpadKey = "henge.macapps.trackpad"
+    var trackpad = UserDefaults.standard.object(forKey: MacScreenUIView.trackpadKey) as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(trackpad, forKey: Self.trackpadKey)
+            applyMode()
+        }
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -17,32 +32,166 @@ final class MacScreenUIView: UIView, UIKeyInput {
         stage.masksToBounds = true
         stage.backgroundColor = UIColor(white: 0.16, alpha: 1).cgColor
         layer.addSublayer(stage)
+        // Touch mode: a tap clicks where it lands; one finger scrolls, as everywhere on iOS; two drag with the mouse
+        // button down (select, move); a long press right-clicks.
         let tap = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
         let doubleTap = UITapGestureRecognizer(target: self, action: #selector(doubleTapped(_:)))
         doubleTap.numberOfTapsRequired = 2
         tap.require(toFail: doubleTap)
-        // Fingers: one scrolls, as everywhere on iOS; two drag with the mouse button down (select, move). A mouse's
-        // or trackpad's scrolling (wheel, two fingers on the trackpad) scrolls too.
         let scroll = UIPanGestureRecognizer(target: self, action: #selector(scrolled(_:)))
         scroll.maximumNumberOfTouches = 1
-        scroll.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
-        scroll.allowedScrollTypesMask = .all
         let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
         pan.minimumNumberOfTouches = 2
-        pan.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
         let press = UILongPressGestureRecognizer(target: self, action: #selector(pressed(_:)))
-        press.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
-        // A mouse or trackpad: the pointer moves the Mac's pointer, its button held down drags, its other button
-        // right-clicks.
+        touchGestures = [tap, doubleTap, pan, scroll, press]
+        // Trackpad mode: one finger moves the pointer, a tap clicks at it (two quick taps double-click), two fingers
+        // tap to right-click and slide to scroll, and a press held a moment then moved drags.
+        let padMove = UIPanGestureRecognizer(target: self, action: #selector(padMoved(_:)))
+        padMove.maximumNumberOfTouches = 1
+        let padTap = UITapGestureRecognizer(target: self, action: #selector(padTapped(_:)))
+        let padRight = UITapGestureRecognizer(target: self, action: #selector(padRightTapped(_:)))
+        padRight.numberOfTouchesRequired = 2
+        let padScroll = UIPanGestureRecognizer(target: self, action: #selector(padScrolled(_:)))
+        padScroll.minimumNumberOfTouches = 2
+        padScroll.maximumNumberOfTouches = 2
+        let padHold = UILongPressGestureRecognizer(target: self, action: #selector(padHeld(_:)))
+        padHold.minimumPressDuration = 0.3
+        padHold.allowableMovement = 10
+        padMove.delegate = self
+        padHold.delegate = self
+        padGestures = [padMove, padTap, padRight, padScroll, padHold]
+        for g in touchGestures + padGestures {
+            g.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+            addGestureRecognizer(g)
+        }
+        // A mouse or trackpad attached to the device: its pointer is the Mac's pointer, its button held down drags,
+        // its other button right-clicks, its scrolling scrolls.
+        let wheel = UIPanGestureRecognizer(target: self, action: #selector(scrolled(_:)))
+        wheel.allowedScrollTypesMask = .all
+        wheel.allowedTouchTypes = []
         let hover = UIHoverGestureRecognizer(target: self, action: #selector(hovered(_:)))
         let drag = UIPanGestureRecognizer(target: self, action: #selector(dragged(_:)))
         drag.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
         drag.maximumNumberOfTouches = 1
+        let click = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
+        click.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
         let rightClick = UITapGestureRecognizer(target: self, action: #selector(rightClicked(_:)))
         rightClick.buttonMaskRequired = .secondary
-        for g in [tap, doubleTap, pan, scroll, press, hover, drag, rightClick] as [UIGestureRecognizer] { addGestureRecognizer(g) }
+        for g in [wheel, hover, drag, click, rightClick] as [UIGestureRecognizer] { addGestureRecognizer(g) }
+        // The pointer: the Mac's arrow, white with a dark edge, its tip at the point.
+        let path = UIBezierPath()
+        path.move(to: .zero)
+        for p in [CGPoint(x: 0, y: 17), CGPoint(x: 4.2, y: 12.8), CGPoint(x: 7.2, y: 19.4), CGPoint(x: 10, y: 18.2),
+                  CGPoint(x: 7.1, y: 11.8), CGPoint(x: 12.6, y: 11.8)] { path.addLine(to: p) }
+        path.close()
+        arrow.path = path.cgPath
+        arrow.fillColor = UIColor.white.cgColor
+        arrow.strokeColor = UIColor.black.cgColor
+        arrow.lineWidth = 1.1
+        arrow.lineJoin = .round
+        arrow.anchorPoint = .zero
+        arrow.bounds = CGRect(x: 0, y: 0, width: 13, height: 20)
+        arrow.zPosition = 10
+        arrow.shadowOpacity = 0.35
+        arrow.shadowRadius = 1.5
+        arrow.shadowOffset = CGSize(width: 0, height: 1)
+        layer.addSublayer(arrow)
+        applyMode()
         inputAssistantItem.leadingBarButtonGroups = [] // no shortcut bar over the Mac's screen
         inputAssistantItem.trailingBarButtonGroups = []
+    }
+
+    private func applyMode() {
+        touchGestures.forEach { $0.isEnabled = !trackpad }
+        padGestures.forEach { $0.isEnabled = trackpad }
+        placeArrow()
+    }
+
+    func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        padGestures.contains(g) && padGestures.contains(other)
+    }
+
+    /// The arrow at the pointer (the stage is flipped: Core Animation converts).
+    private func placeArrow() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        arrow.position = layer.convert(cursor, from: stage)
+        CATransaction.commit()
+    }
+
+    private func moveCursor(to p: CGPoint) {
+        cursor = CGPoint(x: min(max(p.x, 0), screen.width - 1), y: min(max(p.y, 0), screen.height - 1))
+        arrow.isHidden = false
+        placeArrow()
+    }
+
+    private func pointerEvent(_ type: Int32, clicks: Int32 = 1, flags: UInt = 0) {
+        henge_tl_app_mouse(type, cursor.x, cursor.y, clicks, flags)
+    }
+
+    // MARK: trackpad mode
+
+    private var dragging = false
+    private var lastHold = CGPoint.zero
+    private var lastTap = Date.distantPast
+    private var lastTapAt = CGPoint.zero
+
+    /// Finger movement in this view to the pointer's: as far on the screen as the finger went, a little more.
+    private func pointerDelta(_ d: CGPoint) -> CGPoint {
+        let s = 1.6 / max(fit, 0.01)
+        return CGPoint(x: d.x * s, y: -d.y * s) // the Mac's y runs up
+    }
+
+    @objc private func padMoved(_ g: UIPanGestureRecognizer) {
+        guard !dragging, g.state == .changed else { return }
+        let t = g.translation(in: self)
+        g.setTranslation(.zero, in: self)
+        let d = pointerDelta(t)
+        moveCursor(to: CGPoint(x: cursor.x + d.x, y: cursor.y + d.y))
+        pointerEvent(5, clicks: 0)
+    }
+
+    @objc private func padTapped(_ g: UITapGestureRecognizer) {
+        let quick = Date().timeIntervalSince(lastTap) < 0.4 && hypot(cursor.x - lastTapAt.x, cursor.y - lastTapAt.y) < 6
+        let clicks: Int32 = quick ? 2 : 1
+        lastTap = Date()
+        lastTapAt = cursor
+        pointerEvent(1, clicks: clicks)
+        pointerEvent(2, clicks: clicks)
+    }
+
+    @objc private func padRightTapped(_ g: UITapGestureRecognizer) {
+        pointerEvent(3)
+        pointerEvent(4)
+    }
+
+    private var lastPadScroll = CGPoint.zero
+    @objc private func padScrolled(_ g: UIPanGestureRecognizer) {
+        let t = g.translation(in: self)
+        let phase: Int32 = g.state == .began ? 1 : (g.state == .ended || g.state == .cancelled) ? 8 : 4
+        if g.state == .began { lastPadScroll = .zero }
+        let s = max(fit, 0.01)
+        henge_tl_app_scroll(cursor.x, cursor.y, (t.x - lastPadScroll.x) / s, (t.y - lastPadScroll.y) / s, phase)
+        lastPadScroll = t
+    }
+
+    @objc private func padHeld(_ g: UILongPressGestureRecognizer) {
+        let p = g.location(in: self)
+        switch g.state {
+        case .began:
+            dragging = true
+            lastHold = p
+            pointerEvent(1)
+        case .changed:
+            let d = pointerDelta(CGPoint(x: p.x - lastHold.x, y: p.y - lastHold.y))
+            lastHold = p
+            moveCursor(to: CGPoint(x: cursor.x + d.x, y: cursor.y + d.y))
+            pointerEvent(6)
+        case .ended, .cancelled, .failed:
+            if dragging { pointerEvent(2) }
+            dragging = false
+        default: break
+        }
     }
 
     override func didMoveToWindow() {
@@ -65,6 +214,7 @@ final class MacScreenUIView: UIView, UIKeyInput {
         stage.transform = CATransform3DMakeScale(s, s, 1)
         stage.position = CGPoint(x: (bounds.width - screen.width * s) / 2, y: (bounds.height - screen.height * s) / 2)
         CATransaction.commit()
+        placeArrow()
     }
 
     /// Puts every window the app shows at its place, back to front.
@@ -94,8 +244,8 @@ final class MacScreenUIView: UIView, UIKeyInput {
     private func mac(_ p: CGPoint) -> CGPoint { stage.convert(p, from: layer) }
 
     private func mouse(_ type: Int32, _ p: CGPoint, clicks: Int32 = 1, flags: UInt = 0) {
-        let m = mac(p)
-        henge_tl_app_mouse(type, m.x, m.y, clicks, flags)
+        moveCursor(to: mac(p))
+        henge_tl_app_mouse(type, cursor.x, cursor.y, clicks, flags)
     }
 
     @objc private func tapped(_ g: UITapGestureRecognizer) {
@@ -152,7 +302,10 @@ final class MacScreenUIView: UIView, UIKeyInput {
     }
 
     @objc private func hovered(_ g: UIHoverGestureRecognizer) {
-        if g.state == .began || g.state == .changed { mouse(5, g.location(in: self), clicks: 0) }
+        if g.state == .began || g.state == .changed {
+            mouse(5, g.location(in: self), clicks: 0)
+            arrow.isHidden = true // a mouse or trackpad shows its own pointer
+        }
     }
 
     @objc private func dragged(_ g: UIPanGestureRecognizer) {
@@ -310,6 +463,7 @@ struct MacAppScreen: View {
     @Environment(\.dismiss) private var dismiss
     @State private var status = "Loading…"
     @State private var started = false
+    @State private var trackpad = UserDefaults.standard.object(forKey: MacScreenUIView.trackpadKey) as? Bool ?? true
     private let screen = MacAppScreen.screenSize()
 
     /// The Mac's screen in points: the device's long side by short side, made a little larger than the device so
@@ -324,9 +478,20 @@ struct MacAppScreen: View {
     var body: some View {
         ZStack(alignment: .topLeading) {
             MacScreenView(screen: screen).ignoresSafeArea()
-            Button { MacScreenHub.shared.view?.toggleKeyboard() } label: {
-                Image(systemName: "keyboard").font(.system(size: 15, weight: .medium)).foregroundStyle(.white.opacity(0.9))
-                    .frame(width: 38, height: 38).background(.black.opacity(0.45), in: Circle())
+            HStack(spacing: 10) {
+                // Trackpad (fingers move the pointer) or touch (tap where to click).
+                Button {
+                    trackpad.toggle()
+                    MacScreenHub.shared.view?.trackpad = trackpad
+                } label: {
+                    Image(systemName: trackpad ? "cursorarrow" : "hand.point.up.left")
+                        .font(.system(size: 15, weight: .medium)).foregroundStyle(.white.opacity(0.9))
+                        .frame(width: 38, height: 38).background(.black.opacity(0.45), in: Circle())
+                }
+                Button { MacScreenHub.shared.view?.toggleKeyboard() } label: {
+                    Image(systemName: "keyboard").font(.system(size: 15, weight: .medium)).foregroundStyle(.white.opacity(0.9))
+                        .frame(width: 38, height: 38).background(.black.opacity(0.45), in: Circle())
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing).padding(14)
             if !started || !status.isEmpty {
