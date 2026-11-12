@@ -20,11 +20,24 @@ static HengeDualMapping mapping;
 static int failures;
 static _Atomic int reader_done;
 static _Atomic int media_writes = 1;
-HengeDualMapping *henge_ios_jit_get_mapping(void) { return &mapping; }
+static int memory_prepared, memory_preparations, installer_started;
+void henge_ios_jit_prepare_vm_memory(void) {
+    memory_prepared = 1;
+    memory_preparations++;
+}
+HengeDualMapping *henge_ios_jit_get_mapping(void) {
+    if (!memory_prepared) {
+        fprintf(stderr, "FAIL: native VM must release unused address reservations before using JIT\n");
+        failures++;
+    }
+    memory_prepared = 0;
+    return &mapping;
+}
 void hv_prof_ios_start(void) {}
 int hv_install_start(HvVirtioUsb *usb, const char *ipsw, const char *work, uint64_t ecid,
                      HvInstallProgress progress, void *user) {
     (void)usb; (void)ipsw; (void)work; (void)ecid; (void)progress; (void)user;
+    installer_started++;
     return -1;
 }
 static void check(const char *what, int ok) {
@@ -285,8 +298,15 @@ int main(void) {
     hv_vm_destroy();
     atomic_store(&reader_done, 1);
     pthread_join(reader, NULL);
+    int before_install = memory_preparations;
+    check("installer reaches restore after memory preparation",
+          henge_vm_install(rom, disk, aux, 1, "unused", dir, 64, 2, error, sizeof error) != 0
+          && installer_started == 1 && strstr(error, "installer could not start") != NULL);
+    check("installer prepares VM memory", memory_preparations == before_install + 1);
+    /* The installer stub owns no USB workers, so the test can release its board. */
+    hv_vm_destroy();
     hv_jit_region_close(&jit);
     unlink(rom); unlink(disk); unlink(aux); rmdir(dir);
-    printf("VM lifecycle: 12 power cycles, 3 failed boots and a suspend/resume, %d failures\n", failures);
+    printf("VM lifecycle: 12 power cycles, 3 failed boots, suspend/resume and installer preflight, %d failures\n", failures);
     return failures != 0;
 }

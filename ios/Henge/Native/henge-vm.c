@@ -183,6 +183,7 @@ static int boot_or_resume(const char *rom, const char *disk, const char *aux, ui
                           int cpus, const char *resume, const char *ident, char *err, size_t errlen) {
     { extern void hv_prof_ios_start(void); hv_prof_ios_start(); }
     if (begin_start(err, errlen)) return -1;
+    henge_ios_jit_prepare_vm_memory();
     HengeDualMapping *jit = henge_ios_jit_get_mapping();
     if (!jit || !jit->rw_addr) {
         snprintf(err, errlen, "Henge has no JIT region. Turn on JIT first.");
@@ -224,6 +225,7 @@ static void on_install_progress(int step, double p, void *user) {
 int henge_vm_install(const char *rom, const char *disk, const char *aux, uint64_t ecid, const char *ipsw,
                      const char *workdir, uint64_t ram_mb, int cpus, char *err, size_t errlen) {
     if (begin_start(err, errlen)) return -1;
+    henge_ios_jit_prepare_vm_memory();
     HengeDualMapping *jit = henge_ios_jit_get_mapping();
     if (!jit || !jit->rw_addr) {
         snprintf(err, errlen, "Henge has no JIT region. Turn on JIT first.");

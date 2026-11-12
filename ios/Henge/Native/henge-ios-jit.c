@@ -549,11 +549,23 @@ static void henge_ios_hold_high(void)
 static void henge_ios_release_high_hold(void)
 {
     if (g_high_hold_given) return;
+    uint64_t released = 0;
     for (int i = 0; i < 3; i++)
         if (g_high_hold[i]) {
-            vm_deallocate(mach_task_self(), g_high_hold[i], (vm_size_t)g_high_parts[i].bytes);
-            g_high_hold[i] = 0;
+            kern_return_t kr = vm_deallocate(mach_task_self(), g_high_hold[i], (vm_size_t)g_high_parts[i].bytes);
+            if (kr == KERN_SUCCESS) {
+                released += g_high_parts[i].bytes;
+                g_high_hold[i] = 0;
+            } else {
+                HENGE_LOG("could not release unused Mac app address room: %s", mach_error_string(kr));
+            }
         }
+    if (released) HENGE_LOG("released %llu MiB of unused Mac app address reservations for the VM", (unsigned long long)(released >> 20));
+}
+
+HENGE_EXPORT void henge_ios_jit_prepare_vm_memory(void)
+{
+    henge_ios_release_high_hold();
 }
 
 /* The held blocks, once, for the translation layer to place large reservations in (they stay held: those are mapped
@@ -999,6 +1011,7 @@ HengeDualMapping henge_ios_jit_allocate(size_t bytes)
     return henge_ios_jit_allocate_real(bytes);
 }
 int henge_ios_take_high_room(void **base, size_t *bytes) { (void)base, (void)bytes; return 0; }
+void henge_ios_jit_prepare_vm_memory(void) {}
 bool henge_ios_jit_prewarm(size_t bytes) { (void)bytes; return false; }
 bool henge_ios_jit_prewarm_self(size_t bytes) { (void)bytes; return false; }
 bool henge_ios_jit_reserve_bottom(size_t end) { (void)end; return true; }

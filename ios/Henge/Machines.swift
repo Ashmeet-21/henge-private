@@ -49,6 +49,7 @@ struct VirtualMac: Identifiable, Codable, Hashable {
 enum GuestMemory {
     /// Points the engine at the file (it is unlinked as soon as it is open) and returns the size that fits.
     static func prepare(_ mac: VirtualMac) -> UInt64 {
+        henge_ios_jit_prepare_vm_memory()
         let file = mac.directory.appendingPathComponent("ram.tmp")
         setenv("HV_RAM_FILE", file.path, 1)
         let free = (try? mac.directory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
