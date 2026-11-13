@@ -708,24 +708,30 @@ static void do_mapper(HvPvgLite *p) {
 }
 
 /* Device work no doorbell took care of: a channel that had to wait for another one's work. */
-/* Experiment (HV_PVG_VBLANK=1): the display's refresh event. The guest asks for event 8 in its mask (+104) while
-   something waits on the display's timing (a display link); without it a video wallpaper stops when nothing else
-   draws. Sent at the mode's rate while asked for. */
+/* The display's refresh: event 8 while the guest asks for it in its mask (+104), and the refresh's time at +68.
+   AppleParavirtDisplay's vblank query reads that time from +68 of this page (macOS 15.6.1's kernelcache: a getter
+   that is ldr x8, [page, #0x68]; str x8, [x1]). Left 0, WindowServer times its frames from 0: it logs "Timer delayed
+   by <uptime>s" in bursts, its display timer re-arms at once, and the Mac spends minutes at a time switching threads
+   (on an iPhone, 20-48K interrupts and 40-80K process switches a second where a calm Mac has 3-7K). Without event 8
+   a video wallpaper stops when nothing else draws. Sent at the mode's rate (HV_HZ). HV_PVG_VBLANK=0: neither, as before. */
 static void vblank(HvPvgLite *p) {
     static int on = -1;
     static uint64_t period, next;
     if (on < 0) {
-        on = getenv("HV_PVG_VBLANK") && atoi(getenv("HV_PVG_VBLANK"));
+        on = !getenv("HV_PVG_VBLANK") || atoi(getenv("HV_PVG_VBLANK"));
         const char *hz = getenv("HV_HZ");
         uint64_t r = hz && atoi(hz) > 0 ? (uint64_t)atoi(hz) : 60;
         period = 24000000ull / r; /* host counter ticks (24 MHz) */
     }
     if (!on || !p->display_pa) return;
     uint8_t *d = hv_phys_ptr(p->m, p->display_pa, 0x4000);
-    if (!d || !(__atomic_load_n((uint32_t *)(d + 0x104), __ATOMIC_ACQUIRE) & 8)) return;
+    if (!d) return;
     uint64_t now = mach_absolute_time();
     if (now < next) return;
     next = now + period;
+    /* The time on the guest's own clock (its virtual counter, as mach_absolute_time reads it there), before the event. */
+    __atomic_store_n((uint64_t *)(d + 0x68), now - p->m->cntvoff, __ATOMIC_RELEASE);
+    if (!(__atomic_load_n((uint32_t *)(d + 0x104), __ATOMIC_ACQUIRE) & 8)) return;
     __atomic_fetch_or((uint32_t *)(d + 0x100), 8, __ATOMIC_RELEASE);
     p->vblanks++;
     hv_gicv3_pend(p->gic, p->gfx_irq);
