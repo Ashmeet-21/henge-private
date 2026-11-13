@@ -708,27 +708,11 @@ static void do_mapper(HvPvgLite *p) {
 }
 
 /* Device work no doorbell took care of: a channel that had to wait for another one's work. */
-/* Experiment (HV_PVG_VBLANK=1): the display's refresh event. The guest asks for event 8 in its mask (+104) while
-   something waits on the display's timing (a display link); without it a video wallpaper stops when nothing else
-   draws. Sent at the mode's rate while asked for. */
+/* No host refresh event. Event bit 3 (8) on this page is the disconnect event in AppleParavirtDisplay's
+   handleHostInterrupt: it calls destroyDisplayAttributes, so raising it at the refresh rate tears the display down
+   60 times a second. The driver times its own refresh with an IOTimerEventSource. */
 static void vblank(HvPvgLite *p) {
-    static int on = -1;
-    static uint64_t period, next;
-    if (on < 0) {
-        on = getenv("HV_PVG_VBLANK") && atoi(getenv("HV_PVG_VBLANK"));
-        const char *hz = getenv("HV_HZ");
-        uint64_t r = hz && atoi(hz) > 0 ? (uint64_t)atoi(hz) : 60;
-        period = 24000000ull / r; /* host counter ticks (24 MHz) */
-    }
-    if (!on || !p->display_pa) return;
-    uint8_t *d = hv_phys_ptr(p->m, p->display_pa, 0x4000);
-    if (!d || !(__atomic_load_n((uint32_t *)(d + 0x104), __ATOMIC_ACQUIRE) & 8)) return;
-    uint64_t now = mach_absolute_time();
-    if (now < next) return;
-    next = now + period;
-    __atomic_fetch_or((uint32_t *)(d + 0x100), 8, __ATOMIC_RELEASE);
-    p->vblanks++;
-    hv_gicv3_pend(p->gic, p->gfx_irq);
+    (void)p;
 }
 
 void hv_pvg_lite_poll(HvPvgLite *p) {
