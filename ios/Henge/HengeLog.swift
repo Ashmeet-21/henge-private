@@ -79,6 +79,7 @@ enum HengeLog {
         // the crash report (CrashReport.swift).
         let url = logFileURL
         let prev = url.deletingLastPathComponent().appendingPathComponent("henge-prev.log")
+        archive(url)
         try? FileManager.default.removeItem(at: prev)
         try? FileManager.default.moveItem(at: url, to: prev)
         logFD = open(url.path, O_CREAT | O_WRONLY | O_TRUNC, 0o644)
@@ -87,6 +88,28 @@ enum HengeLog {
         installCrashHandlers()
         logBanner()
         replayPreviousNativeLog()
+    }
+
+    /// Logs/: a copy of each finished run's log, named for when it ended, the newest `keepRuns` kept. henge-prev.log
+    /// is only one run back, and a JIT relaunch alone is a run, so a crash's log was often gone before anyone looked.
+    static let keepRuns = 10
+    static var archiveURL: URL { logFileURL.deletingLastPathComponent().appendingPathComponent("Logs", isDirectory: true) }
+
+    private static func archive(_ log: URL) {
+        let fm = FileManager.default
+        guard let attrs = try? fm.attributesOfItem(atPath: log.path),
+              let size = attrs[.size] as? Int, size > 0, size <= 100 << 20 else { return } // past 100 MB: not 10 of them on disk
+        let ended = attrs[.modificationDate] as? Date ?? Date()
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        let dir = archiveURL
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? fm.copyItem(at: log, to: dir.appendingPathComponent("henge-\(f.string(from: ended)).log"))
+        // The names sort by time: drop all but the newest keepRuns.
+        let runs = ((try? fm.contentsOfDirectory(atPath: dir.path)) ?? [])
+            .filter { $0.hasPrefix("henge-") && $0.hasSuffix(".log") }.sorted()
+        for name in runs.dropLast(keepRuns) { try? fm.removeItem(at: dir.appendingPathComponent(name)) }
     }
 
     /// Put the last run's native output into this run's log.
