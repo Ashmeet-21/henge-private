@@ -184,6 +184,9 @@ struct SessionView: View {
         }
         .statusBarHidden(zoomed || Device.isPad)
         .persistentSystemOverlays(.hidden)
+        // A swipe from a screen edge is the Mac's (its Dock, its menu bar) first: macOS gets it, and a
+        // second swipe goes back to iOS's own gestures. Without this iOS takes every edge swipe itself.
+        .defersSystemGestures(on: .all)
         .sheet(isPresented: $showDetails) { details }
         .confirmationDialog("Shut down \(mac.name)?", isPresented: $confirmStop, titleVisibility: .visible) {
             Button("Shut Down", role: .destructive) { finish() }
@@ -198,6 +201,10 @@ struct SessionView: View {
         .onChange(of: scenePhase) { phase in
             guard phase != .active else {
                 display.refresh()
+                // A lock or the app switcher may have taken the mouse and keyboard back: iOS reclaims
+                // both when the session stops being active, and nothing here re-attached them until now.
+                HardwareMouse.shared.start()
+                KeyboardCatcher.reattach()
                 InstantResume.cameBack(mac)
                 return
             }
@@ -216,11 +223,13 @@ struct SessionView: View {
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true
             HengeAudio.shared.activate()
+            MacShortcuts.setMacOnScreen(true)
             HardwareMouse.shared.start()
             VolumeClicks.shared.start()
         }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
+            MacShortcuts.setMacOnScreen(false)
             zoomFollowing?.cancel()
             StickyKeys.shared.releaseAll()
             HardwareKeys.releaseAll()

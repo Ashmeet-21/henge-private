@@ -404,6 +404,27 @@ void henge_vm_audio_kick(void) {
     hv_vm_audio_kick();
     pthread_rwlock_unlock(&api_lock);
 }
+int henge_vm_usb_mouse_ready(void) {
+    if (!lock_running()) return 0;
+    int ready = hv_vm_usb_mouse_ready();
+    pthread_rwlock_unlock(&api_lock);
+    return ready;
+}
+void henge_vm_usb_mouse_move(int dx, int dy) {
+    if (!lock_running()) return;
+    hv_vm_usb_mouse_move(dx, dy);
+    pthread_rwlock_unlock(&api_lock);
+}
+void henge_vm_usb_mouse_scroll(int wheel, int pan) {
+    if (!lock_running()) return;
+    hv_vm_usb_mouse_scroll(wheel, pan);
+    pthread_rwlock_unlock(&api_lock);
+}
+void henge_vm_usb_mouse_buttons(unsigned buttons) {
+    if (!lock_running()) return;
+    hv_vm_usb_mouse_buttons(buttons);
+    pthread_rwlock_unlock(&api_lock);
+}
 int henge_vm_pointer(int *x, int *y) {
     if (!lock_running()) return -1;
     int result = hv_vm_pointer(x, y);

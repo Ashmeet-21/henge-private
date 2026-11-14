@@ -4,6 +4,7 @@ import UIKit
 final class HengeAppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         HengeAudio.shared.start()
+        MacShortcuts.configure()
         return true
     }
 

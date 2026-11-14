@@ -1,4 +1,5 @@
 import SwiftUI
+import GameController
 import UIKit
 
 /// Types into the Mac. Two invisible views take turns holding the keyboard: one that asks for the
@@ -8,6 +9,12 @@ struct KeyboardCatcher: UIViewRepresentable {
     @Binding var active: Bool
 
     func makeUIView(context: Context) -> Holder { Holder() }
+
+    /// After a lock, a call or the app switcher, iOS has stopped the session's views being first
+    /// responder, and with them the route a hardware keyboard's keys take to the Mac. Take it back.
+    static func reattach() {
+        DispatchQueue.main.async { Holder.current?.takeKeyboard() }
+    }
 
     func updateUIView(_ view: Holder, context: Context) {
         view.typer.onHide = { active = false }
@@ -20,11 +27,14 @@ struct KeyboardCatcher: UIViewRepresentable {
         let typer = CatcherView()
         var typing = false
         private var hiding: NSObjectProtocol?
+        /// The session's holder, while it is in a window: the one that can take the keyboard back.
+        static weak var current: Holder?
 
         override init(frame: CGRect) {
             super.init(frame: frame)
             addSubview(listener)
             addSubview(typer)
+            Self.current = self
             hiding = NotificationCenter.default.addObserver(forName: UIResponder.keyboardWillHideNotification,
                                                             object: nil, queue: .main) { [weak self] _ in
                 self?.keyboardHid()
@@ -63,6 +73,63 @@ struct KeyboardCatcher: UIViewRepresentable {
         override var canBecomeFirstResponder: Bool { true }
         /// Fingers belong to the session (they drive the Mac's trackpad), not to iPadOS's undo/copy/paste bar.
         override var editingInteractionConfiguration: UIEditingInteractionConfiguration { .none }
+        /// With a keyboard attached, ⌘C, ⌘V, ⌘X, ⌘A and ⌘Z are the Mac's: iOS would otherwise offer them to this
+        /// responder as its own copy, paste and undo actions and keep the keys from it (#122).
+        override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+            GCKeyboard.coalesced == nil && super.canPerformAction(action, withSender: sender)
+        }
+        override var undoManager: UndoManager? { GCKeyboard.coalesced == nil ? super.undoManager : nil }
+
+        private static let macShortcutCommands: [UIKeyCommand] = {
+            let pairs: [(String, UIKeyModifierFlags, UInt8)] = [
+                (" ", .command, 0x2c),
+                (" ", [.command, .alternate], 0x2c),
+                ("\t", .command, 0x2b),
+                ("\t", [.command, .shift], 0x2b),
+                ("`", .command, 0x35),
+                ("h", .command, 0x0b),
+                ("m", .command, 0x10),
+                ("q", .command, 0x14),
+                ("w", .command, 0x1a),
+                (",", .command, 0x36),
+            ]
+            return pairs.map { input, flags, _ in
+                let cmd = UIKeyCommand(input: input, modifierFlags: flags, action: #selector(handleMacShortcut(_:)))
+                cmd.wantsPriorityOverSystemBehavior = true
+                return cmd
+            }
+        }()
+
+        override var keyCommands: [UIKeyCommand]? { Self.macShortcutCommands }
+
+        @objc private func handleMacShortcut(_ command: UIKeyCommand) {
+            // If pressesBegan already delivered the key to the guest within the last 100 ms, avoid sending a duplicate.
+            guard !HardwareKeys.keyJustPressed, let input = command.input else { return }
+            let mods = command.modifierFlags
+            if mods.contains(.command) { henge_vm_key_hid(0xe3, 1) }
+            if mods.contains(.shift) { henge_vm_key_hid(0xe1, 1) }
+            if mods.contains(.alternate) { henge_vm_key_hid(0xe2, 1) }
+            if mods.contains(.control) { henge_vm_key_hid(0xe0, 1) }
+            let usage: UInt8? = switch input {
+            case " ": 0x2c
+            case "\t": 0x2b
+            case "`": 0x35
+            case "h": 0x0b
+            case "m": 0x10
+            case "q": 0x14
+            case "w": 0x1a
+            case ",": 0x36
+            default: nil
+            }
+            if let usage {
+                henge_vm_key_hid(usage, 1)
+                henge_vm_key_hid(usage, 0)
+            }
+            if mods.contains(.control) { henge_vm_key_hid(0xe0, 0) }
+            if mods.contains(.alternate) { henge_vm_key_hid(0xe2, 0) }
+            if mods.contains(.shift) { henge_vm_key_hid(0xe1, 0) }
+            if mods.contains(.command) { henge_vm_key_hid(0xe3, 0) }
+        }
 
         override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
             let rest = HardwareKeys.send(presses, down: true)

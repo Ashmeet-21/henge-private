@@ -69,6 +69,7 @@ enum Device {
 enum HardwareKeys {
     private static var held: Set<UInt8> = []
     private static var lastKey: CFTimeInterval = 0
+    private static var chordsLogged = 0
 
     /// With the on-screen keyboard's view holding the keyboard, iOS may also offer a hardware key as
     /// text, and again as it repeats. The Mac has the key already, and repeats it itself.
@@ -95,6 +96,10 @@ enum HardwareKeys {
                 continue
             }
             let usage = UInt8(raw)
+            if down, usage < 0xe0, held.contains(0xe3) || held.contains(0xe7), chordsLogged < 40 {
+                chordsLogged += 1 // which ⌘ shortcuts reach the Mac; one iOS keeps never shows here
+                HengeLog.log("input", "⌘ shortcut to the Mac: key 0x\(String(usage, radix: 16))")
+            }
             henge_vm_key_hid(usage, down ? 1 : 0)
             if usage < 0xe0 { lastKey = CACurrentMediaTime() }
             if down {
@@ -112,6 +117,39 @@ enum HardwareKeys {
     static func releaseAll() {
         for usage in held { henge_vm_key_hid(usage, 0) }
         held.removeAll()
+    }
+}
+
+/// While a Mac runs, a keyboard's ⌘ shortcuts are the Mac's. iOS 26 gave every app a main menu, and its
+/// standard commands (⌘H Hide, ⌘M Minimize, ⌘W Close, ⌘Q Quit, ⌘, Settings, ⌘F Find, ⌘Z, ⌘C, ⌘V and the
+/// rest) are matched before a key reaches a view, so the shortcut worked on Henge instead of the Mac (#122).
+/// The main menu is built without them while a session is on screen. What iOS itself reserves (⌘Tab,
+/// ⌘Space, the Globe key's shortcuts) still goes to iOS: no app can take those.
+@MainActor
+enum MacShortcuts {
+    private static var configured = false
+    private(set) static var macOnScreen = false
+
+    /// Once, at launch: the menu is rebuilt through this handler from then on.
+    static func configure() {
+        guard #available(iOS 26.0, *), !configured else { return }
+        configured = true
+        UIMainMenuSystem.shared.setBuildConfiguration(UIMainMenuSystem.Configuration()) { builder in
+            guard macOnScreen else { return }
+            let menus: [UIMenu.Identifier] = [.hide, .quit, .preferences, .services, .close, .newItem, .document, .print,
+                                              .undoRedo, .standardEdit, .find, .edit, .format, .view, .toolbar,
+                                              .sidebar, .fullscreen, .minimizeAndZoom, .bringAllToFront, .window,
+                                              .help, .file]
+            for menu in menus where builder.menu(for: menu) != nil { builder.remove(menu: menu) }
+        }
+    }
+
+    static func setMacOnScreen(_ on: Bool) {
+        guard on != macOnScreen else { return }
+        macOnScreen = on
+        guard #available(iOS 26.0, *), configured else { return }
+        UIMainMenuSystem.shared.setNeedsRebuild()
+        HengeLog.log("input", "Henge's menu shortcuts \(on ? "off: the Mac has the keyboard" : "back")")
     }
 }
 
@@ -184,36 +222,55 @@ enum PhonePointer {
 }
 
 /// A Magic Keyboard's trackpad or a mouse, while a Mac is running. GameController gives the raw motion,
-/// which macOS then accelerates as it would for its own mouse.
+/// which macOS then accelerates as it would for its own mouse. Once macOS has the Mac's USB mouse, it all
+/// goes there: real right, middle, back and forward buttons and the Mac's own Mouse settings. Before that
+/// (early boot) it goes to the virtio mouse, whose right button is a Control-click.
+///
+/// GameController calls the handlers on its handler queue, the main queue unless told otherwise, where
+/// they waited behind SwiftUI layout and drawing: a mouse lagged behind the touch trackpad (#122). Here
+/// they run on a queue of their own, and everything below that the handlers touch belongs to it.
 final class HardwareMouse {
     static let shared = HardwareMouse()
     static let speedKey = "henge.mouse.speed"
     static let reverseKey = "henge.mouse.reverse"
     static let scrollSpeedKey = "henge.mouse.scrollSpeed"
 
+    private let queue = DispatchQueue(label: "henge.mouse", qos: .userInteractive)
+    private var started = false
     private var observers: [NSObjectProtocol] = []
     private var mice: [GCMouse] = []
+    // The rest is the queue's.
     private var buttons = PhysicalMouseButtons(swapsRightAndMiddle: false)
+    private var usbHeld: UInt32 = 0 // buttons down on the USB mouse, as its report's bits
     private var buttonsLogged = 0
     private var restX: Float = 0, restY: Float = 0
+    private var restWheel: Float = 0, restPan: Float = 0
     private var speed: Float = 1
     private var reverse = false
     private var scrollsLogged = 0 // the first few, to see what a device's raw values look like
     private var lastScrollFirst: Float = 0, lastScrollSecond: Float = 0
-    private var vendorChannels: Set<UUID> = []
+    private var vendorChannels: Set<UUID> = [] // mice that pass through their maker's channel (VendorMice)
     private var vendorMovesLogged = 0
+    private var lastRoute: Bool?
 
     func start() {
+        if started { stop() } // again after a boot: fresh settings, and one set of observers
+        started = true
         let defaults = UserDefaults.standard
-        speed = defaults.object(forKey: Self.speedKey) == nil ? 1 : Float(defaults.double(forKey: Self.speedKey))
-        reverse = defaults.bool(forKey: Self.reverseKey)
-        releaseButtons()
+        let speed = defaults.object(forKey: Self.speedKey) == nil ? 1 : Float(defaults.double(forKey: Self.speedKey))
+        let reverse = defaults.bool(forKey: Self.reverseKey)
         let swapButtons = defaults.bool(forKey: PhysicalMouseButtons.swapKey)
-        buttons = PhysicalMouseButtons(swapsRightAndMiddle: swapButtons)
-        buttonsLogged = 0
+        queue.sync {
+            self.speed = speed
+            self.reverse = reverse
+            self.buttons = PhysicalMouseButtons(swapsRightAndMiddle: swapButtons)
+            self.usbHeld = 0
+            self.buttonsLogged = 0
+            self.restX = 0; self.restY = 0; self.restWheel = 0; self.restPan = 0
+            self.lastScrollFirst = 0; self.lastScrollSecond = 0
+            self.lastRoute = nil
+        }
         HengeLog.log("input", "physical mouse: swap right/middle \(swapButtons ? "on" : "off")")
-        lastScrollFirst = 0
-        lastScrollSecond = 0
         GCMouse.mice().forEach(attach)
         observers.append(NotificationCenter.default.addObserver(forName: .GCMouseDidConnect, object: nil, queue: .main) { [weak self] note in
             if let mouse = note.object as? GCMouse { self?.attach(mouse) }
@@ -234,9 +291,10 @@ final class HardwareMouse {
     }
 
     func stop() {
+        guard started else { return }
+        started = false
         PointerLock.set(false)
         if !Device.isPad { VendorMice.shared.stop() }
-        releaseButtons()
         observers.forEach(NotificationCenter.default.removeObserver)
         observers.removeAll()
         for mouse in mice {
@@ -245,19 +303,32 @@ final class HardwareMouse {
             input.leftButton.pressedChangedHandler = nil
             input.rightButton?.pressedChangedHandler = nil
             input.middleButton?.pressedChangedHandler = nil
+            input.auxiliaryButtons?.forEach { $0.pressedChangedHandler = nil }
             input.scroll.valueChangedHandler = nil
         }
         mice.removeAll()
+        releaseButtons() // after the handlers: none can press again behind it
     }
 
+    /// Any thread but the mouse's own queue.
     func releaseButtons() {
-        for button in buttons.releaseAll() { henge_vm_mouse_button(button, 0) }
+        queue.sync {
+            for button in buttons.releaseAll() where usbHeld & (1 << UInt32(button)) == 0 {
+                henge_vm_mouse_button(button, 0)
+            }
+            if usbHeld != 0 {
+                usbHeld = 0
+                henge_vm_usb_mouse_buttons(0)
+            }
+        }
     }
 
     private func attach(_ mouse: GCMouse) {
         guard let input = mouse.mouseInput, !mice.contains(where: { $0 === mouse }) else { return }
         mice.append(mouse)
-        HengeLog.log("input", "mouse: \(mouse.vendorName ?? "?"), right button \(input.rightButton != nil), middle \(input.middleButton != nil)")
+        mouse.handlerQueue = queue
+        let aux = input.auxiliaryButtons?.count ?? 0
+        HengeLog.log("input", "mouse: \(mouse.vendorName ?? "?"), right button \(input.rightButton != nil), middle \(input.middleButton != nil), more buttons \(aux)")
         // While a mouse passes through its maker's channel (VendorMice), what iOS also hands GameController of it
         // (with AssistiveTouch on) is ignored, so no click arrives twice.
         input.mouseMovedHandler = { [weak self] _, dx, dy in
@@ -267,6 +338,13 @@ final class HardwareMouse {
         input.leftButton.pressedChangedHandler = { [weak self] _, _, pressed in self?.gcButton(0, pressed) }
         input.rightButton?.pressedChangedHandler = { [weak self] _, _, pressed in self?.gcButton(1, pressed) }
         input.middleButton?.pressedChangedHandler = { [weak self] _, _, pressed in self?.gcButton(2, pressed) }
+        // The first two extra buttons are a mouse's side buttons: the USB mouse's back and forward.
+        for (i, extra) in (input.auxiliaryButtons ?? []).prefix(2).enumerated() {
+            extra.pressedChangedHandler = { [weak self] _, _, pressed in
+                guard let self, self.vendorChannels.isEmpty || !pressed else { return }
+                self.sideButton(UInt32(3 + i), pressed)
+            }
+        }
         input.scroll.valueChangedHandler = { [weak self] _, first, second in
             guard let self, self.vendorChannels.isEmpty else { return }
             self.scrolled(first, second)
@@ -279,21 +357,21 @@ final class HardwareMouse {
         button(physicalButton, pressed)
     }
 
-    // MARK: A mouse read through its maker's own channel (VendorMice). Any thread; the work runs on the main one.
+    // MARK: A mouse read through its maker's own channel (VendorMice). Any thread; the work runs on the mouse's queue.
 
     /// A vendor channel opened or closed for this mouse; while any is open, GameController's copy is ignored.
     func vendorChannel(_ id: UUID, open: Bool) {
-        DispatchQueue.main.async { [self] in
+        queue.async { [self] in
             if open { vendorChannels.insert(id) } else { vendorChannels.remove(id) }
         }
     }
 
-    /// Whether any mouse passes through a vendor channel now. Main thread.
-    var hasVendorChannel: Bool { !vendorChannels.isEmpty }
+    /// Whether any mouse passes through a vendor channel now. Not from the mouse's own queue.
+    var hasVendorChannel: Bool { queue.sync { !vendorChannels.isEmpty } }
 
     /// Raw sensor counts, Y down, unscaled, so macOS's own mouse settings set the feel.
     func vendorMoved(_ dx: Int32, _ dy: Int32) {
-        DispatchQueue.main.async { [self] in
+        queue.async { [self] in
             if vendorMovesLogged < 8 { vendorMovesLogged += 1; HengeLog.log("input", "vendor mouse moved \(dx), \(dy)") }
             henge_vm_mouse_move(dx, dy)
         }
@@ -301,12 +379,12 @@ final class HardwareMouse {
 
     /// 0 left, 1 right, 2 middle.
     func vendorButton(_ button: UInt32, _ pressed: Bool) {
-        DispatchQueue.main.async { [self] in self.button(Int32(button), pressed) }
+        queue.async { [self] in self.button(Int32(button), pressed) }
     }
 
     /// Whole wheel detents, positive away from the user (wheel) and to the right (pan).
     func vendorScrolled(wheel: Int32, pan: Int32) {
-        DispatchQueue.main.async { [self] in
+        queue.async { [self] in
             let configured = UserDefaults.standard.object(forKey: Self.scrollSpeedKey) == nil
                 ? 0.3 : UserDefaults.standard.double(forKey: Self.scrollSpeedKey)
             let scale = Float(configured.isFinite ? min(max(configured, 0.1), 1.5) : 0.3)
@@ -320,6 +398,16 @@ final class HardwareMouse {
         }
     }
 
+    /// Whether this event goes to the USB mouse. Logged when it changes, so a device log shows the handover.
+    private func usbRoute() -> Bool {
+        let usb = henge_vm_usb_mouse_ready() != 0
+        if usb != lastRoute {
+            lastRoute = usb
+            HengeLog.log("input", "physical mouse: to the Mac's \(usb ? "USB mouse" : "virtio mouse")")
+        }
+        return usb
+    }
+
     /// GameController's Y runs upward. What doesn't make a whole step yet waits for the next move.
     private func moved(_ dx: Float, _ dy: Float) {
         restX += dx * speed
@@ -328,22 +416,37 @@ final class HardwareMouse {
         guard x != 0 || y != 0 else { return }
         restX -= x
         restY -= y
-        henge_vm_mouse_move(Int32(x), Int32(y))
+        if usbRoute() { henge_vm_usb_mouse_move(Int32(x), Int32(y)) }
+        else { henge_vm_mouse_move(Int32(x), Int32(y)) }
     }
 
     private func button(_ physicalButton: Int32, _ pressed: Bool) {
         guard let guestButton = buttons.event(physicalButton, pressed: pressed) else { return }
+        let bit = UInt32(1) << UInt32(guestButton)
+        // A release goes where its press went, even if the route changed in between.
+        let usb = pressed ? usbRoute() : usbHeld & bit != 0
         if buttonsLogged < 32 {
             buttonsLogged += 1
-            HengeLog.log("input", "physical mouse button: raw=\(physicalButton) guest=\(guestButton) \(pressed ? "down" : "up")")
+            HengeLog.log("input", "physical mouse button: raw=\(physicalButton) guest=\(guestButton) \(pressed ? "down" : "up") \(usb ? "usb" : "virtio")")
         }
-        henge_vm_mouse_button(guestButton, pressed ? 1 : 0)
-        if !pressed { StickyKeys.shared.releaseAll() }
+        if usb {
+            usbHeld = pressed ? usbHeld | bit : usbHeld & ~bit
+            henge_vm_usb_mouse_buttons(usbHeld)
+        } else {
+            henge_vm_mouse_button(guestButton, pressed ? 1 : 0)
+        }
+        if !pressed { DispatchQueue.main.async { StickyKeys.shared.releaseAll() } }
+    }
+
+    /// Back (3) and forward (4): only the USB mouse has them.
+    private func sideButton(_ bit: UInt32, _ pressed: Bool) {
+        let mask = UInt32(1) << bit
+        guard pressed ? usbRoute() : usbHeld & mask != 0 else { return }
+        usbHeld = pressed ? usbHeld | mask : usbHeld & ~mask
+        henge_vm_usb_mouse_buttons(usbHeld)
     }
 
     /// GameController puts vertical motion on the first axis and horizontal on the second.
-    /// macOS accelerates wheel units roughly quadratically, so use a tunable square root
-    /// and cap each event to keep a small pad gesture from jumping across a page.
     private func scrolled(_ first: Float, _ second: Float) {
         // GameController reports both axis states when either one changes. On a
         // Magic Keyboard it calls us twice per movement, with one stale axis in
@@ -356,13 +459,33 @@ final class HardwareMouse {
         let mostlyHorizontal = abs(second) > 2 * abs(first)
         let verticalRaw = verticalChanged && !mostlyHorizontal ? -first : 0
         let horizontalRaw = horizontalChanged && !mostlyVertical ? second : 0
-        let defaults = UserDefaults.standard
-        let configured = defaults.object(forKey: Self.scrollSpeedKey) == nil
-            ? 0.3 : defaults.double(forKey: Self.scrollSpeedKey)
-        let scale = Float(configured.isFinite ? min(max(configured, 0.1), 1.5) : 0.3)
-        let way: Int32 = reverse ? -1 : 1
-        let horizontal = way * Self.wheelUnits(horizontalRaw, scale: scale)
-        let vertical = way * Self.wheelUnits(verticalRaw, scale: scale)
+        let way: Float = reverse ? -1 : 1
+        let configured = UserDefaults.standard.object(forKey: Self.scrollSpeedKey) == nil
+            ? 0.3 : UserDefaults.standard.double(forKey: Self.scrollSpeedKey) // the session's slider changes it live
+        let scrollScale = Float(configured.isFinite ? min(max(configured, 0.1), 1.5) : 0.3)
+        if usbRoute() {
+            // The USB mouse takes wheel detents, and macOS accelerates them as it does a real wheel's.
+            // A wheel's notch is one raw unit; a trackpad's smaller steps add up until they make one.
+            let perUnit = scrollScale / 0.3
+            restWheel += verticalRaw * way * perUnit // positive is away from the user, as the virtio wheel's is
+            restPan += horizontalRaw * way * perUnit
+            let wheel = max(-16, min(16, restWheel.rounded(.towardZero)))
+            let pan = max(-16, min(16, restPan.rounded(.towardZero)))
+            restWheel -= wheel
+            restPan -= pan
+            if abs(restWheel) > 4 { restWheel = 0 } // a capped burst doesn't play on afterwards
+            if abs(restPan) > 4 { restPan = 0 }
+            if scrollsLogged < 24 {
+                scrollsLogged += 1
+                HengeLog.log("input", "scroll raw: \(first), \(second); usb detents: \(Int(pan)), \(Int(wheel))")
+            }
+            if wheel != 0 || pan != 0 { henge_vm_usb_mouse_scroll(Int32(wheel), Int32(pan)) }
+            return
+        }
+        // macOS accelerates virtio wheel units roughly quadratically, so use a tunable square root
+        // and cap each event to keep a small pad gesture from jumping across a page.
+        let horizontal = Int32(way) * Self.wheelUnits(horizontalRaw, scale: scrollScale)
+        let vertical = Int32(way) * Self.wheelUnits(verticalRaw, scale: scrollScale)
         if scrollsLogged < 24 {
             scrollsLogged += 1
             HengeLog.log("input", "scroll raw: \(first), \(second); units: \(horizontal), \(vertical)")
