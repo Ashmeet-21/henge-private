@@ -192,6 +192,7 @@ enum PointerLock {
 enum PhonePointer {
     private static var original: IMP?
     private(set) static var status = "not run"
+    private static var logged = 0
 
     static func install() {
         guard !Device.isPad, original == nil else { return }
@@ -205,8 +206,15 @@ enum PhonePointer {
         let replacement: @convention(block) (AnyObject) -> Void = { object in
             if let original { unsafeBitCast(original, to: Update.self)(object, selector) }
             guard let interaction = object as? UIPointerInteraction, interaction.isEnabled, let view = interaction.view else { return }
-            for driver in drivers(of: interaction) where driver.responds(to: NSSelectorFromString("setView:")) {
+            let list = drivers(of: interaction)
+            var attached = 0
+            for driver in list where driver.responds(to: NSSelectorFromString("setView:")) {
                 driver.setValue(view, forKey: "view")
+                attached += 1
+            }
+            if logged < 8 {
+                logged += 1
+                HengeLog.log("input", "phone pointer: \(attached) of \(list.count) drivers (\(list.map { String(describing: type(of: $0)) })) attached to \(type(of: view))")
             }
         }
         original = method_setImplementation(method, imp_implementationWithBlock(replacement))
@@ -250,6 +258,7 @@ final class HardwareMouse {
     private var scrollsLogged = 0 // the first few, to see what a device's raw values look like
     private var lastScrollFirst: Float = 0, lastScrollSecond: Float = 0
     private var vendorChannels: Set<UUID> = [] // mice that pass through their maker's channel (VendorMice)
+    private var movesLogged = 0
     private var vendorMovesLogged = 0
     private var lastRoute: Bool?
 
@@ -269,6 +278,7 @@ final class HardwareMouse {
             self.restX = 0; self.restY = 0; self.restWheel = 0; self.restPan = 0
             self.lastScrollFirst = 0; self.lastScrollSecond = 0
             self.lastRoute = nil
+            self.movesLogged = 0
         }
         HengeLog.log("input", "physical mouse: swap right/middle \(swapButtons ? "on" : "off")")
         GCMouse.mice().forEach(attach)
@@ -329,6 +339,7 @@ final class HardwareMouse {
         mouse.handlerQueue = queue
         let aux = input.auxiliaryButtons?.count ?? 0
         HengeLog.log("input", "mouse: \(mouse.vendorName ?? "?"), right button \(input.rightButton != nil), middle \(input.middleButton != nil), more buttons \(aux)")
+        HengeLog.log("input", "mouse: AssistiveTouch \(UIAccessibility.isAssistiveTouchRunning ? "on" : "off")")
         // While a mouse passes through its maker's channel (VendorMice), what iOS also hands GameController of it
         // (with AssistiveTouch on) is ignored, so no click arrives twice.
         input.mouseMovedHandler = { [weak self] _, dx, dy in
@@ -348,6 +359,22 @@ final class HardwareMouse {
         input.scroll.valueChangedHandler = { [weak self] _, first, second in
             guard let self, self.vendorChannels.isEmpty else { return }
             self.scrolled(first, second)
+        }
+        // Whether GameController delivers anything for this mouse: an iPhone announces a mouse it may never pass on.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self, weak mouse] in
+            guard let self, let mouse else { return }
+            let scenes = UIApplication.shared.connectedScenes.map { "\($0.session.role.rawValue):\($0.activationState.rawValue)" }
+            let lock = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+                .map { $0.pointerLockState.map { $0.isLocked ? "locked" : "unlocked" } ?? "no lock state" }
+            HengeLog.log("input", "mouse 5 s on: current \(GCMouse.current === mouse), moves seen \(self.movesLogged), left now \(mouse.mouseInput?.leftButton.isPressed ?? false), scenes \(scenes), pointer lock \(lock)")
+        }
+        // Polled state, apart from the handlers: if this changes while no handler runs, delivery is the problem, not input.
+        for second in 1...20 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(second)) { [weak mouse] in
+                guard let input = mouse?.mouseInput else { return }
+                let pressed = [input.leftButton, input.rightButton, input.middleButton].compactMap { $0 }.map { $0.isPressed ? "1" : "0" }.joined()
+                HengeLog.log("input", "mouse poll \(second) s: buttons \(pressed), scroll \(input.scroll.xAxis.value), \(input.scroll.yAxis.value)")
+            }
         }
     }
 
@@ -410,6 +437,8 @@ final class HardwareMouse {
 
     /// GameController's Y runs upward. What doesn't make a whole step yet waits for the next move.
     private func moved(_ dx: Float, _ dy: Float) {
+        if movesLogged < 8 || movesLogged % 500 == 0 { HengeLog.log("input", "mouse moved \(dx), \(dy) (#\(movesLogged + 1))") }
+        movesLogged += 1
         restX += dx * speed
         restY -= dy * speed
         let x = restX.rounded(), y = restY.rounded()

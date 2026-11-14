@@ -23,6 +23,7 @@ final class VendorMice: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var central: CBCentralManager?
     // The rest is the queue's.
     private var wanted = false
+    private var onExternalDisplay = false
     private var known: [UUID: CBPeripheral] = [:]
     private var drivers: [UUID: HIDPPMouse] = [:]
     private var observers: [NSObjectProtocol] = []
@@ -64,10 +65,16 @@ final class VendorMice: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         }
     }
 
+    func setExternalDisplay(_ on: Bool) {
+        queue.async { [self] in onExternalDisplay = on }
+    }
+
     private func suspend() {
+        // When presenting on an external display, locking the phone screen triggers didEnterBackground on the
+        // phone scene while the external monitor stays live; keep the BLE mouse connected for the Mac.
         // Synchronous, so the writes are queued before the app is suspended. If iOS kills Henge before they go
         // out, turning the mouse off and on hands it back, since none of the diversion is persistent.
-        queue.sync { if wanted { releaseAll() } }
+        queue.sync { if wanted && !onExternalDisplay { releaseAll() } }
     }
 
     private func resume() {

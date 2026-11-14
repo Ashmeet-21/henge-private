@@ -220,16 +220,19 @@ struct SessionView: View {
         .onChange(of: confirmStop) { showing in
             if showing { HardwareKeys.releaseAll(); StickyKeys.shared.releaseAll() }
         }
+        .onChange(of: display.isExternal) { VendorMice.shared.setExternalDisplay($0) }
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true
             HengeAudio.shared.activate()
             MacShortcuts.setMacOnScreen(true)
+            VendorMice.shared.setExternalDisplay(display.isExternal)
             HardwareMouse.shared.start()
             VolumeClicks.shared.start()
         }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
             MacShortcuts.setMacOnScreen(false)
+            VendorMice.shared.setExternalDisplay(false)
             zoomFollowing?.cancel()
             StickyKeys.shared.releaseAll()
             HardwareKeys.releaseAll()
