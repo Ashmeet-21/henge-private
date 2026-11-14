@@ -161,6 +161,7 @@ final class RemoteDesktop: ObservableObject {
         if usb { promoteAudio(c); return }
         c.receive(minimumIncompleteLength: 6, maximumLength: 6) { [weak self] data, _, _, _ in
             guard let self else { return }
+            if CACurrentMediaTime() < self.audioLockedUntil { c.cancel(); return } // as for the picture: one guess per lockout
             if let data, [UInt8](data) == self.audioCode, !self.audioCode.isEmpty {
                 self.audioFailures = 0
                 self.promoteAudio(c)
@@ -284,6 +285,9 @@ final class RemoteDesktop: ObservableObject {
         c.receive(minimumIncompleteLength: 6, maximumLength: 6) { [weak self] data, _, _, _ in
             self?.queue.async {
                 guard let self else { return }
+                // Checked again here: many connections opened at once all pass the check in accept before the
+                // first wrong code locks Wi-Fi, so without this each of them would still get its guess.
+                if CACurrentMediaTime() < self.lockedUntil { c.cancel(); return }
                 if let data, [UInt8](data) == self.codeBytes, !self.codeBytes.isEmpty {
                     self.failures = 0
                     self.promote(c)
