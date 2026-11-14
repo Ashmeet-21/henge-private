@@ -399,6 +399,11 @@ void henge_vm_mouse_scroll(int dx, int dy) {
     if (dx) hv_vm_mouse_hwheel(dx);
     pthread_rwlock_unlock(&api_lock);
 }
+void henge_vm_audio_kick(void) {
+    if (!lock_running()) return;
+    hv_vm_audio_kick();
+    pthread_rwlock_unlock(&api_lock);
+}
 int henge_vm_pointer(int *x, int *y) {
     if (!lock_running()) return -1;
     int result = hv_vm_pointer(x, y);

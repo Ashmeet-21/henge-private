@@ -86,6 +86,9 @@ void henge_vm_mouse_move(int dx, int dy);
 void henge_vm_mouse_button(int button, int down);
 /* Wheel units: dy > 0 up, dx > 0 right. */
 void henge_vm_mouse_scroll(int dx, int dy);
+/* The device's audio came back (an interruption ended, media services were reset, the output
+   changed): a sound the Mac is playing gets a new player. */
+void henge_vm_audio_kick(void);
 /* The Magic Trackpad 2 the Mac sees on its USB bus: a finger on it. phase: 0 down, 1 move, 2 up;
    finger a stable 1..15 per touch; x, y sensor units 0..8134, 0..5206. ts_ms is the touch
    sample's own clock in ms, so the guest computes finger speed from real sample timing. */

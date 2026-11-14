@@ -195,6 +195,7 @@ struct SessionView: View {
         }
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true
+            HengeAudio.shared.activate()
             HardwareMouse.shared.start()
             VolumeClicks.shared.start()
         }

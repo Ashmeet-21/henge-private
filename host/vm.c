@@ -728,6 +728,10 @@ static void wheel(uint16_t axis, int amount) {
 void hv_vm_mouse_wheel(int dy) { wheel(HV_REL_WHEEL, dy); }
 void hv_vm_mouse_hwheel(int dx) { wheel(HV_REL_HWHEEL, dx); }
 
+void hv_vm_audio_kick(void) {
+    if (sound_on) hv_virtio_snd_kick(board.snd);
+}
+
 void hv_vm_touch(int id, int phase, int x, int y, uint32_t ts_ms) {
     if (x < 0) x = 0;
     if (x > HV_TP_SENSOR_X) x = HV_TP_SENSOR_X;
