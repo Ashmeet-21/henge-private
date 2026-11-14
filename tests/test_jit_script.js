@@ -15,6 +15,7 @@ const sent = [];
 function send_command(c) {
     sent.push(c);
     if (c === 'c' || c.startsWith('vCont;')) return stops.shift();
+    if (c.startsWith('vAttach')) return 'T05thread:1f03;';   // the script requires a stop packet from vAttach; 'OK' is an attach failure
     if (c.startsWith('m')) return le32(instructions[parseInt(c.slice(1), 16)]);
     return 'OK';
 }
