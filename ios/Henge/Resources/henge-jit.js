@@ -21,11 +21,14 @@ let attachResponse = send_command(`vAttach;${pid.toString(16)}`);
 log(`attach_response = ${attachResponse}`);
     
 let totalBreakpoints = 0;
+let nextStop = null;
 while (!detached) {
     totalBreakpoints++;
     log(`Handling breakpoint ${totalBreakpoints}`);
     
-    let brkResponse = send_command(`c`);
+    // a signal passed on below is answered with the next stop, so use that instead of resuming again
+    let brkResponse = nextStop !== null ? nextStop : send_command(`c`);
+    nextStop = null;
     log(`brkResponse = ${brkResponse}`);
     
     let tmpMatch = /T[0-9a-f]+thread:(?<tid>[0-9a-f]+);/.exec(brkResponse);
@@ -44,6 +47,17 @@ while (!detached) {
     let instructionResponse = send_command(`m${pc.toString(16)},4`);
     log(`instruction at pc: ${instructionResponse}`);
     let instrU32 = littleEndianHexToU32(instructionResponse);
+    if (!isBrk(instrU32)) {
+        // a real signal or exception, not one of our traps: give it back to the thread and let it run
+        tmpMatch = /^T(?<sig>[0-9a-f]{2})/.exec(brkResponse);
+        if (!tmpMatch) {
+            log(`Stopped on something that is not a brk and has no signal: ${brkResponse}`);
+            continue;
+        }
+        log(`Not a brk (instruction 0x${instrU32.toString(16)}); resuming with signal ${tmpMatch.groups['sig']}`);
+        nextStop = send_command(`vCont;S${tmpMatch.groups['sig']}:${tid}`);
+        continue;
+    }
     let brkImmediate = extractBrkImmediate(instrU32);
     log(`BRK immediate: 0x${brkImmediate.toString(16)} (${brkImmediate})`);
     if (legacyCommands[brkImmediate] != undefined) {
@@ -176,6 +190,10 @@ function numberToLittleEndianHexString(num) {
 
 function littleEndianHexToU32(hexStr) {
     return parseInt(hexStr.match(/../g).reverse().join(''), 16);
+}
+
+function isBrk(u32) {
+    return ((u32 & 0xFFE0001F) >>> 0) === 0xD4200000;
 }
 
 function extractBrkImmediate(u32) {

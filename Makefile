@@ -264,3 +264,10 @@ $(B)/test_jit_advice: ios/Henge/JIT/JITNetworkAdvice.swift tests/test_jit_advice
 test-jit-advice: $(B)/test_jit_advice
 	$(B)/test_jit_advice
 .PHONY: test-jit-advice
+
+# henge-jit.js (run by StikDebug and the built-in helper) against a scripted debugserver, under the system's JavaScriptCore.
+JSC = /System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc
+
+test-jit-script:
+	$(JSC) tests/test_jit_script.js
+.PHONY: test-jit-script
