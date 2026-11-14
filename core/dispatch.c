@@ -163,6 +163,9 @@ void hv_evict_blocks(HvMachine *m) {
 
 /* Ask for room: an eviction, unless something wants (or the ring needs) a full flush. */
 static void request_evict(HvMachine *m) {
+    /* A flush or eviction is already waiting for this CPU to park: it makes the room. Asking again would take back a
+       second segment right after (with 4 CPUs translating, up to half the cache), and the guest re-translates it all. */
+    if (__atomic_load_n(&m->stw_active, __ATOMIC_SEQ_CST)) return;
     int none = 0;
     __atomic_compare_exchange_n(&m->flush_pending, &none, m->jit.seg_words ? HV_FLUSH_EVICT : 1, 0, __ATOMIC_SEQ_CST,
                                 __ATOMIC_SEQ_CST);
