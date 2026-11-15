@@ -25,6 +25,7 @@ void hv_flush_blocks(HvMachine *m) {
                 hv_tlb_flush(m->cpus[i]);
             }
     }
+    if (m->main_ram && m->main_ram->code_hash) hv_code_check_all(m);
     m->stats.block_flushes++;
     __atomic_add_fetch(&m->jit_gen, 1, __ATOMIC_SEQ_CST);
     for (int i = 0; i < m->ncpus; i++)
@@ -150,6 +151,7 @@ static HvBlock *lookup(HvCpu *cpu, uint64_t va, uint64_t pa, uint32_t flags, con
         for (int i = 0; i < m->ncpus; i++) /* in every CPU's TLB, or a write from another CPU goes unnoticed */
             if (m->cpus[i]) hv_tlb_protect_code_page(m->cpus[i], ram, pg);
         gen = __atomic_load_n(&ram->page_gen[pg], __ATOMIC_ACQUIRE);
+        if (ram->code_hash) hv_code_check_note(ram, pg);
     }
     /* Translate without the lock, into this thread's buffer... */
     HvBlock nb = {.va = va, .pa = pa, .flags = flags, .gen = gen, .ram = ram, .pg = pg, .maker = cpu->index + 1, .jit_gen = __atomic_load_n(&m->jit_gen, __ATOMIC_SEQ_CST)};

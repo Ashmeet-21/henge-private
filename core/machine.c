@@ -76,6 +76,10 @@ static int init_rest(HvMachine *m) {
         pthread_mutex_init(&m->percpu[i].req_mu, NULL);
     }
     m->locks_initialized = 1;
+    /* HV_JIT_CAP (testing): MB of the region to use from the start, not only after the first full flush, so a
+       device reaches its full flushes in minutes (henge-env.txt on iOS). */
+    if (getenv("HV_JIT_CAP")) hv_knob[HV_K_JITCAP] = atoi(getenv("HV_JIT_CAP"));
+    m->jit.limit = hv_knob[HV_K_JITCAP] > 0 ? ((size_t)hv_knob[HV_K_JITCAP] << 20) / sizeof(uint32_t) : 0;
     /* The TLB layout (cpu.h): HV_TLBT from the environment here too, so the Mac tool and the tests can pick it. */
     hv_knob[HV_K_TLBT] = getenv("HV_TLBT") ? atoi(getenv("HV_TLBT")) : 1; /* table-major unless asked: 9-20% faster in 5 of 6 paired rounds of the mix */
     hv_tlb_tmajor = hv_knob[HV_K_TLBT] != 0;
@@ -433,6 +437,7 @@ int hv_machine_add_ram(HvMachine *m, uint64_t pa, uint64_t size, void *host, int
     r->whint = calloc(pages * HV_MAX_CPUS, sizeof *r->whint);
     r->ijc_va = calloc(pages, sizeof *r->ijc_va);
     r->xhead = calloc(pages, sizeof *r->xhead);
+    r->code_hash = getenv("HV_CODE_CHECK") ? calloc(pages, sizeof *r->code_hash) : NULL;
     return r->code_pages && r->page_gen && r->whint && r->ijc_va && r->xhead ? 0 : -1;
 }
 
@@ -533,6 +538,49 @@ void hv_dma_written(HvMachine *m, uint64_t pa, uint64_t len) {
     uint64_t first = (pa - r->pa) >> HV_TLB_PAGE_BITS, last = (pa + len - 1 - r->pa) >> HV_TLB_PAGE_BITS;
     for (uint64_t pg = first; pg <= last; pg++)
         if (__atomic_load_n(&r->code_pages[pg], __ATOMIC_ACQUIRE)) hv_invalidate_code(m, r->pa + (pg << HV_TLB_PAGE_BITS));
+}
+
+static uint64_t page_hash(const uint8_t *page) {
+    const uint64_t *w = (const uint64_t *)page;
+    uint64_t h = 0x9e3779b97f4a7c15ull;
+    for (size_t i = 0; i < (1u << HV_TLB_PAGE_BITS) / 8; i++) h = (h ^ w[i]) * 0x100000001b3ull + (h >> 29);
+    return h | 1; /* 0: not noted */
+}
+
+void hv_code_check_note(HvRam *ram, uint64_t pg) {
+    if (ram->code_hash && pg < ram->npages) __atomic_store_n(&ram->code_hash[pg], page_hash(ram->host + (pg << HV_TLB_PAGE_BITS)), __ATOMIC_RELAXED);
+}
+
+void hv_code_check_all(HvMachine *m) {
+    static int told;
+    uint64_t checked = 0;
+    for (int i = 0; i < m->nram; i++) {
+        HvRam *r = &m->ram[i];
+        if (!r->code_hash) continue;
+        for (uint64_t pg = 0; pg < r->npages; pg++) {
+            if (!r->code_pages[pg] || !r->code_hash[pg]) continue;
+            checked++;
+            const uint8_t *page = r->host + (pg << HV_TLB_PAGE_BITS);
+            uint64_t h = page_hash(page);
+            if (h == r->code_hash[pg]) continue;
+            r->code_hash[pg] = h;
+            if (told++ >= 100) continue;
+            const uint32_t *w = (const uint32_t *)page;
+            uint32_t ff = 0;
+            for (uint32_t k = 0; k < (1u << HV_TLB_PAGE_BITS) / 4; k++) ff += w[k] >> 24 == 0xff;
+            fprintf(stderr, "hengevm: code check: page pa %llx changed with its translations kept (flush %llu): %u of 4096 words "
+                            "start with ff; at +0:", (unsigned long long)(r->pa + (pg << HV_TLB_PAGE_BITS)),
+                    (unsigned long long)m->stats.block_flushes, ff);
+            for (int k = 0; k < 8; k++) fprintf(stderr, " %08x", w[k]);
+            fprintf(stderr, "\n");
+        }
+    }
+    static uint64_t last_report;
+    if (m->stats.block_flushes - last_report >= 20) {
+        last_report = m->stats.block_flushes;
+        fprintf(stderr, "hengevm: code check: %llu code pages checked at flush %llu\n", (unsigned long long)checked,
+                (unsigned long long)m->stats.block_flushes);
+    }
 }
 
 HvMmio *hv_mmio_lookup(HvMachine *m, uint64_t pa) {

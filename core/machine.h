@@ -29,6 +29,7 @@ typedef struct HvRam {
        phone's busy time at a login, and the other CPUs waited for the lock). */
     uint32_t *xhead;
     size_t npages;
+    uint64_t *code_hash; /* HV_CODE_CHECK (debugging): each code page's contents when it became code */
 } HvRam;
 
 typedef struct HvMmio {
@@ -333,6 +334,10 @@ extern uint64_t *hv_smc_last;
 extern uint64_t hv_smc_pages, hv_smc_cpu, hv_smc_dma;
 /* A device wrote guest memory directly: translations made from it are out of date. Any thread. */
 void hv_dma_written(HvMachine *m, uint64_t pa, uint64_t len);
+/* HV_CODE_CHECK (debugging): a page just became code; and, with every CPU parked, which code pages changed since
+   without their translations being dropped. */
+void hv_code_check_note(HvRam *ram, uint64_t pg);
+void hv_code_check_all(HvMachine *m);
 HvMmio *hv_mmio_lookup(HvMachine *m, uint64_t pa);
 /* Host pointer for `len` bytes of guest RAM at pa, or NULL. */
 void *hv_phys_ptr(HvMachine *m, uint64_t pa, uint64_t len);
