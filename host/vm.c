@@ -343,9 +343,25 @@ void hv_vm_destroy(void) {
     machine_created = 0;
 }
 
+/* Is any CPU running guest code? (0 while every one is asleep in WFI, off, or at a flush barrier) */
+static int any_cpu_active(void) {
+    for (int i = 0; i < m.ncpus; i++)
+        if (m.cpus[i] && __atomic_load_n(&m.cpus[i]->pc_state->active, __ATOMIC_RELAXED)) return 1;
+    return 0;
+}
+
+/* Henge fork (battery): a kick only reaches a running CPU, and a sleeping one is woken by its own timer or by the
+   device that has work for it. So while every CPU sleeps, check every 8 ms instead of every 1 ms: an idle Mac woke
+   the iPad 1000 times a second for nothing. HV_KICK_IDLE=0: always 1 ms, as before. */
 static void *kicker_thread(void *unused) {
     (void)unused;
+    const char *ki = getenv("HV_KICK_IDLE");
+    int idle_slow = !(ki && atoi(ki) == 0);
     while (!atomic_load(&kicker_stopped)) {
+        if (idle_slow && !any_cpu_active()) {
+            usleep(8000);
+            continue;
+        }
         usleep(1000);
         hv_machine_kick_all(&m);
     }
