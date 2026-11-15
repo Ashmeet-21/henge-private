@@ -920,6 +920,42 @@ static void sync_iosurface(HvObject *s) {
    {mapping id, tag, size, ref, description}. Its descriptor: page list at +0
    (physical >> 12, bit 0 present, one per 16 KB), first-page offset +0x60,
    allocation +0x18, bytes per row +0x30. */
+/* A surface's page entries, one per 16 KB page (malloc'd; 0 where none), or NULL. The descriptor's list names
+   (physical >> 12, bit 0 present) a page of 32-bit entries. One list page holds 4096 of them (64 MB of surface);
+   a bigger surface (4608x4608 RGBA is 5184 pages, 4896x4896 5853) has a two-level list: the descriptor names a
+   directory whose entries (bits 0 and 1 set) name list pages of 4096 entries each, the rest of it zero. Read as one
+   flat list, everything past the directory's first 16 KB is whatever memory follows it, and those words, taken
+   for page numbers, put random guest pages (kernel code among them) under a surface the GPU draws over. */
+static uint32_t *surface_pages(HvPvgLite *lite, uint32_t list, uint64_t n) {
+    if (!(list & 1) || !n) return NULL;
+    uint32_t *out = calloc(n, 4);
+    if (!out) return NULL;
+    uint64_t at = (uint64_t)(list & ~1u) << 12;
+    if (n <= 4096) {
+        const uint32_t *p = hv_pvg_lite_phys(lite, at, n * 4);
+        if (!p) {
+            free(out);
+            return NULL;
+        }
+        memcpy(out, p, n * 4);
+        return out;
+    }
+    uint64_t lists = (n + 4095) / 4096;
+    const uint32_t *dir = hv_pvg_lite_phys(lite, at, lists * 4);
+    if (!dir) {
+        free(out);
+        return NULL;
+    }
+    for (uint64_t k = 0; k < lists; k++) {
+        uint32_t d = dir[k];
+        if ((d & 3) != 3) continue; /* none (or not a list page): those pages stay absent */
+        uint64_t count = n - k * 4096 < 4096 ? n - k * 4096 : 4096;
+        const uint32_t *p = hv_pvg_lite_phys(lite, (uint64_t)(d & ~3u) << 12, count * 4);
+        if (p) memcpy(out + k * 4096, p, count * 4);
+    }
+    return out;
+}
+
 /* A guest surface (IOSurface) from its description: its pages in one host buffer (or a real IOSurface for planes). */
 - (HvObject *)newSurface:(uint64_t)mapping {
     NSNumber *key = @(mapping);
@@ -961,8 +997,9 @@ static void sync_iosurface(HvObject *s) {
     surface->surface_w = (uint32_t)sw, surface->surface_h = (uint32_t)sh;
     uint64_t n = surface->length >> 14;
     vm_address_t base = 0;
-    const uint32_t *pages = (list & 1) ? hv_pvg_lite_phys(lite, (uint64_t)(list & ~1u) << 12, n * 4) : NULL;
+    uint32_t *pages = surface_pages(lite, list, n);
     if (!pages || vm_allocate(mach_task_self(), &base, surface->length, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) {
+        free(pages);
         [self complain:[NSString stringWithFormat:@"surface %llu has no pages", mapping]];
         return nil;
     }
@@ -1017,6 +1054,7 @@ static void sync_iosurface(HvObject *s) {
             sync_iosurface(surface);
         }
     }
+    free(pages);
     fprintf(stderr, "hengevm: pvg-metal: surface %llu: %llux%llu, row %llu, %llu KB, fourcc %c%c%c%c planes %u\n", mapping, (unsigned long long)sw, (unsigned long long)sh, row, alloc >> 10, desc[7], desc[6], desc[5], desc[4], planes);
         return surface;
 }
