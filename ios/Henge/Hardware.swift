@@ -83,7 +83,6 @@ enum Device {
     /// DeviceIdentity.swift (pure Foundation, so the Mac tests can compile it).
     static var modelIdentifier: String { HengeLog.deviceModel }
     static var marketingName: String { DeviceIdentity.name(modelIdentifier) }
-    static var chipName: String? { DeviceIdentity.chip(modelIdentifier) }
 
     /// The model identifier to report for a matching icon: the real one when the guest
     /// macOS knows it, else the newest equivalent it recognises (see DeviceIdentity).
