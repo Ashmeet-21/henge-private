@@ -120,8 +120,11 @@ while (!detached) {
         const command = legacyCommands[brkImmediate];
         command(brkResponse);
     } else {
-        log(`Skipping breakpoint: brk immediate 0x${brkImmediate.toString(16)} was not handled by this script. You could add it by evaluating legacyCommands[0x${brkImmediate.toString(16)}] = yourFunction;`);
-        continue;
+        // Not one of Henge's traps (a Swift runtime trap is brk #1). The pc still points at it, so resuming would stop
+        // on it again, forever. Stop here: the debugger lets go and the app gets its own trap.
+        failure = `JIT_UNKNOWN_BRK: brk 0x${brkImmediate.toString(16)} at pc 0x${pc.toString(16)} is not one of Henge's; stopping instead of resuming onto it again.`;
+        log(failure);
+        break;
     }
 }
 

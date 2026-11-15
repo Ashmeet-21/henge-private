@@ -77,4 +77,18 @@ function run(send) {
   assert(commands.includes("D"));
 }
 
-console.log("PASS: refused attach, lost socket, 64-bit registers, clean detach");
+{
+  // A brk that is not Henge's (brk #1, a Swift runtime trap): the pc stays on it, so resuming would loop forever.
+  const stop = "T05thread:1;20:bc9a785634120000;10:0000000000000000;" +
+    "00:0000000000000000;01:0000000000000000;";
+  const { commands, thrown } = run(command => {
+    if (command.startsWith("vAttach")) return "T05thread:1;";
+    if (command === "c") return stop;
+    if (command.startsWith("m")) return "200020d4"; // brk #1
+    return "OK";
+  });
+  assert(thrown && /JIT_UNKNOWN_BRK/.test(thrown.message), "An unknown brk must stop the script with an error");
+  assert.equal(commands.filter(x => x === "c").length, 1, "Must not resume onto the same brk again");
+}
+
+console.log("PASS: refused attach, lost socket, 64-bit registers, clean detach, unknown brk");
