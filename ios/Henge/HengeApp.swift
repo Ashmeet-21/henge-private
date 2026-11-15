@@ -82,7 +82,7 @@ struct RootView: View {
                     jit.objectWillChange.send()
                     return
                 }
-                if JITBootstrap.debuggedFlag || JITBootstrap.canGrantOwnJIT {
+                if JITBootstrap.debuggerUsable || JITBootstrap.canGrantOwnJIT {
                     JITBootstrap.prewarm()
                     // Readiness lives outside the observable coordinator.
                     jit.objectWillChange.send()

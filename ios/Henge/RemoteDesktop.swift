@@ -162,7 +162,8 @@ final class RemoteDesktop: ObservableObject {
         c.receive(minimumIncompleteLength: 6, maximumLength: 6) { [weak self] data, _, _, _ in
             guard let self else { return }
             if CACurrentMediaTime() < self.audioLockedUntil { c.cancel(); return } // as for the picture: one guess per lockout
-            if let data, [UInt8](data) == self.audioCode, !self.audioCode.isEmpty {
+            guard let data, data.count == 6 else { c.cancel(); return } // closed without a guess: no lockout (see accept)
+            if [UInt8](data) == self.audioCode, !self.audioCode.isEmpty {
                 self.audioFailures = 0
                 self.promoteAudio(c)
             } else {
@@ -288,7 +289,11 @@ final class RemoteDesktop: ObservableObject {
                 // Checked again here: many connections opened at once all pass the check in accept before the
                 // first wrong code locks Wi-Fi, so without this each of them would still get its guess.
                 if CACurrentMediaTime() < self.lockedUntil { c.cancel(); return }
-                if let data, [UInt8](data) == self.codeBytes, !self.codeBytes.isEmpty {
+                // Closed, or cut off after 10 s, before sending 6 bytes: nothing was guessed, so no lockout. Port 5901
+                // is also VNC's, and a viewer or scanner trying it (it waits for the server to speak) would otherwise
+                // shut the real client out for longer each time.
+                guard let data, data.count == 6 else { c.cancel(); return }
+                if [UInt8](data) == self.codeBytes, !self.codeBytes.isEmpty {
                     self.failures = 0
                     self.promote(c)
                 } else {
