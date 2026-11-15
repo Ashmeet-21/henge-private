@@ -20,6 +20,12 @@ typedef struct HvVmConfig {
     int log;                  /* m->log */
     int no_net, no_sound;
     int installer;            /* boot the ROM in DFU mode with the USB device port (installing macOS) */
+    /* What the guest says it is (NULL: the vmapple defaults). serial, model and
+       soc_name go through the config region; product_name and model_id are fixed
+       up in the device tree while iBoot runs, which hardcodes them (dt_fixup.c).
+       model_id changes hw.model: experimental. Not applied to installer boots. */
+    const char *serial, *model, *soc_name;
+    const char *product_name, *model_id;
     /* JIT memory the host already has (iOS: granted by a debugger), or NULL to map it here. */
     void *jit_rx, *jit_rw;
     size_t jit_bytes;         /* 0: 768 MB */

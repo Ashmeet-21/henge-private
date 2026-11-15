@@ -1055,7 +1055,7 @@ static void *cpu_thread(void *unused) {
 }
 
 static void usage(void) {
-    fprintf(stderr, "usage: hengevm --rom FILE --disk FILE --aux FILE --ecid N [--seed N] [--ram MB] [--log N] [--trace 1] [--screenshot PNG] [--watch VA] [--stats SECONDS [--profile 1]] [--cpus N] [--window] [--no-pvg] [--no-chain] [--break PC [--break-hits N]] [--dump PA LEN FILE] [--aux-offset BYTES] [--install IPSW]\n");
+    fprintf(stderr, "usage: hengevm --rom FILE --disk FILE --aux FILE --ecid N [--seed N] [--ram MB] [--log N] [--trace 1] [--screenshot PNG] [--watch VA] [--stats SECONDS [--profile 1]] [--cpus N] [--window] [--no-pvg] [--no-chain] [--break PC [--break-hits N]] [--dump PA LEN FILE] [--aux-offset BYTES] [--install IPSW] [--serial S] [--model S] [--soc-name S] [--product-name S] [--model-id S]\n");
     exit(2);
 }
 
@@ -1085,6 +1085,7 @@ int main(int argc, char **argv) {
     int stats = 0, profile = 0, window = 0;
     uint64_t brk = ~0ull, brk_hits = 1, dump_pa = 0, dump_len = 0;
     const char *dump_path = NULL;
+    const char *serial = NULL, *model = NULL, *soc_name = NULL, *product_name = NULL, *model_id = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--window")) {
             window = 1;
@@ -1139,6 +1140,10 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--aux-offset")) aux_offset = strtoull(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--install")) install_ipsw = argv[++i];
+        else if (!strcmp(argv[i], "--model")) model = argv[++i];
+        else if (!strcmp(argv[i], "--soc-name")) soc_name = argv[++i];
+        else if (!strcmp(argv[i], "--product-name")) product_name = argv[++i];
+        else if (!strcmp(argv[i], "--model-id")) model_id = argv[++i];
         else if (!strcmp(argv[i], "--resume")) resume_path = argv[++i];
         else usage();
     }
@@ -1147,7 +1152,8 @@ int main(int argc, char **argv) {
 
     HvVmConfig vc = {.rom = rom, .disk = disk_path, .aux = aux_path, .aux_offset = aux_offset, .ecid = ecid, .seed = seed,
                      .ram_mb = ram_mb, .ncpus = ncpus, .log = log, .no_net = getenv("HV_NO_NET") != NULL,
-                     .installer = install_ipsw != NULL};
+                     .installer = install_ipsw != NULL, .serial = serial, .model = model, .soc_name = soc_name,
+                     .product_name = product_name, .model_id = model_id};
     if (getenv("HV_JIT_MB")) vc.jit_bytes = (size_t)atoi(getenv("HV_JIT_MB")) << 20; /* debugging: a small region flushes often */
     hv_prof_register = hv_prof_register_thread;
     char err[256];

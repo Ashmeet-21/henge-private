@@ -985,6 +985,14 @@ struct SessionView: View {
         HengeLog.log("session", "screen \(guest.width)x\(guest.height) retina \(mac.isRetina)")
         henge_vm_set_hot(Self.isHot(ProcessInfo.processInfo.thermalState) ? 1 : 0)
         InstantResume.bootScreen = "\(guest.width)x\(guest.height)"
+        if mac.reportHostIdentity == true {
+            let modelID = Device.snappedModelIdentifier(forOS: mac.osName)
+            henge_vm_set_identity(Device.chipName, Device.marketingName,
+                                  mac.reportHostModelID == true ? modelID : nil)
+            HengeLog.log("session", "About This Mac reports \(Device.marketingName) (model \(modelID))")
+        } else {
+            henge_vm_set_identity(nil, nil, nil)
+        }
         var rc: Int32 = -1
         if InstantResume.enabled, let at = InstantResume.saved(for: mac, ramMB: ram, cpus: cpus) {
             HengeLog.log("resume", "picking up the Mac saved \(Int(Date().timeIntervalSince(at))) s ago")

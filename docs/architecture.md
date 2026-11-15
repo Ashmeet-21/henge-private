@@ -80,6 +80,29 @@ versions. `ios/Henge/BootROM.swift` fetches it from Apple: the file is part of o
 compressed block of that image, so one request of under a megabyte gets all of it. It then
 checks the result against a SHA-256 hash. Nothing is decrypted.
 
+## The guest's identity
+
+`devices/cfg.c` holds the strings the boot ROM passes to the guest: the serial, a
+model number and the SoC name — "About This Mac" reads the SoC name as its chip,
+through `/product/product-soc-name` in the device tree (XNU's brand string). Two
+more strings are hardcoded in the firmware's device tree: `/product/product-name`
+("Apple Virtual Machine 1", the About title and System Information's Model Name)
+and the root `model` (`VirtualMac2,1`, `hw.model`). When a Mac reports its host
+(the app's *About This Mac* setting, or `--soc-name`/`--product-name`/`--model-id`),
+`host/dt_fixup.c` rewrites those two in guest RAM while iBoot runs: iBoot verifies
+the tree once at load and then fixes it up in place itself (serial, MACs, memory —
+the firmware's placeholders are sized for that), so the kernel takes the edited
+tree as it takes iBoot's own fixups. Nothing on disk changes. The tree is found by
+the address `boot_args` names (`DeviceTreeP`, a virtual address: physical is
+vaddr − virtBase + physBase) and by the product-name string itself, re-patched every
+tick until the guest's GPU has drawn — by then the kernel has the tree in its registry.
+The tree is Apple's ADT — no FDT magic: nodes of property and child counts, properties
+of a 32-byte name, a size and a value (m1n1's adt.py documents it). The fixup rewrites
+`product-name` and `model` by property name, leaving `compatible` (driver matching)
+alone. The model identifier is opt-in: the app snaps it to the newest iPhone the guest
+macOS recognises, same variant, so the About artwork follows (`DeviceIdentity.swift`);
+macOS keys some hardware decisions off `hw.model`.
+
 ## Sharing
 
 `host/share.c` is a small WebDAV server, because macOS has a WebDAV client built in. The

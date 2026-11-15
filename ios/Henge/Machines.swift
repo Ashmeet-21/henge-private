@@ -33,6 +33,12 @@ struct VirtualMac: Identifiable, Codable, Hashable {
     }
     /// m4 fork: the iPad's own panel at Retina density. On by default on iPad, for Macs that never chose.
     var retina: Bool?
+    /// About This Mac reports the device Henge runs on (its name and chip) instead of the
+    /// virtual Mac. nil/false: the vmapple identity. Applied at the next boot.
+    var reportHostIdentity: Bool?
+    /// With reportHostIdentity: also report the device's model identifier (hw.model).
+    /// Experimental — it may bring the device's icon, and may confuse macOS.
+    var reportHostModelID: Bool?
     var isRetina: Bool { Device.isPad && (retina ?? false) }
     var screen: (width: Int, height: Int) { isRetina ? Device.retinaScreen : (screenWidth ?? 1920, screenHeight ?? 1080) }
     var aspect: CGFloat { CGFloat(screen.width) / CGFloat(screen.height) }

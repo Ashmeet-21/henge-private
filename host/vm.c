@@ -21,6 +21,7 @@
 
 #include "audio_mac.h"
 #include "dispatch.h"
+#include "dt_fixup.h"
 #include "net_slirp.h"
 #include "sysreg.h"
 
@@ -40,6 +41,7 @@ static int machine_created, signals_installed;
 static uint64_t boot_args_offset;
 static double boot_last_scan;
 static int net_on;
+static int dt_fixup_on;
 static void (*extra_poll)(void);
 static void (*exit_cb)(int);
 static pthread_t secondary_threads[HV_MAX_CPUS], kicker;
@@ -128,6 +130,14 @@ const char *hv_vm_reason_name(int r) {
 /* Host-side device work on CPU 0's thread each tick. */
 static void board_poll(void) {
     if (extra_poll) extra_poll();
+    if (dt_fixup_on) {
+        /* The identity scan runs on its own thread (dt_fixup.c). Once the guest's
+           GPU has drawn, the kernel has the tree in its registry: stop. */
+        if (hv_vm_gpu_frames() > 0) {
+            hv_dt_fixup_stop();
+            dt_fixup_on = 0;
+        }
+    }
     if (net_on) hv_net_poll();
 }
 
@@ -270,7 +280,8 @@ int hv_vm_create(const HvVmConfig *c, char *err, size_t errlen) {
     if (getenv("HV_SLOW_MEM")) m.slow_mem = 1; /* debugging: every load and store through the helper */
     ncpus = c->ncpus < 1 ? 1 : c->ncpus > HV_MAX_CPUS ? HV_MAX_CPUS : c->ncpus;
     m.big_lock_on = ncpus > 1 && getenv("HV_BIG_LOCK"); /* debugging: one CPU in guest code at a time */
-    HvCfgParams cfg = {.nr_cpus = (uint32_t)ncpus, .ecid = c->ecid, .seed = c->seed, .mac_en0 = {0x02, 0x48, 0x56, 0x4d, 0x00, 0x01}};
+    HvCfgParams cfg = {.nr_cpus = (uint32_t)ncpus, .ecid = c->ecid, .seed = c->seed, .mac_en0 = {0x02, 0x48, 0x56, 0x4d, 0x00, 0x01},
+                       .serial = c->serial, .model = c->model, .soc_name = c->soc_name};
     if (c->installer) cfg.run_installer1 = cfg.run_installer2 = 1;
     /* The chip About This Mac names (31 characters), when the host has a name for it. */
     if (getenv("HV_SOC_NAME") && *getenv("HV_SOC_NAME")) cfg.soc_name = getenv("HV_SOC_NAME");
@@ -284,6 +295,8 @@ int hv_vm_create(const HvVmConfig *c, char *err, size_t errlen) {
         return fail(err, errlen, "Cannot build the machine (not enough memory for the guest's RAM?).");
     if (hv_vmapple_load_rom(&board, c->rom) != 0) return fail(err, errlen, "Cannot read the ROM (AVPBooter.vmapple2.bin).");
     hv_vmapple_reset_cpu(&board);
+    dt_fixup_on = !c->installer && hv_dt_fixup_start(board.ram, board.ram_size, VMAPPLE_MEM, c->product_name, c->model_id);
+    if (dt_fixup_on) hv_dt_fixup_run();
     if (board.net && !c->no_net) {
         if (hv_net_attach(&m, board.net) != 0) fprintf(stderr, "hengevm: user-mode network unavailable\n");
         else net_on = 1;

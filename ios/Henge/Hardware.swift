@@ -77,6 +77,19 @@ enum Device {
     }()
 
     static let chipTooOldText = "macOS won't run on this \(name). Henge needs an A14 or M1 chip or newer."
+
+    /// What this device is called and the chip it has, for a Mac that reports its host
+    /// (MacSettingsView → About This Mac). The table and the icon-snapping live in
+    /// DeviceIdentity.swift (pure Foundation, so the Mac tests can compile it).
+    static var modelIdentifier: String { HengeLog.deviceModel }
+    static var marketingName: String { DeviceIdentity.name(modelIdentifier) }
+    static var chipName: String? { DeviceIdentity.chip(modelIdentifier) }
+
+    /// The model identifier to report for a matching icon: the real one when the guest
+    /// macOS knows it, else the newest equivalent it recognises (see DeviceIdentity).
+    static func snappedModelIdentifier(forOS osName: String?) -> String {
+        DeviceIdentity.snappedIdentifier(modelIdentifier, forOS: osName)
+    }
 }
 
 /// A per-start display profile: a named Start-time choice of guest size, resolved through
