@@ -2916,6 +2916,30 @@ void hv_pvg_metal_unmap(HvPvgMetal *m, uint32_t mapping) {
     });
 }
 
+void hv_pvg_metal_after_gpu(HvPvgMetal *m, HvPvgLite *lite, uint64_t index) {
+    HvReplay *r = (__bridge HvReplay *)m;
+    dispatch_group_enter(r->completions); /* so a quiesce waits for it too */
+    dispatch_async(r->worker, ^{
+        /* Everything before this on the worker has been encoded and committed by now; the queue's command buffers
+           finish in order, so this empty one finishes after all of them. */
+        @autoreleasepool {
+            id<MTLCommandBuffer> cb = r->queue ? [r->queue commandBuffer] : nil;
+            if (!cb) { /* no GPU work can be under way */
+                hv_pvg_lite_mapper_done(lite, index);
+                dispatch_group_leave(r->completions);
+                return;
+            }
+            [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
+                (void)done;
+                hv_pvg_lite_mapper_done(lite, index);
+                dispatch_group_leave(r->completions);
+            }];
+            [cb commit];
+            r->last_cb = cb;
+        }
+    });
+}
+
 /* A small picture of what the display shows, BGRA with no padding, for the app's home screen.
    Read straight from the surface's memory, nearest pixel: it may catch a frame being drawn, which
    does not matter at this size. -1 before anything has been shown. */

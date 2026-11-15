@@ -90,6 +90,8 @@ struct HvPvgLite {
     int metal_tried;
     uint32_t stamps_pending; /* channels Metal finished, for the next poll */
     uint64_t vblanks;        /* refresh events sent (HV_PVG_VBLANK) */
+    uint64_t mapper_seen;    /* mapper entries handed over already (their unmaps given to Metal) */
+    uint32_t mapper_waiting; /* mapper completions waiting for the GPU (do_mapper) */
 };
 
 /* What the guest's GetDeviceInfo asks for: key, value pairs, as the framework
@@ -696,15 +698,41 @@ static void do_mapper(HvPvgLite *p) {
             }
         }
     }
-    if (p->metal) {
-        uint64_t ring = p->io_regs[0], size = p->io_regs[0x8 / 8], want = p->io_regs[0x18 / 8];
-        for (uint64_t i = p->io_regs[0x20 / 8]; i < want && size; i++) {
+    HvPvgMetal *metal = atomic_load_explicit(&p->metal, memory_order_acquire);
+    uint64_t want = p->io_regs[0x18 / 8];
+    if (metal) {
+        uint64_t ring = p->io_regs[0], size = p->io_regs[0x8 / 8], done = __atomic_load_n(&p->io_regs[0x20 / 8], __ATOMIC_ACQUIRE);
+        uint64_t from = p->mapper_seen;
+        if ((int64_t)(from - done) < 0 || (int64_t)(from - want) > 0) from = done; /* the ring was set up again */
+        int unmaps = 0;
+        for (uint64_t i = from; i < want && size; i++) {
             uint32_t *e = hv_phys_ptr(p->m, ring + (i % size) * 16, 16);
-            if (e && e[0] == 2) hv_pvg_metal_unmap(p->metal, e[1]);
+            if (e && e[0] == 2) hv_pvg_metal_unmap(metal, e[1]), unmaps++;
+        }
+        p->mapper_seen = want;
+        /* The guest takes an unmap's answer to mean the device is done with the surface, and may use its pages for
+           anything at once (code, say). Work for it handed over before the unmap may still be queued for the GPU or
+           running there, and would then draw over whatever the pages hold by then. So the answer waits until the GPU
+           has finished everything handed to it before the unmap; answers after one that waits wait too, in order. */
+        if (unmaps || __atomic_load_n(&p->mapper_waiting, __ATOMIC_ACQUIRE)) {
+            __atomic_fetch_add(&p->mapper_waiting, 1, __ATOMIC_ACQ_REL);
+            hv_pvg_metal_after_gpu(metal, p, want);
+            return;
         }
     }
-    p->io_regs[0x20 / 8] = p->io_regs[0x18 / 8];
+    __atomic_store_n(&p->io_regs[0x20 / 8], want, __ATOMIC_RELEASE);
     hv_gicv3_pend(p->gic, p->iosfc_irq);
+}
+
+/* The mapper's entries up to index are done (hv_pvg_metal_after_gpu, from a completion thread). */
+void hv_pvg_lite_mapper_done(HvPvgLite *p, uint64_t index) {
+    uint64_t now = __atomic_load_n(&p->io_regs[0x20 / 8], __ATOMIC_ACQUIRE);
+    while ((int64_t)(index - now) > 0 &&
+           !__atomic_compare_exchange_n(&p->io_regs[0x20 / 8], &now, index, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    }
+    __atomic_fetch_sub(&p->mapper_waiting, 1, __ATOMIC_ACQ_REL);
+    hv_gicv3_pend(p->gic, p->iosfc_irq);
+    if (p->m->ncpus == 1) hv_machine_wake(p->m);
 }
 
 /* Device work no doorbell took care of: a channel that had to wait for another one's work. */

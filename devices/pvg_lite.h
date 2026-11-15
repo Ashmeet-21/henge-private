@@ -36,6 +36,9 @@ int hv_pvg_lite_old_driver(HvPvgLite *p);
 /* A surface's descriptor (1 KB), or NULL if the mapper has none for it. */
 const uint8_t *hv_pvg_lite_surface(HvPvgLite *p, uint32_t mapping);
 void hv_pvg_metal_unmap(HvPvgMetal *m, uint32_t mapping);
+/* Once everything handed to Metal so far has run and the GPU has finished it: hv_pvg_lite_mapper_done(lite, index). */
+void hv_pvg_metal_after_gpu(HvPvgMetal *m, HvPvgLite *lite, uint64_t index);
+void hv_pvg_lite_mapper_done(HvPvgLite *p, uint64_t index);
 void hv_pvg_metal_cursor_moved(HvPvgMetal *m);
 /* Frames go to this CAMetalLayer from now on, drawn by the GPU. Any thread. */
 void hv_pvg_metal_set_layer(HvPvgMetal *m, void *layer);
