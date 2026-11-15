@@ -284,6 +284,7 @@ test-jit-advice: $(B)/test_jit_advice
 	$(B)/test_jit_advice
 .PHONY: test-jit-advice
 
+
 # Keyboard-viewport solver + signal chain: the shipped
 # KeyboardViewport.swift compiled unchanged, exercised headlessly.
 $(B)/test_kb_viewport: ios/Henge/KeyboardViewport.swift tests/test_kb_viewport.swift | $(B)
@@ -301,3 +302,11 @@ $(B)/test_gesture_engine: ios/Henge/GestureEngine.swift tests/test_gesture_engin
 test-gesture-engine: $(B)/test_gesture_engine
 	$(B)/test_gesture_engine
 .PHONY: test-gesture-engine
+
+# Which disk sizes a Mac is offered, and when growing is refused.
+$(B)/test_disk_growth: ios/Henge/DiskGrowth.swift tests/test_disk_growth.swift | $(B)
+	xcrun --sdk macosx swiftc $^ -o $@
+
+test-disk-growth: $(B)/test_disk_growth
+	$(B)/test_disk_growth
+.PHONY: test-disk-growth
