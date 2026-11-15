@@ -18,5 +18,7 @@ int hv_install_start(HvVirtioUsb *usb, const char *ipsw, const char *workdir, ui
                      void *user);
 /* 1 while running, 0 when it succeeded, -1 when it failed. */
 int hv_install_result(void);
+/* Before the machine is freed: the restore tools let go of its USB port (it looks unplugged to them). */
+void hv_install_detach(void);
 
 #endif

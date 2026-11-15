@@ -30,10 +30,65 @@
 
 static HvVirtioUsb *g_usb;
 static int g_log;
+/* Held for reading through every call into the device, so a detach knows when none is left inside it. */
+static pthread_rwlock_t g_usb_lock = PTHREAD_RWLOCK_INITIALIZER;
 
 void hv_libusb_shim_attach(HvVirtioUsb *d) {
+    pthread_rwlock_wrlock(&g_usb_lock);
     g_usb = d;
+    pthread_rwlock_unlock(&g_usb_lock);
     g_log = getenv("HV_LIBUSB_LOG") != NULL;
+}
+
+/* The device is about to be freed (its machine is released after a restore). It leaves the bus first, which
+   wakes every call waiting on it with "gone"; then the write lock waits out the calls still inside, and from
+   then on the shim has no device (usbmuxd sees it unplugged). */
+void hv_libusb_shim_detach(void) {
+    pthread_rwlock_rdlock(&g_usb_lock);
+    HvVirtioUsb *u = g_usb;
+    if (u) hv_vusb_set_online(u, 0);
+    pthread_rwlock_unlock(&g_usb_lock);
+    pthread_rwlock_wrlock(&g_usb_lock);
+    g_usb = NULL;
+    pthread_rwlock_unlock(&g_usb_lock);
+}
+
+/* Each call into the device, under the read lock; with no device, the answer a vanished one gives. */
+static int dev_reset(int timeout_ms) {
+    pthread_rwlock_rdlock(&g_usb_lock);
+    int r = g_usb ? hv_usb_reset(g_usb, timeout_ms) : HV_USB_EGONE;
+    pthread_rwlock_unlock(&g_usb_lock);
+    return r;
+}
+static int dev_control(uint8_t type, uint8_t req, uint16_t value, uint16_t index, void *data, uint16_t len, int timeout_ms) {
+    pthread_rwlock_rdlock(&g_usb_lock);
+    int r = g_usb ? hv_usb_control(g_usb, type, req, value, index, data, len, timeout_ms) : HV_USB_EGONE;
+    pthread_rwlock_unlock(&g_usb_lock);
+    return r;
+}
+static int dev_online(uint32_t *session) {
+    pthread_rwlock_rdlock(&g_usb_lock);
+    int r = g_usb ? hv_vusb_online(g_usb, session) : 0;
+    pthread_rwlock_unlock(&g_usb_lock);
+    return r;
+}
+static int dev_send(uint8_t type, uint8_t ep, const void *data, uint32_t len) {
+    pthread_rwlock_rdlock(&g_usb_lock);
+    int r = g_usb ? hv_vusb_send(g_usb, type, ep, data, len) : -1;
+    pthread_rwlock_unlock(&g_usb_lock);
+    return r;
+}
+static int dev_send_in(uint8_t ep, uint32_t len) {
+    pthread_rwlock_rdlock(&g_usb_lock);
+    int r = g_usb ? hv_vusb_send_in(g_usb, ep, len) : -1;
+    pthread_rwlock_unlock(&g_usb_lock);
+    return r;
+}
+static int dev_recv(uint8_t ep, HvVusbMsg *m, int timeout_ms) {
+    pthread_rwlock_rdlock(&g_usb_lock);
+    int r = g_usb ? hv_vusb_recv(g_usb, ep, m, timeout_ms) : -1;
+    pthread_rwlock_unlock(&g_usb_lock);
+    return r;
 }
 
 /* ---- the device ---- */
@@ -74,18 +129,18 @@ static void dev_unref(struct libusb_device *d) {
 
 /* Read the descriptors of a fresh connection. */
 static struct libusb_device *enumerate(uint32_t session) {
-    if (hv_usb_reset(g_usb, 2000) != 0) return NULL;
+    if (dev_reset(2000) != 0) return NULL;
     struct libusb_device *d = calloc(1, sizeof *d);
     if (!d) return NULL;
     d->refs = 1;
     d->session = session;
-    if (hv_usb_control(g_usb, 0x80, 6, 0x100, 0, &d->desc, 18, 2000) != 18) goto fail;
+    if (dev_control(0x80, 6, 0x100, 0, &d->desc, 18, 2000) != 18) goto fail;
     for (int i = 0; i < d->desc.bNumConfigurations && i < 8; i++) {
         uint8_t head[9];
-        if (hv_usb_control(g_usb, 0x80, 6, (uint16_t)(0x200 | i), 0, head, 9, 2000) < 4) goto fail;
+        if (dev_control(0x80, 6, (uint16_t)(0x200 | i), 0, head, 9, 2000) < 4) goto fail;
         uint16_t total = (uint16_t)(head[2] | head[3] << 8);
         d->configs[i] = malloc(total);
-        if (!d->configs[i] || hv_usb_control(g_usb, 0x80, 6, (uint16_t)(0x200 | i), 0, d->configs[i], total, 2000) != total)
+        if (!d->configs[i] || dev_control(0x80, 6, (uint16_t)(0x200 | i), 0, d->configs[i], total, 2000) != total)
             goto fail;
         d->config_len[i] = total;
     }
@@ -124,9 +179,8 @@ static void fire(struct libusb_device *d, int event) {
 /* Bring g_dev up to date with the guest: called from the device list and the
    event loop. */
 static void refresh(void) {
-    if (!g_usb) return;
-    uint32_t session;
-    int on = hv_vusb_online(g_usb, &session);
+    uint32_t session = 0;
+    int on = dev_online(&session); /* no device (detached): any old one has left */
     pthread_mutex_lock(&g_mu);
     struct libusb_device *old = g_dev;
     int stale = old && (!on || old->session != session);
@@ -216,7 +270,7 @@ static void run(Xfer *x) {
     }
     if (t->type == LIBUSB_TRANSFER_TYPE_CONTROL) {
         struct libusb_control_setup *s = (struct libusb_control_setup *)t->buffer;
-        int r = hv_usb_control(g_usb, s->bmRequestType, s->bRequest, libusb_le16_to_cpu(s->wValue),
+        int r = dev_control(s->bmRequestType, s->bRequest, libusb_le16_to_cpu(s->wValue),
                                libusb_le16_to_cpu(s->wIndex), t->buffer + 8, libusb_le16_to_cpu(s->wLength),
                                limit ? limit : 60000);
         if (r >= 0) complete(x, LIBUSB_TRANSFER_COMPLETED, r); /* data bytes, not counting the setup */
@@ -241,7 +295,7 @@ static void run(Xfer *x) {
         }
         for (int off = 0; off < t->length || (off == 0 && t->length == 0); off += chunk) {
             int n = t->length - off < chunk ? t->length - off : chunk;
-            if (hv_vusb_send(g_usb, HV_VUSB_REQ_DATA, ep, t->buffer + off, (uint32_t)n) != 0) {
+            if (dev_send(HV_VUSB_REQ_DATA, ep, t->buffer + off, (uint32_t)n) != 0) {
                 complete(x, LIBUSB_TRANSFER_NO_DEVICE, 0);
                 return;
             }
@@ -266,14 +320,14 @@ static void run(Xfer *x) {
         pthread_mutex_unlock(&g_mu);
         /* A request a cancelled transfer left with the guest is still good:
            its answer is the next data in the stream, so wait for that. */
-        if (!have && hv_vusb_send_in(g_usb, ep, (uint32_t)t->length) != 0) {
+        if (!have && dev_send_in(ep, (uint32_t)t->length) != 0) {
             complete(x, LIBUSB_TRANSFER_NO_DEVICE, 0);
             return;
         }
     }
     for (;;) {
         HvVusbMsg m;
-        int r = hv_vusb_recv(g_usb, ep, &m, slice);
+        int r = dev_recv(ep, &m, slice);
         if (r < 0) {
             complete(x, LIBUSB_TRANSFER_NO_DEVICE, 0);
             return;
@@ -773,7 +827,7 @@ int libusb_clear_halt(libusb_device_handle *h, unsigned char ep) {
 
 int libusb_reset_device(libusb_device_handle *h) {
     (void)h;
-    return hv_usb_reset(g_usb, 2000) == 0 ? 0 : LIBUSB_ERROR_NOT_FOUND;
+    return dev_reset(2000) == 0 ? 0 : LIBUSB_ERROR_NOT_FOUND;
 }
 
 int libusb_get_string_descriptor_ascii(libusb_device_handle *h, uint8_t idx, unsigned char *data, int length) {
