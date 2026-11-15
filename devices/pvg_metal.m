@@ -626,10 +626,10 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
    Each save writes a new file holding only the pipelines added since the last save, and every file is loaded at start:
    on the Duo, serializing an archive that was loaded from a file wrote only what had been added to it, so one file
    rewritten in place kept losing the earlier boots' pipelines. Past 32 files or the size cap nothing more is added.
-   HV_PVG_ARCHIVE=0: none (for A/B); HV_PVG_ARCHIVE=reset: start again. HV_PVG_ARCHIVE_MB: the cap (default 768). */
+   HV_PVG_ARCHIVE=0: none (for A/B); HV_PVG_ARCHIVE=reset: start again. HV_PVG_ARCHIVE_MB: the cap (default 256: a 6 GB iPad has about 0.5 GB left after 3 GB guest RAM and the 512 MB code cache). */
 static unsigned long long archive_cap(void) {
     const char *mb = getenv("HV_PVG_ARCHIVE_MB");
-    return (mb && atoi(mb) > 0 ? (unsigned long long)atoi(mb) : 768ull) << 20;
+    return (mb && atoi(mb) > 0 ? (unsigned long long)atoi(mb) : 256ull) << 20;
 }
 
 - (id<MTLBinaryArchive>)emptyArchive {
