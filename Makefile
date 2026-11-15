@@ -298,3 +298,10 @@ $(B)/test_gesture_engine: ios/Henge/GestureEngine.swift tests/test_gesture_engin
 test-gesture-engine: $(B)/test_gesture_engine
 	$(B)/test_gesture_engine
 .PHONY: test-gesture-engine
+
+# henge-jit.js (run by StikDebug and the built-in helper) against a scripted debugserver, under the system's JavaScriptCore.
+JSC = /System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc
+
+test-jit-script:
+	$(JSC) tests/test_jit_script.js
+.PHONY: test-jit-script
