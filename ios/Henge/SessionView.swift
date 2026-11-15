@@ -954,6 +954,8 @@ struct SessionView: View {
 
     /// Serious or critical: the guest's CPUs drop a QoS class until it cools (hv_vm_set_hot).
     private static func isHot(_ state: ProcessInfo.ThermalState) -> Bool { state == .serious || state == .critical }
+    /// Henge fork (battery): the guest's CPUs back off a step when the iPad is hot or in Low Power Mode.
+    private static func backOff(_ state: ProcessInfo.ThermalState) -> Bool { isHot(state) || ProcessInfo.processInfo.isLowPowerModeEnabled }
 
     private static func thermalLabel(_ state: ProcessInfo.ThermalState) -> String {
         switch state {
@@ -1016,7 +1018,7 @@ struct SessionView: View {
             henge_vm_set_display_mm(0, 0)
         }
         HengeLog.log("session", "screen \(guest.width)x\(guest.height) retina \(mac.isRetina)")
-        henge_vm_set_hot(Self.isHot(ProcessInfo.processInfo.thermalState) ? 1 : 0)
+        henge_vm_set_hot(Self.backOff(ProcessInfo.processInfo.thermalState) ? 1 : 0)
         InstantResume.bootScreen = "\(guest.width)x\(guest.height)"
         var rc: Int32 = -1
         if InstantResume.enabled, let at = InstantResume.saved(for: mac, ramMB: ram, cpus: cpus) {
@@ -1049,6 +1051,7 @@ struct SessionView: View {
         var lastTime = Date()
         var lastGPUFrames = henge_vm_gpu_frames()
         var tick = 0
+        var backingOff = Self.backOff(ProcessInfo.processInfo.thermalState)
         while !Task.isCancelled {
             state = henge_vm_state()
             if state == 3 || state == 4 { /* starting, stopping, or paused while Henge is in the background */
@@ -1066,8 +1069,12 @@ struct SessionView: View {
             helperRunning = Sharing.helperRunning
             log = Array(HengeLog.recentLines(200))
             let heat = ProcessInfo.processInfo.thermalState
+            if Self.backOff(heat) != backingOff {
+                backingOff = Self.backOff(heat)
+                henge_vm_set_hot(backingOff ? 1 : 0)
+                HengeLog.log("session", "CPU back-off \(backingOff ? "on" : "off") (low power \(ProcessInfo.processInfo.isLowPowerModeEnabled))")
+            }
             if heat.rawValue != thermalState.rawValue {
-                if Self.isHot(heat) != Self.isHot(thermalState) { henge_vm_set_hot(Self.isHot(heat) ? 1 : 0) }
                 thermalState = heat
                 HengeLog.log("session", "thermal state: \(Self.thermalLabel(heat))")
             }
