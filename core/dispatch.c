@@ -23,6 +23,11 @@ static int poison_on(void) {
     return poison;
 }
 
+/* Was this code translated before? (hashed, approximate). Cleared on a full flush or eviction so the diagnostic
+   counts retranslations in the current cache window rather than saturating. */
+static uint64_t seen_va[1 << 18], seen_vapa[1 << 18];
+static void reset_retrans(void) { memset(seen_va, 0, sizeof seen_va); memset(seen_vapa, 0, sizeof seen_vapa); }
+
 void hv_flush_blocks(HvMachine *m) {
     /* Every other CPU is parked (stop_the_world): the one moment the TLB layout can change. */
     if ((hv_knob[HV_K_TLBT] != 0) != hv_tlb_tmajor) {
@@ -35,6 +40,7 @@ void hv_flush_blocks(HvMachine *m) {
     }
     m->stats.block_flushes++;
     __atomic_add_fetch(&m->jit_gen, 1, __ATOMIC_SEQ_CST);
+    reset_retrans();
     for (int i = 0; i < m->ncpus; i++)
         if (m->cpus[i]) {
             hv_ijc_reset(m->cpus[i], 0);
@@ -81,6 +87,7 @@ void hv_evict_blocks(HvMachine *m) {
     const uint32_t *lo = r->base + (size_t)seg * r->seg_words, *hi = lo + r->seg_words;
 #define GONE(p) ((const uint32_t *)(uintptr_t)(p) >= lo && (const uint32_t *)(uintptr_t)(p) < hi)
     m->stats.evictions++;
+    reset_retrans();
     for (int i = 0; i < m->ncpus; i++)
         if (m->cpus[i]) {
             hv_ijc_reset(m->cpus[i], 0);
@@ -397,7 +404,6 @@ static HvBlock *lookup(HvCpu *cpu, uint64_t va, uint64_t pa, uint32_t flags, con
     m->stats.translations++;
     if (m->stats_interval) {
         m->stats.translated_words += m->jit.used - used0;
-        static uint64_t seen_va[1 << 18], seen_vapa[1 << 18]; /* was this code translated before? (hashed, so approximate) */
         uint32_t hv = (uint32_t)(((va >> 2) ^ flags) * 0x9e3779b97f4a7c15ull >> 40);
         uint32_t hp = (uint32_t)((((va >> 2) ^ flags) * 0x9e3779b97f4a7c15ull ^ pa * 0xc2b2ae3d27d4eb4full) >> 40);
         if (seen_va[hv >> 6] >> (hv & 63) & 1) m->stats.retrans_va++;
@@ -1165,7 +1171,7 @@ static int run_loop(HvCpu *cpu, int one) {
         /* Ticks take the device lock, so not every few blocks: on a kick (the 1 ms
            kicker, a device with work for CPU 0, an interrupt raised for this
            CPU) or once this CPU's own timer is due. */
-        if (m->tick && (kicked || (++since_tick >= 64 && (since_tick = 0, next_due && mach_absolute_time() >= next_due)))) {
+        if (m->tick && (kicked || (++since_tick >= 64 && (since_tick = 0, (next_due = cpu->timer_due) && mach_absolute_time() >= next_due)))) {
             since_tick = 0;
             next_due = m->tick(m, cpu);
             cpu->timer_due = next_due;
