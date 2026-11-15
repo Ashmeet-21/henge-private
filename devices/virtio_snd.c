@@ -58,6 +58,36 @@ static void put32(uint8_t *p, uint32_t v) {
     memcpy(p, &v, 4);
 }
 
+/* ---- the host's player ---- */
+
+/* Start the host's player for the running stream. If it can't play now, the clock drains the ring
+   and it is tried again later: once a second at first, then less often. */
+static void host_start(HvVirtioSnd *d) {
+    d->host_on = 0;
+    if (!d->backend.start) return;
+    if (d->backend.start(d->backend.opaque, d->channels, d->format, d->rate_hz) == 0) {
+        if (d->host_failures) fprintf(stderr, "hengevm: sound: the host's output plays again (after %u failed starts)\n", d->host_failures);
+        d->host_on = 1;
+        d->host_failures = 0;
+        return;
+    }
+    if (!d->host_failures) fprintf(stderr, "hengevm: sound: the host's output would not start; trying again\n");
+    d->host_failures++;
+    unsigned wait_s = d->host_failures < 4 ? 1 : d->host_failures < 10 ? 4 : 15;
+    d->host_retry_ns = now_ns() + (uint64_t)wait_s * 1000000000ull;
+}
+
+static void host_stop(HvVirtioSnd *d) {
+    if (d->host_on && d->backend.stop) d->backend.stop(d->backend.opaque);
+    d->host_on = 0;
+}
+
+void hv_virtio_snd_kick(HvVirtioSnd *d) {
+    if (!d) return;
+    atomic_store(&d->host_kick, 1);
+    hv_machine_wake(d->vio.m);
+}
+
 /* ---- control queue ---- */
 
 /* Return every posted capture buffer on STOP/RELEASE, including a partial
@@ -231,8 +261,14 @@ static uint32_t control(HvVirtioSnd *d, const HvVirtqElem *e) {
             d->running = 1;
             d->clock_start_ns = now_ns();
             d->clock_start_consumed = atomic_load(&d->consumed);
-            if (d->backend.start && d->backend.start(d->backend.opaque, d->channels, d->format, d->rate_hz) != 0)
-                d->backend.start = NULL; /* the host cannot play it: drain by the clock instead */
+            d->host_failures = 0;
+            host_start(d); /* if the host can't play it yet, the clock drains it until it can */
+            static unsigned starts_logged;
+            if (starts_logged < 4) {
+                starts_logged++;
+                fprintf(stderr, "hengevm: sound: the guest plays %u ch, format %u, %u Hz (host output %s)\n", d->channels, d->format,
+                        d->rate_hz, d->host_on ? "on" : "off");
+            }
         }
         break;
     case R_PCM_STOP:
@@ -240,7 +276,7 @@ static uint32_t control(HvVirtioSnd *d, const HvVirtqElem *e) {
             status = S_BAD_MSG;
             break;
         }
-        if (d->running && d->backend.stop) d->backend.stop(d->backend.opaque);
+        host_stop(d);
         d->running = 0;
         break;
     case R_PCM_RELEASE:
@@ -248,7 +284,7 @@ static uint32_t control(HvVirtioSnd *d, const HvVirtqElem *e) {
             status = S_BAD_MSG;
             break;
         }
-        if (d->running && d->backend.stop) d->backend.stop(d->backend.opaque);
+        host_stop(d);
         d->running = 0;
         d->prepared = 0;
         /* Every buffer still held goes back now (the spec requires it). */
@@ -382,8 +418,18 @@ void hv_virtio_snd_poll(HvVirtioSnd *d) {
         }
     }
     pthread_mutex_unlock(&d->capture_mu);
-    /* No backend: the stream plays at its rate by the wall clock. */
-    if (d->running && !d->backend.start && d->frame_bytes) {
+    if (atomic_exchange(&d->host_kick, 0) && d->running) { /* the host's audio came back: a new player */
+        host_stop(d);
+        if (d->backend.reset) d->backend.reset(d->backend.opaque);
+        d->clock_start_ns = now_ns();
+        d->clock_start_consumed = atomic_load(&d->consumed);
+        d->host_failures = 0;
+        host_start(d);
+    } else if (d->running && !d->host_on && d->backend.start && now_ns() >= d->host_retry_ns) {
+        host_start(d);
+    }
+    /* No host player: the stream plays at its rate by the wall clock. */
+    if (d->running && !d->host_on && d->frame_bytes) {
         uint64_t now = now_ns();
         uint64_t target = d->clock_start_consumed +
                           (now - d->clock_start_ns) * d->rate_hz / 1000000000ull * d->frame_bytes;
@@ -456,7 +502,7 @@ static void notify(HvVirtio *v, int q) {
 
 static void reset_device(HvVirtio *v) {
     HvVirtioSnd *d = v->dev;
-    if (d->running && d->backend.stop) d->backend.stop(d->backend.opaque);
+    host_stop(d);
     d->prepared = d->running = 0;
     d->phead = d->pcopy = d->ptail = 0;
     atomic_store(&d->written, 0);
@@ -537,8 +583,9 @@ void hv_virtio_snd_resume(HvVirtioSnd *d) {
     if (!d) return;
     d->clock_start_ns = now_ns();
     d->clock_start_consumed = atomic_load(&d->consumed);
-    if (d->running && d->backend.start && d->backend.start(d->backend.opaque, d->channels, d->format, d->rate_hz) != 0)
-        d->backend.start = NULL;
+    d->host_on = 0;
+    d->host_failures = 0;
+    if (d->running) host_start(d);
     pthread_mutex_lock(&d->capture_mu);
     /* Guest RX descriptors and their partial period survive; host samples and
        permission do not. Start a fresh clock, without a burst of catch-up PCM. */
