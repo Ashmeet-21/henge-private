@@ -73,6 +73,7 @@ typedef struct HvXhci {
     uint64_t camera_reconnect_ns; /* CPU-owned: resolution change reconnects port 4 */
     uint64_t camera_generation;
     /* keyboard reports waiting for an IN transfer (8 bytes each) */
+    int keyboard_jis;      /* device identity fixed until the next guest boot */
     pthread_mutex_t mu;
     uint8_t reports[HV_XHCI_REPORTS][8];
     uint32_t rhead, rtail;

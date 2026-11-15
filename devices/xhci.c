@@ -58,18 +58,24 @@ static const uint8_t kbd_report_desc[] = {
     0x75, 0x08, 0x15, 0x00, 0x26, 0xff, 0x00, 0x05, 0x07, 0x19, 0x00, 0x29, 0xff, 0x81, 0x00, 0xc0,
 };
 
-static const uint8_t kbd_device_desc[18] = {
-    18, 1, 0x00, 0x02, 0, 0, 0, 64, /* USB 2.0, class per interface, EP0 64 bytes */
-    0xac, 0x05, 0x20, 0x02,         /* vendor Apple, product 0x0220 (an ANSI keyboard): macOS knows its layout, no Keyboard Setup Assistant */
-    0x00, 0x01, 1, 2, 3, 1,         /* bcdDevice 1.00, strings 1-3, one configuration */
-};
+/* Apple Aluminum Keyboard IDs identify the physical layout to macOS. Both
+   layouts use the same boot report, which includes International and LANG keys. */
+#define KBD_DEVICE_DESC(product) { \
+    18, 1, 0x00, 0x02, 0, 0, 0, 64, \
+    0xac, 0x05, (product) & 0xff, (product) >> 8, \
+    0x00, 0x01, 1, 2, 3, 1 \
+}
+#define KBD_CONFIG_DESC(country) { \
+    9, 2, 34, 0, 1, 1, 0, 0xa0, 50, \
+    9, 4, 0, 0, 1, 3, 1, 1, 0, \
+    9, 0x21, 0x11, 0x01, (country), 1, 0x22, sizeof kbd_report_desc, 0, \
+    7, 5, 0x81, 3, 8, 0, 10 \
+}
 
-static const uint8_t kbd_config_desc[34] = {
-    9, 2, 34, 0, 1, 1, 0, 0xa0, 50,           /* one interface, remote wakeup, 100 mA */
-    9, 4, 0, 0, 1, 3, 1, 1, 0,                /* interface 0: HID, boot, keyboard */
-    9, 0x21, 0x11, 0x01, 0, 1, 0x22, sizeof kbd_report_desc, 0, /* HID 1.11, one report descriptor */
-    7, 5, 0x81, 3, 8, 0, 10,                  /* EP1 IN, interrupt, 8 bytes, every 10 ms */
-};
+static const uint8_t kbd_device_desc[18] = KBD_DEVICE_DESC(0x0220);
+static const uint8_t kbd_config_desc[34] = KBD_CONFIG_DESC(0);
+static const uint8_t kbd_jis_device_desc[18] = KBD_DEVICE_DESC(0x0222);
+static const uint8_t kbd_jis_config_desc[34] = KBD_CONFIG_DESC(15); /* Japan */
 
 static const char *const kbd_strings[] = {NULL, "HengeVM", "HengeVM USB Keyboard", "1"};
 
@@ -200,6 +206,9 @@ static const struct HvXhciDev devs[HV_XHCI_DEVICES] = {
     {tab_strings, tab_device_desc, tab_config_desc, NULL, 0}, /* the tablet's report descriptor is generated: see control() */
     {NULL, NULL, NULL, NULL, 0}, /* the camera answers its own control requests: see control() */
     {ms_strings, ms_device_desc, ms_config_desc, ms_report_desc, sizeof ms_report_desc},
+};
+static const struct HvXhciDev jis_keyboard = {
+    kbd_strings, kbd_jis_device_desc, kbd_jis_config_desc, kbd_report_desc, sizeof kbd_report_desc,
 };
 
 static int xlog(void) {
@@ -443,7 +452,8 @@ static void build_tab_desc(HvXhci *x) {
    requests), or -1 to stall. */
 static int control(HvXhci *x, int slot, const uint8_t setup[8], uint8_t *out, int max) {
     if (x->slots[slot].dev == 3) return hv_usb_camera_control(&x->camera, setup, out, (size_t)max);
-    const struct HvXhciDev *d = &devs[x->slots[slot].dev];
+    int dev = x->slots[slot].dev;
+    const struct HvXhciDev *d = dev == 0 && x->keyboard_jis ? &jis_keyboard : &devs[dev];
     uint8_t type = setup[0], req = setup[1];
     uint16_t value = (uint16_t)(setup[2] | setup[3] << 8);
     if (xlog()) fprintf(stderr, "xhci: request %02x %02x value %04x len %u\n", type, req, value, setup[6] | setup[7] << 8);
@@ -1579,6 +1589,8 @@ void hv_xhci_poll(HvXhci *x) {
 HvXhci *hv_xhci_create(HvMachine *m, HvPcie *bus) {
     HvXhci *x = calloc(1, sizeof *x);
     x->m = m;
+    const char *layout = getenv("HV_KEYBOARD_LAYOUT");
+    x->keyboard_jis = layout && strcmp(layout, "jis") == 0;
     pthread_mutex_init(&x->mu, NULL);
     hv_usb_camera_init(&x->camera);
     /* QEMU's xHCI IDs. Class 0x0c0330 with revision 0: macOS's IOPCIClassMatch compares all 32 bits. */
