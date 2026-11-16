@@ -55,6 +55,7 @@ jobs:
         if: failure()
         run: |
           grep -E "error:|BUILD" ios/build/DerivedData.buildlog | sort -u | tail -40 || true
+          grep -B40 -m1 "Command PhaseScriptExecution failed" ios/build/DerivedData.buildlog | grep -v "^ *export " || true
           grep -A20 "build commands failed" ios/build/DerivedData.buildlog || tail -60 ios/build/DerivedData.buildlog || true
           tail -30 husk/build/logs/*.log || true
       - uses: actions/upload-artifact@v4
