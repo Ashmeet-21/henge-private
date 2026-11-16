@@ -49,6 +49,7 @@ struct SessionView: View {
     @State private var showRevealHint = false
     @State private var showPasteUnavailable = false
     @State private var pointerRefused = false
+    @State private var mouseNeedsAssistiveTouch = false
     @AppStorage("henge.controls.hintsShown") private var revealHintsShown = 0
     @AppStorage(VolumeClicks.inputModeKey) private var inputMode = VolumeClicks.InputMode.touchscreen
     @AppStorage(VolumeClicks.modeKey) private var volumeMode = VolumeClicks.Mode.delayHold
@@ -158,6 +159,16 @@ struct SessionView: View {
                             .transition(.opacity)
                             .allowsHitTesting(false)
                     }
+                    if mouseNeedsAssistiveTouch && !pointerRefused && !showRevealHint {
+                        Label("Turn on AssistiveTouch to use this mouse with the Mac", systemImage: "computermouse")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 18).padding(.vertical, 12)
+                            .deskGlass(in: Capsule())
+                            .position(x: full.width / 2, y: insets.top + 40)
+                            .transition(.opacity)
+                            .allowsHitTesting(false)
+                    }
                     if showRevealHint {
                         Label("Tap with four fingers to show the controls", systemImage: "hand.tap")
                             .font(.system(size: 15, weight: .medium))
@@ -196,12 +207,21 @@ struct SessionView: View {
             .animation(.easeInOut(duration: 0.25), value: typing)
             .animation(.easeInOut(duration: 0.25), value: controlsHidden)
             .animation(.easeInOut(duration: 0.25), value: showRevealHint)
+            .animation(.easeInOut(duration: 0.25), value: mouseNeedsAssistiveTouch)
             .animation(.easeInOut(duration: 0.25), value: showWallpaperTip)
             .onReceive(NotificationCenter.default.publisher(for: UIPointerLockState.didChangeNotification)) { _ in
                 pointerRefused = PointerLock.refused
             }
             .onReceive(NotificationCenter.default.publisher(for: .GCMouseDidConnect)) { _ in
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { pointerRefused = PointerLock.refused }
+                // An iPhone gives an app a mouse only through AssistiveTouch, unless Henge reads it over its maker's
+                // own channel (a Logitech mouse). Give that channel time to open before saying so.
+                guard !Device.isPad else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+                    guard !UIAccessibility.isAssistiveTouchRunning, !HardwareMouse.shared.hasVendorChannel else { return }
+                    mouseNeedsAssistiveTouch = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 6) { mouseNeedsAssistiveTouch = false }
+                }
             }
             .onReceive(NotificationCenter.default.publisher(for: Trackpad.revealTap)) { _ in
                 controlsHidden = false
@@ -215,6 +235,9 @@ struct SessionView: View {
         }
         .statusBarHidden(zoomed || Device.isPad)
         .persistentSystemOverlays(.hidden)
+        // A swipe from a screen edge is the Mac's (its Dock, its menu bar) first: macOS gets it, and a
+        // second swipe goes back to iOS's own gestures. Without this iOS takes every edge swipe itself.
+        .defersSystemGestures(on: .all)
         .sheet(isPresented: $showDetails) { details }
         .alert("Couldn’t Paste", isPresented: $showPasteUnavailable) {
             Button("OK", role: .cancel) {}
@@ -256,6 +279,10 @@ struct SessionView: View {
             guard phase != .active else {
                 Sharing.prepare() // resume/repair: re-serve the root
                 display.refresh()
+                // A lock or the app switcher may have taken the mouse and keyboard back: iOS reclaims
+                // both when the session stops being active, and nothing here re-attached them until now.
+                HardwareMouse.shared.start()
+                KeyboardCatcher.reattach()
                 InstantResume.cameBack(mac)
                 return
             }
@@ -289,9 +316,13 @@ struct SessionView: View {
             if on { RemoteDesktop.shared.start() } else { RemoteDesktop.shared.stop() }
         }
         .onChange(of: remoteHeadless) { _ in RemoteDesktop.shared.applyHeadless() }
+        .onChange(of: display.isExternal) { VendorMice.shared.setExternalDisplay($0) }
         .onAppear {
             media.setForeground(scenePhase == .active)
             UIApplication.shared.isIdleTimerDisabled = true
+            HengeAudio.shared.activate()
+            MacShortcuts.setMacOnScreen(true)
+            VendorMice.shared.setExternalDisplay(display.isExternal)
             HardwareMouse.shared.start()
             HardwareKeys.start()
             if remoteEnabled { RemoteDesktop.shared.start() }
@@ -305,6 +336,8 @@ struct SessionView: View {
             kbActive = false
             kbKeyboard = nil
             kbTarget = nil
+            MacShortcuts.setMacOnScreen(false)
+            VendorMice.shared.setExternalDisplay(false)
             zoomFollowing?.cancel()
             StickyKeys.shared.releaseAll()
             HardwareKeys.releaseAll()

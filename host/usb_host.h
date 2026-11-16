@@ -22,6 +22,8 @@ int64_t hv_usb_wait_online(HvVirtioUsb *d, int timeout_ms);
 
 /* host/libusb_shim.c: the device its libusb API drives. */
 void hv_libusb_shim_attach(HvVirtioUsb *d);
+/* Before the device is freed: it leaves the bus, calls in flight end, and the shim has no device after. */
+void hv_libusb_shim_detach(void);
 
 /* Debugging (HV_VUSB_PROBE=1): a thread that reads the device's descriptors. */
 void hv_usb_probe_start(HvVirtioUsb *d);

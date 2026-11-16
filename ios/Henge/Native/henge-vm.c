@@ -47,6 +47,16 @@ void henge_vm_set_identity(const char *soc_name, const char *product_name, const
     snprintf(identity_model, sizeof identity_model, "%s", model_id ? model_id : "");
 }
 
+/* An installer's machine: the restore tools (usbmuxd, idevicerestore) hold its USB port until detached. */
+static void release_machine(void) {
+    if (installer_session) {
+        hv_install_detach();
+        installer_session = 0;
+        fprintf(stderr, "henge: the restore tools let go of the installer's USB port\n");
+    }
+    hv_vm_destroy();
+}
+
 static void on_exit(int reason) {
     pthread_rwlock_wrlock(&api_lock);
     state = 3;
@@ -62,12 +72,12 @@ static void on_exit(int reason) {
     stopped_blocks = hv_vm_machine()->stats.blocks;
     stopped_tx = hv_net_tx_frames;
     stopped_rx = hv_net_rx_frames;
-    /* The restore stack owns separate USB workers for the installer session.
-       Normal guest sessions release everything before another boot is allowed. */
-    if (!installer_session) hv_vm_destroy();
+    /* The restore stack's USB workers let go of an installer's machine first (hv_install_detach); then it is
+       released like any other, so a device can start in this launch without quitting Henge. */
+    release_machine();
     state = 2;
-    fprintf(stderr, "henge: the machine stopped (%s, halt reason %d); CPU threads ended, disks flushed%s\n",
-            exit_description(), halt, installer_session ? "" : ", machine released");
+    fprintf(stderr, "henge: the machine stopped (%s, halt reason %d); CPU threads ended, disks flushed, machine released\n",
+            exit_description(), halt);
     pthread_rwlock_unlock(&api_lock);
 }
 
@@ -90,8 +100,8 @@ static int begin_start(char *err, size_t errlen) {
 }
 
 static int failed_start(void) {
-    if (!installer_session) hv_vm_destroy();
-    state = installer_session ? 2 : 0;
+    release_machine();
+    state = 0;
     pthread_rwlock_unlock(&api_lock);
     return -1;
 }
@@ -440,6 +450,32 @@ void henge_vm_mouse_scroll(int dx, int dy) {
     if (!lock_running()) return;
     if (dy) hv_vm_mouse_wheel(dy);
     if (dx) hv_vm_mouse_hwheel(dx);
+    pthread_rwlock_unlock(&api_lock);
+}
+void henge_vm_audio_kick(void) {
+    if (!lock_running()) return;
+    hv_vm_audio_kick();
+    pthread_rwlock_unlock(&api_lock);
+}
+int henge_vm_usb_mouse_ready(void) {
+    if (!lock_running()) return 0;
+    int ready = hv_vm_usb_mouse_ready();
+    pthread_rwlock_unlock(&api_lock);
+    return ready;
+}
+void henge_vm_usb_mouse_move(int dx, int dy) {
+    if (!lock_running()) return;
+    hv_vm_usb_mouse_move(dx, dy);
+    pthread_rwlock_unlock(&api_lock);
+}
+void henge_vm_usb_mouse_scroll(int wheel, int pan) {
+    if (!lock_running()) return;
+    hv_vm_usb_mouse_scroll(wheel, pan);
+    pthread_rwlock_unlock(&api_lock);
+}
+void henge_vm_usb_mouse_buttons(unsigned buttons) {
+    if (!lock_running()) return;
+    hv_vm_usb_mouse_buttons(buttons);
     pthread_rwlock_unlock(&api_lock);
 }
 int henge_vm_pointer(int *x, int *y) {

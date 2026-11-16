@@ -350,8 +350,8 @@ static void trb(uint64_t pa, uint64_t address, uint32_t length, unsigned type, u
 }
 static void xhci_test(HvPcie *pci) {
     HvXhci *x = hv_xhci_create(&machine, pci);
-    CHECK(x && x->pci.bar_read(&x->pci, 0, 4, 4) >> 24 == 4);
-    CHECK((x->pci.bar_read(&x->pci, 0, 0x808, 4) >> 8 & 255) == 4);
+    CHECK(x && x->pci.bar_read(&x->pci, 0, 4, 4) >> 24 == 5);
+    CHECK((x->pci.bar_read(&x->pci, 0, 0x808, 4) >> 8 & 255) == 5);
     CHECK((x->pci.bar_read(&x->pci, 0, 0x440, 4) >> 10 & 15) == 1);
     CHECK((x->pci.bar_read(&x->pci, 0, 0x470, 4) >> 10 & 15) == 3); /* camera on port 4: high speed, not low speed (2) */
     x->slots[1].dev = 3;
@@ -419,6 +419,25 @@ static void xhci_test(HvPcie *pci) {
     trb(RAM + 0xa0000, 0, 0, 10, 1u << 24); /* disable the old camera slot */
     x->pci.bar_write(&x->pci, 0, 0x2000, 0, 4);
     CHECK(x->camera.committed && !x->slot_used[1]);
+    /* The USB mouse is on port 5, at full speed, behind the tablet (3) and the camera (4).
+       Two moves the guest has not read yet merge into one report; a press is a report of
+       its own, after them. */
+    CHECK((x->pci.bar_read(&x->pci, 0, 0x480, 4) >> 10 & 15) == 1);
+    CHECK(!hv_xhci_mouse_ready(x));
+    x->slots[2].dev = 4;
+    x->slots[2].ep[3] = (HvXhciRing){RAM + 0x90000, 1};
+    x->slots[2].ep_running[3] = 1;
+    CHECK(hv_xhci_mouse_ready(x));
+    hv_xhci_mouse(x, 5, -3, 0, 0);
+    hv_xhci_mouse(x, 2, 1, 1, 0);
+    hv_xhci_mouse_buttons(x, 2);
+    trb(RAM + 0x90000, RAM + 0x91000, 7, 1, 32);
+    trb(RAM + 0x90010, RAM + 0x91010, 7, 1, 32);
+    hv_xhci_poll(x);
+    uint8_t *moved = at(RAM + 0x91000), *pressed = at(RAM + 0x91010);
+    CHECK(moved[0] == 0 && moved[1] == 7 && moved[2] == 0 && moved[3] == 0xfe && moved[4] == 0xff && moved[5] == 1 && moved[6] == 0);
+    CHECK(pressed[0] == 2 && pressed[1] == 0 && pressed[3] == 0 && pressed[5] == 0);
+    CHECK(x->slots[2].ep[3].dequeue == RAM + 0x90020);
     hv_xhci_destroy(x);
 }
 

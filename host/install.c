@@ -81,14 +81,23 @@ int hv_install_start(HvVirtioUsb *usb, const char *ipsw, const char *workdir, ui
     g_ecid = ecid;
     g_progress = cb;
     g_progress_user = user;
+    g_result = 1;
     hv_libusb_shim_attach(usb);
     pthread_t t;
-    if (pthread_create(&t, NULL, mux_thread, NULL) != 0) return -1;
-    pthread_detach(t);
-    usleep(300000);
+    /* usbmuxd runs for the rest of the launch: a second restore (HomeView's cloudOS, then the device) finds the
+       new machine through it as a device plugged in, rather than a second usbmuxd failing to take the port. */
+    static int mux_running;
+    if (!mux_running) {
+        if (pthread_create(&t, NULL, mux_thread, NULL) != 0) return -1;
+        pthread_detach(t);
+        mux_running = 1;
+        usleep(300000);
+    }
     if (pthread_create(&t, NULL, restore_thread, NULL) != 0) return -1;
     pthread_detach(t);
     return 0;
 }
 
 int hv_install_result(void) { return g_result; }
+
+void hv_install_detach(void) { hv_libusb_shim_detach(); }

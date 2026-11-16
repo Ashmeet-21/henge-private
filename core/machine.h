@@ -238,6 +238,8 @@ typedef struct HvMachine {
     /* Devices: called between blocks every so often and while the CPU waits.
        Returns the host time (mach_absolute_time units) of the next timer event, or 0. */
     uint64_t (*tick)(struct HvMachine *m, HvCpu *cpu);
+    /* Timer-only tick (no device lock or device polling): called immediately on timer MSR writes. */
+    uint64_t (*timer_tick)(struct HvMachine *m, HvCpu *cpu);
     void *tick_opaque;
     /* GIC CPU interface system registers (ICC_*_EL1), reg = op0:op1:CRn:CRm:op2. */
     uint64_t (*icc_read)(struct HvMachine *m, HvCpu *cpu, uint32_t reg);
@@ -418,7 +420,7 @@ int hv_ic_ivau_drops(void);
 /* Settings that say how to translate or wait, to compare ways of doing it in one running guest
    ("knob NAME VALUE" in HV_INPUT_FILE; a new way starts from an empty code cache). Each starts
    from the environment variable named in hv_knob_names. */
-enum { HV_K_NO_RAS, HV_K_SUPERBLOCKS, HV_K_GROUPS, HV_K_WFI_SPIN, HV_K_FLUSH, HV_K_TEST1, HV_K_TEST2, HV_K_TEST3, HV_K_TLBT, HV_K_JITCAP, HV_K_RECHECK, HV_K_SYNCWAIT, HV_K_SWITCHFLUSH, HV_K_RANGEDROP, HV_K_MOVIMM, HV_K_PREDSTAT, HV_K_WALKLOG, HV_K_HOIST, HV_K_IJCPAGES, HV_K_DNSPROXY, HV_K_JITSEGS, HV_K_COUNT };
+enum { HV_K_NO_RAS, HV_K_SUPERBLOCKS, HV_K_GROUPS, HV_K_WFI_SPIN, HV_K_FLUSH, HV_K_TEST1, HV_K_TEST2, HV_K_TEST3, HV_K_TLBT, HV_K_JITCAP, HV_K_RECHECK, HV_K_SYNCWAIT, HV_K_SWITCHFLUSH, HV_K_RANGEDROP, HV_K_MOVIMM, HV_K_PREDSTAT, HV_K_WALKLOG, HV_K_HOIST, HV_K_IJCPAGES, HV_K_DNSPROXY, HV_K_JITSEGS, HV_K_SYSINLINE, HV_K_COUNT };
 extern int hv_knob[HV_K_COUNT];
 /* The QoS class (qos_class_t) the guest's CPU threads should run at, or 0 to leave them as they are. Each CPU
    thread checks it every 65536 blocks and after a WFI sleep and moves itself (only a thread can change its own

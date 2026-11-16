@@ -13,7 +13,7 @@ DEV += $(B)/usb_camera.o
 METAL_LIBS = -framework Foundation -framework QuartzCore -framework CoreVideo -framework Metal -framework IOSurface -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers
 
 TESTS = $(B)/test_classify $(B)/test_jit_region $(B)/test_operands $(B)/test_jit $(B)/test_mem \
-        $(B)/test_mmu $(B)/test_exc $(B)/test_devices $(B)/test_dt_fixup $(B)/test_shutdown $(B)/test_media
+        $(B)/test_mmu $(B)/test_exc $(B)/test_devices $(B)/test_dt_fixup $(B)/test_shutdown $(B)/test_media $(B)/test_ipsw_info
 
 all: $(TESTS) $(B)/hengevm $(B)/hengevm-ref $(B)/hvsparse
 
@@ -124,6 +124,9 @@ $(B)/test_devices: tests/test_devices.c tests/devices_programs.S tests/harness.S
 # The device-tree identity rewrite, on crafted blobs (no machine needed).
 $(B)/test_dt_fixup: tests/test_dt_fixup.c host/dt_fixup.c host/dt_fixup.h | $(B)
 	$(CC) $(CFLAGS) tests/test_dt_fixup.c host/dt_fixup.c -o $@
+# Reading a restore image's version and build (host/ipsw_info.c) with Homebrew's libzip and libplist.
+$(B)/test_ipsw_info: tests/test_ipsw_info.c host/ipsw_info.c host/ipsw_info.h | $(B)
+	$(CC) $(CFLAGS) -Ihost $(shell pkg-config --cflags libzip libplist-2.0) tests/test_ipsw_info.c host/ipsw_info.c $(shell pkg-config --libs libzip libplist-2.0) -o $@
 $(B)/test_%: tests/test_%.c tests/%_programs.S tests/harness.S tests/harness.h $(ENGINE)
 	$(CC) $(CFLAGS) -Itests tests/test_$*.c tests/$*_programs.S tests/harness.S $(ENGINE) -o $@
 
@@ -221,7 +224,7 @@ test-tl-glue: $(B)/test_tl_glue $(B)/tl-exit3
 .PHONY: test-tl-glue
 
 # The restore stack, built from the same sources and with the same stand-ins as iOS.
-$(B)/mac-restore/libhengerestore.a: tools/build_ios_restore.sh host/libusb_shim.c host/install.c host/curl_shim.m $(wildcard third_party/*/src/*.c) $(wildcard third_party/libirecovery/src/*.c)
+$(B)/mac-restore/libhengerestore.a: tools/build_ios_restore.sh host/libusb_shim.c host/install.c host/ipsw_info.c host/curl_shim.m $(wildcard third_party/*/src/*.c) $(wildcard third_party/libirecovery/src/*.c)
 	nice -n 10 tools/build_ios_restore.sh mac
 
 # The installer: libirecovery, usbmuxd and idevicerestore (third_party, vendored
@@ -284,6 +287,7 @@ test-jit-advice: $(B)/test_jit_advice
 	$(B)/test_jit_advice
 .PHONY: test-jit-advice
 
+
 # Keyboard-viewport solver + signal chain: the shipped
 # KeyboardViewport.swift compiled unchanged, exercised headlessly.
 $(B)/test_kb_viewport: ios/Henge/KeyboardViewport.swift tests/test_kb_viewport.swift | $(B)
@@ -309,3 +313,18 @@ $(B)/test_device_identity: ios/Henge/DeviceIdentity.swift tests/test_device_iden
 test-identity: $(B)/test_device_identity
 	$(B)/test_device_identity
 .PHONY: test-identity
+
+# Which disk sizes a Mac is offered, and when growing is refused.
+$(B)/test_disk_growth: ios/Henge/DiskGrowth.swift tests/test_disk_growth.swift | $(B)
+	xcrun --sdk macosx swiftc $^ -o $@
+
+test-disk-growth: $(B)/test_disk_growth
+	$(B)/test_disk_growth
+.PHONY: test-disk-growth
+
+# henge-jit.js (run by StikDebug and the built-in helper) against a scripted debugserver, under the system's JavaScriptCore.
+JSC = /System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc
+
+test-jit-script:
+	$(JSC) tests/test_jit_script.js
+.PHONY: test-jit-script

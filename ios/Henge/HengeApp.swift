@@ -14,6 +14,7 @@ struct HengeApp: App {
         // Order matters: HengeLog takes over stderr, so the engine's and the JIT
         // allocator's first lines land in Documents/henge.log too.
         HengeLog.start()
+        PhonePointer.install() // before any view adds a pointer interaction
         HengeLog.log("boot", "address space: \(henge_largest_reservation_gb()) GB can be reserved in one piece")
         EngineTuning.apply()
         HengeLog.logFootprint("app-launch")
@@ -21,6 +22,7 @@ struct HengeApp: App {
         HengeLog.log("app", "increased memory limit: \(Entitlements.increasedMemory ? "yes" : "no"); extended addressing: \(Entitlements.extendedAddressing ? "yes" : "no"); limit \(Entitlements.memoryLimitAtLaunch >> 20) MB")
         // Without the guard, a brk no debugger answers kills the app instead of failing.
         JITBootstrap.installTrapGuard()
+        MacShortcuts.configure()
         try? AVAudioSession.sharedInstance().setCategory(.playback, options: [.mixWithOthers])
         Machines.shared.collectImports()
         // The display question: does this iOS have Apple's paravirtualized graphics at all?
@@ -82,7 +84,7 @@ struct RootView: View {
                     jit.objectWillChange.send()
                     return
                 }
-                if JITBootstrap.debuggedFlag || JITBootstrap.canGrantOwnJIT {
+                if JITBootstrap.debuggerUsable || JITBootstrap.canGrantOwnJIT {
                     JITBootstrap.prewarm()
                     // Readiness lives outside the observable coordinator.
                     jit.objectWillChange.send()

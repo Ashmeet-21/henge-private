@@ -4,11 +4,13 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
     @ObservedObject private var jit = JITCoordinator.shared
     @AppStorage(JITCoordinator.autoEnableKey) private var jitAtLaunch = false
+    @AppStorage(JITDeviceAddress.key) private var jitDeviceAddress = ""
     @AppStorage(HardwareMouse.speedKey) private var mouseSpeed = 1.0
     @AppStorage(HardwareMouse.reverseKey) private var reverseScrolling = false
     @AppStorage(HardwareMouse.scrollSpeedKey) private var scrollSpeed = 0.3
     @AppStorage(PhysicalMouseButtons.swapKey) private var swapMouseButtons = false
     @AppStorage(HardwareKeys.windowsLayoutKey) private var windowsKeyboard = false
+    @AppStorage(EngineTuning.keyboardLayoutKey) private var keyboardLayout = "ansi"
     @AppStorage(VolumeClicks.inputModeKey) private var inputMode = VolumeClicks.InputMode.touchscreen
     @AppStorage(VolumeClicks.modeKey) private var volumeMode = VolumeClicks.Mode.delayHold
     @AppStorage(VolumeClicks.swapKey) private var swapButtons = false
@@ -51,11 +53,30 @@ struct SettingsView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                     Button("Set up JIT") { jit.showSetup = true }
                     Toggle("Turn on JIT when Henge opens", isOn: $jitAtLaunch)
-                    if jitAtLaunch {
+                    if jitAtLaunch && JITDeviceAddress.custom == nil {
                         Text("Henge connects LocalDevVPN first when it is off, and comes back.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
+                    LabeledContent("Device address") {
+                        TextField("10.7.0.1 (LocalDevVPN)", text: $jitDeviceAddress)
+                            .multilineTextAlignment(.trailing)
+                            .keyboardType(.numbersAndPunctuation)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .onChange(of: jitDeviceAddress) { _ in jit.addressChanged() }
+                    }
+                    let address = jitDeviceAddress.trimmingCharacters(in: .whitespaces)
+                    Text(address.isEmpty
+                         ? "Built-in StikJIT reaches this device through LocalDevVPN. Enter an IP address to reach it another way, without LocalDevVPN."
+                         : JITDeviceAddress.isValid(address)
+                            ? "Built-in StikJIT reaches this device at \(address), without LocalDevVPN. Clear it to use LocalDevVPN again."
+                            : "Enter an IPv4 or IPv6 address, such as 127.0.0.1.")
+                        .font(.footnote)
+                        .foregroundStyle(address.isEmpty || JITDeviceAddress.isValid(address) ? Color.secondary : Color.red)
                     LabeledContent("Code region", value: "\(JITBootstrap.jitBytes >> 20) MB, claimed once per launch")
+                    LabeledContent("Trusted Execution Monitor", value: TXMDetection.fromDeviceTree == nil
+                                   ? (JITBootstrap.deviceEnforcesTXM ? "Expected for this model" : "Not expected for this model")
+                                   : (JITBootstrap.deviceEnforcesTXM ? "Present" : "Not present"))
                 }
                 .listRowBackground(Desk.card)
                 Section("Memory") {
@@ -111,6 +132,15 @@ struct SettingsView: View {
                     }
                     .listRowBackground(Desk.card)
                 }
+                Section("Keyboard") {
+                    Picker("Physical layout", selection: $keyboardLayout) {
+                        Text("US (ANSI)").tag("ansi")
+                        Text("日本語 (JIS)").tag("jis")
+                    }
+                    Text("Match the keys printed on your hardware keyboard. This applies the next time a Mac starts. Choose your input language in macOS.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                .listRowBackground(Desk.card)
                 Section("Performance") {
                     Picker("Mac refresh rate", selection: $refreshRate) {
                         Text("30 Hz").tag(30)

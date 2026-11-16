@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "ipsw_info.h"
+
 /* Builds the machine from imported files, on the JIT region the app holds
    (henge_ios_jit_prewarm), and starts it. 0, or -1 with a reason in err. */
 int henge_vm_boot(const char *rom, const char *disk, const char *aux, uint64_t ecid, uint64_t seed, uint64_t ram_mb,
@@ -96,6 +98,16 @@ void henge_vm_mouse_button(int button, int down);
 void henge_vm_mouse_use_relative(void); /* buttons and wheel to the mouse, not the touch tablet (see hv_vm_mouse_use_relative) */
 /* Wheel units: dy > 0 up, dx > 0 right. */
 void henge_vm_mouse_scroll(int dx, int dy);
+/* The device's audio came back (an interruption ended, media services were reset, the output
+   changed): a sound the Mac is playing gets a new player. */
+void henge_vm_audio_kick(void);
+/* A mouse or trackpad held to the device, as the Mac's USB mouse: buttons as a mask (bit 0
+   primary, 1 secondary, 2 middle, 3 back, 4 forward), wheel and pan in detents (positive: away
+   from the user, and right). Ready is 0 until macOS has the mouse; use henge_vm_mouse_* then. */
+int henge_vm_usb_mouse_ready(void);
+void henge_vm_usb_mouse_move(int dx, int dy);
+void henge_vm_usb_mouse_scroll(int wheel, int pan);
+void henge_vm_usb_mouse_buttons(unsigned buttons);
 /* The Magic Trackpad 2 the Mac sees on its USB bus: a finger on it. phase: 0 down, 1 move, 2 up;
    finger a stable 1..15 per touch; x, y sensor units 0..8134, 0..5206. ts_ms is the touch
    sample's own clock in ms, so the guest computes finger speed from real sample timing. */
