@@ -212,7 +212,8 @@ $(B)/tl-samples.dmg: tests/tl/exit3.c tl/tests/hello.c tl/tests/fnd.m tl/tests/s
 	cp tl/build/swifty "$(B)/tl-samples/Swift sample"
 	cp tl/build/cxx "$(B)/tl-samples/C++ sample"
 	ditto tl/build/FW.app "$(B)/tl-samples/Framework sample.app"
-	hdiutil create -quiet -srcfolder $(B)/tl-samples -volname "Henge Samples" -fs HFS+ -format UDZO $@
+	# hdiutil sometimes fails on CI runners ("Resource busy"): try three times, and show why
+	for try in 1 2 3; do hdiutil create -srcfolder $(B)/tl-samples -volname "Henge Samples" -fs HFS+ -format UDZO -ov $@ && break; [ $$try = 3 ] && exit 1; sleep 5; done
 	xattr -c $@ # codesign refuses an app holding a file with Finder information
 
 $(B)/tl-exit3: tests/tl/exit3.c | $(B)
