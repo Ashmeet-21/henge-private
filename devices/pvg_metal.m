@@ -2798,15 +2798,22 @@ static const uint8_t *half_to_byte(void) {
             for (uint32_t x = 0; x < w; x++, px += 4)
                 for (int c = 0; c < 3; c++) px[c] = (uint8_t)((px[c] * px[3] + 127) / 255);
         }
-    free(cursor);
     MTLTextureDescriptor *ct = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:w height:h mipmapped:NO];
     ct.storageMode = MTLStorageModeShared;
     id<MTLTexture> glyph = [device newTextureWithDescriptor:ct];
     [glyph replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0 withBytes:bits bytesPerRow:(NSUInteger)stride];
+    uint8_t *old;
     os_unfair_lock_lock(&screen_lock);
+    old = cursor;
     cursor = bits, cursor_w = w, cursor_h = h, cursor_stride = (uint32_t)stride, cursor_hot_x = hx, cursor_hot_y = hy;
     cursor_tex = glyph;
     os_unfair_lock_unlock(&screen_lock);
+    /* The replaced image is freed after the swap, not before it: whoever reads the pointer holds
+       screen_lock for as long as it touches the bytes (drawCursor's blit, hv_pvg_metal_cursor's copy),
+       so by the time this lock could be taken no reader still used the old image, and readers since
+       the swap see the new one. Freed up there, it could go while drawCursor or hv_pvg_metal_cursor
+       was still reading it. */
+    free(old);
     if (getenv("HV_PVG_CURSOR_LOG")) fprintf(stderr, "pvgcursor glyph %ux%u hot %d,%d stride %u first alpha %u\n", w, h, hx, hy, (uint32_t)stride, bits[(size_t)(h / 2) * stride + (size_t)(w / 2) * 4 + 3]);
     [self drawCursor];
 }
@@ -2836,25 +2843,40 @@ static const uint8_t *half_to_byte(void) {
     return 1.0f;
 }
 
-/* Puts back what the pointer covered, and draws it where the shared page says it is now. */
+/* Puts back what the pointer covered, and draws it where the shared page says it is now. Every field of the
+   pointer image (cursor and its geometry, the shown flag, cursor_tex for the presenter) sits behind screen_lock,
+   so this reads them under it, and keeps holding it through the blit: cursorGlyph frees the replaced image only
+   after installing the next one under the same lock, so an image read here cannot be freed while it is in use.
+   hasDisplayLayer and screenChanged take the lock themselves, so they stay outside. This is the software path
+   only; with a display layer the presenter draws the pointer on the GPU from the copy it took under the lock. */
 - (void)drawCursor {
     if ([self hasDisplayLayer]) {
         [self screenChanged];
         return;
     }
-    if (!frame || !base) return;
+    os_unfair_lock_lock(&screen_lock);
+    if (!frame || !base) {
+        os_unfair_lock_unlock(&screen_lock);
+        return;
+    }
     uint32_t w = frame_w, h = frame_h;
     for (int y = drawn_y; y < drawn_y + drawn_h; y++) memcpy(frame + (size_t)y * w * 4 + (size_t)drawn_x * 4, base + (size_t)y * w * 4 + (size_t)drawn_x * 4, (size_t)drawn_w * 4);
     drawn_w = drawn_h = 0;
     const uint8_t *page = hv_pvg_lite_display_page(lite);
-    if (!page || !cursor || !(cursor_shown || page[0xe04])) return;
+    if (!page || !cursor || !(cursor_shown || page[0xe04])) {
+        os_unfair_lock_unlock(&screen_lock);
+        return;
+    }
     uint32_t where = __atomic_load_n((const uint32_t *)(page + 0xe00), __ATOMIC_ACQUIRE);
     if (getenv("HV_PVG_CURSOR_LOG")) {
         static uint32_t last;
         if (where != last) fprintf(stderr, "pvgcursor at %u,%u shown %d flag %d\n", where & 0xffff, where >> 16, cursor_shown, page[0xe04]);
         last = where;
     }
-    if (where == 0xffffffff) return;
+    if (where == 0xffffffff) {
+        os_unfair_lock_unlock(&screen_lock);
+        return;
+    }
     /* At the size -cursorScale says. The hot spot stays where it points. The presenter
        keeps cursor_scale_live current; before it has run, -cursorScale itself answers. */
     const float scale = cursor_scale_live > 0 ? cursor_scale_live : [self cursorScale];
@@ -2866,7 +2888,10 @@ static const uint8_t *half_to_byte(void) {
     int cw = (int)lround(cursor_w * scale), ch = (int)lround(cursor_h * scale);
     int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
     int x1 = x + cw > (int)w ? (int)w : x + cw, y1 = y + ch > (int)h ? (int)h : y + ch;
-    if (x1 <= x0 || y1 <= y0) return;
+    if (x1 <= x0 || y1 <= y0) {
+        os_unfair_lock_unlock(&screen_lock);
+        return;
+    }
     for (int py = y0; py < y1; py++) {
         const uint8_t *row = cursor + (size_t)((py - y) / scale) * cursor_stride;
         uint8_t *dst = frame + (size_t)py * w * 4 + (size_t)x0 * 4;
@@ -2879,6 +2904,7 @@ static const uint8_t *half_to_byte(void) {
         }
     }
     drawn_x = x0, drawn_y = y0, drawn_w = x1 - x0, drawn_h = y1 - y0;
+    os_unfair_lock_unlock(&screen_lock);
 }
 
 static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
@@ -3491,12 +3517,16 @@ void hv_pvg_metal_destroy(HvPvgMetal *m) {
             [wb_unmapping removeAllObjects];
             os_unfair_lock_unlock(&wb_lock);
             r->screen_tex = nil;
-            r->cursor_tex = nil;
             r->last_cb = nil;
             r->readback = r->test_readback = nil;
             free(r->frame); r->frame = NULL;
             free(r->base); r->base = NULL;
+            /* The presenter is drained by now, but hv_pvg_metal_cursor can read the image from another
+               thread: drop it under the lock, as its readers hold the lock while they touch the bytes. */
+            os_unfair_lock_lock(&r->screen_lock);
+            r->cursor_tex = nil;
             free(r->cursor); r->cursor = NULL;
+            os_unfair_lock_unlock(&r->screen_lock);
             for (NSValue *old in r->retired_frames) free(old.pointerValue);
             r->retired_frames = nil;
             free(cp.pend_src); cp.pend_src = NULL;
