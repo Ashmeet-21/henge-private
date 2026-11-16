@@ -739,12 +739,20 @@ static void move_now(void *ctx) {
     hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
 }
 
+/* A button or wheel report must say "no motion" too: macOS's virtio mouse keeps the last value of an axis a report
+   leaves out, so the pointer moved by the previous amount again (it drifted while a page scrolled). */
+static void zero_motion(void) {
+    hv_virtio_input_send(board.mouse, HV_EV_REL, HV_REL_X, 0);
+    hv_virtio_input_send(board.mouse, HV_EV_REL, HV_REL_Y, 0);
+}
+
 static void left_update(void) {
     int down = left_user || left_click;
     if (down == left_sent) return;
     left_sent = down;
     if (down) virtio_buttons |= 1 << 0;
     else virtio_buttons &= ~(1 << 0);
+    zero_motion();
     hv_virtio_input_send(board.mouse, HV_EV_KEY, HV_BTN_LEFT, down);
     hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
 }
@@ -770,6 +778,7 @@ static void button_now(void *ctx) {
     } else if (button == 2) {
         if (down) virtio_buttons |= 1 << 2;
         else virtio_buttons &= ~(1 << 2);
+        zero_motion();
         hv_virtio_input_send(board.mouse, HV_EV_KEY, HV_BTN_MIDDLE, down);
         hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
     }
@@ -786,6 +795,7 @@ static void release_virtio_now(void *ctx) {
     left_update();
     if (virtio_buttons & (1 << 2)) {
         virtio_buttons &= ~(1 << 2);
+        zero_motion();
         hv_virtio_input_send(board.mouse, HV_EV_KEY, HV_BTN_MIDDLE, 0);
         hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
     }
@@ -881,6 +891,7 @@ static void wheel_now(void *ctx) {
     }
     while (amount) {
         int piece = amount > 100 ? 100 : amount < -100 ? -100 : amount;
+        zero_motion();
         hv_virtio_input_send(board.mouse, HV_EV_REL, axis, piece);
         hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
         amount -= piece;
