@@ -98,7 +98,10 @@ HvInsnKind hv_classify(uint32_t insn) {
     if ((op0 & 0xe) == 0xa) return classify_branch_group(insn); /* 101x */
     if ((op0 & 0x5) == 0x4) return classify_memory(insn);       /* x1x0 */
     if ((op0 & 0x7) == 0x5) return classify_dp_register(insn);  /* x101 */
-    if ((op0 & 0x7) == 0x7) return HV_INSN_COPY;                /* x111: SIMD and FP */
+    /* x111: SIMD and FP, copied as they are. Its op0 (bits 31..28) 1111 is unallocated: a word with 0xfe or 0xff on
+       top is undefined, and copied it is undefined on the host, which kills the whole machine. Those are what an
+       opaque pixel (0xffRRGGBB) looks like, so a block made from a page of pixels ends up full of them. */
+    if ((op0 & 0x7) == 0x7) return insn >> 25 == 0x7f ? HV_INSN_UNDEFINED : HV_INSN_COPY;
     return HV_INSN_UNDEFINED;
 }
 
