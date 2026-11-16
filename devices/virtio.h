@@ -54,6 +54,7 @@ void hv_virtio_init(HvVirtio *v, HvMachine *m, int device_id, uint32_t class_cod
 
 /* 1 and an element if the driver made one available, 0 if not, -1 if the ring is broken. */
 int hv_virtq_pop(HvVirtio *v, int q, HvVirtqElem *e);
+int hv_virtq_pop_ok(HvVirtio *v, int q, HvVirtqElem *e); /* broken chains given back empty: 1 or 0 */
 void hv_virtq_push(HvVirtio *v, int q, const HvVirtqElem *e, uint32_t written);
 void hv_virtio_interrupt(HvVirtio *v);
 /* The device's config changed (a new value the driver should read): ISR bit 1 and a new generation. */

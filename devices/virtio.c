@@ -232,6 +232,21 @@ int hv_virtq_pop(HvVirtio *v, int qi, HvVirtqElem *e) {
     return -1;
 }
 
+/* hv_virtq_pop for devices with no error status to write: a broken chain is already taken from the ring, so it is
+   given back empty (or the guest waits on that buffer for good) and the next one is taken. 1 or 0, never -1. */
+int hv_virtq_pop_ok(HvVirtio *v, int qi, HvVirtqElem *e) {
+    for (;;) {
+        int got = hv_virtq_pop(v, qi, e);
+        if (got >= 0) return got;
+        static int said;
+        if (said++ < 10)
+            fprintf(stderr, "virtio %04x q%d: broken chain (head %u), given back empty\n", v->pci.config[2] | v->pci.config[3] << 8, qi, e->head);
+        e->nseg = 0;
+        hv_virtq_push(v, qi, e, 0);
+        hv_virtio_interrupt(v);
+    }
+}
+
 void hv_virtq_push(HvVirtio *v, int qi, const HvVirtqElem *e, uint32_t written) {
     HvVirtq *q = &v->q[qi];
     if (e->head >= q->size || !q->out[e->head]) {

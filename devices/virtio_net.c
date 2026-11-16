@@ -16,9 +16,9 @@ static void notify(HvVirtio *v, int q) {
     static HvVirtqElem e;
     static uint8_t frame[MAX_FRAME];
     int any = 0;
-    while (hv_virtq_pop(v, q, &e) > 0) {
+    while (hv_virtq_pop_ok(v, q, &e) > 0) {
         uint32_t len = hv_virtq_read(v, &e, HDR_LEN, frame, sizeof frame);
-        if (n->transmit) n->transmit(n->opaque, frame, len);
+        if (n->transmit && len) n->transmit(n->opaque, frame, len); /* header only = nothing to send */
         n->tx_frames++;
         hv_virtq_push(v, q, &e, 0);
         any = 1;
@@ -29,7 +29,7 @@ static void notify(HvVirtio *v, int q) {
 static int push_rx(HvVirtioNet *n, const uint8_t *frame, uint32_t len, int *notify) {
     HvVirtio *v = &n->vio;
     static HvVirtqElem e;
-    if (!(v->status & 4) || !v->q[RXQ].enabled || hv_virtq_pop(v, RXQ, &e) <= 0) return 0;
+    if (!(v->status & 4) || !v->q[RXQ].enabled || hv_virtq_pop_ok(v, RXQ, &e) <= 0) return 0;
     if (hv_virtq_writable(&e) < HDR_LEN + len) { /* too small for it: drop the frame, return the buffer */
         hv_virtq_push(v, RXQ, &e, 0);
         *notify = 1;
@@ -63,6 +63,7 @@ int hv_virtio_net_receive_batch(HvVirtioNet *n, const uint8_t *const *frames,
 
 HvVirtioNet *hv_virtio_net_create(HvMachine *m, HvPcie *bus, const uint8_t mac[6]) {
     HvVirtioNet *n = calloc(1, sizeof *n);
+    if (!n) return NULL;
     HvVirtio *v = &n->vio;
     hv_virtio_init(v, m, 1, 0x020000, 2, F_MAC | F_STATUS);
     v->dev = n;

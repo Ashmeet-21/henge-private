@@ -113,8 +113,13 @@ static void do_root(HvPvgLite *p) {
     uint64_t buf = (uint64_t)reg(p, 0x1030) << 14;
     uint32_t off = reg(p, 0x1010), size = reg(p, 0x1004), wp = reg(p, 0x1008);
     if (!buf || size <= off) return;
-    uint32_t ring = size - off;
+    uint32_t ring = size - off, used = 0;
     while (p->root_rp != wp) {
+        if (used > ring) { /* more than a whole ring in one go: the write pointer is not on a command, stop */
+            fprintf(stderr, "hengevm: pvg-lite: root write pointer %x is not on a command, skipped to it\n", wp);
+            p->root_rp = wp;
+            break;
+        }
         uint32_t at = p->root_rp % ring, hdr[3];
         for (int i = 0; i < 3; i++) {
             uint32_t *w = guest32(p, buf + off + (at + 4u * i) % ring);
@@ -140,6 +145,7 @@ static void do_root(HvPvgLite *p) {
             }
         }
         p->root_rp += hdr[1];
+        used += hdr[1];
         uint32_t *stamp = guest32(p, buf);
         if (stamp) __atomic_store_n(stamp, hdr[2], __ATOMIC_RELEASE);
     }
@@ -460,7 +466,10 @@ static void tally_buffer(HvPvgLite *p, uint32_t task, uint64_t off, uint64_t len
                 uint32_t *t1 = t0[0] ? hv_phys_ptr(p->m, (uint64_t)(t0[0] & 0x7fffffff) << 14, 0x4000) : NULL;
                 if (t1) {
                     fprintf(stderr, " leaf[%llx]:", (unsigned long long)(off >> 14));
-                    for (int i = -2; i < 4; i++) fprintf(stderr, " %x", t1[(off >> 14) + i]);
+                    for (int i = -2; i < 4; i++) { /* only entries inside the 4096-entry table page */
+                        int64_t k = (int64_t)(off >> 14) + i;
+                        if (k >= 0 && k < 4096) fprintf(stderr, " %x", t1[k]);
+                    }
                 }
                 fprintf(stderr, "\n");
             }
@@ -676,8 +685,12 @@ static void do_channel(HvPvgLite *p, uint32_t ch) {
         p->submitted[ch] = hdr[2];
         if (p->metal) {
             uint32_t *copy = malloc(hdr[1]);
-            ring_read(p, table, size, rd, copy, hdr[1]);
-            hv_pvg_metal_submit(p->metal, p, ch, copy, hdr[1]);
+            if (copy) {
+                ring_read(p, table, size, rd, copy, hdr[1]);
+                hv_pvg_metal_submit(p->metal, p, ch, copy, hdr[1]);
+            } else {
+                fprintf(stderr, "hengevm: pvg-lite: channel %u: no memory for a %u-byte command, skipped\n", ch, hdr[1]);
+            }
         } else {
             last = hdr[2], any = 1;
         }
@@ -768,6 +781,7 @@ static void vblank(HvPvgLite *p) {
     uint64_t now = mach_absolute_time();
     if (now < next) return;
     next = now + period;
+    p->vblanks++;
     __atomic_store_n((uint64_t *)(d + 0x68), now - p->m->cntvoff, __ATOMIC_RELEASE); /* the guest's own clock */
 }
 

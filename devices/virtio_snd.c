@@ -298,7 +298,7 @@ static void take_tx(HvVirtioSnd *d) {
     HvVirtio *v = &d->vio;
     if (!(v->status & 4) || !v->q[TXQ].enabled) return;
     while (d->ptail - d->phead < HV_VSND_PENDING) {
-        if (hv_virtq_pop(v, TXQ, &d->pending[d->ptail % HV_VSND_PENDING]) <= 0) break;
+        if (hv_virtq_pop_ok(v, TXQ, &d->pending[d->ptail % HV_VSND_PENDING]) <= 0) break;
         d->ptail++;
     }
     fill_ring(d);
@@ -313,7 +313,7 @@ void hv_virtio_snd_poll(HvVirtioSnd *d) {
     if ((v->status & 4) && v->q[RXQ].enabled) {
         while (d->capture.tail - d->capture.head < HV_VSND_PENDING) {
             HvVirtqElem *e = &d->capture.pending[d->capture.tail % HV_VSND_PENDING];
-            if (hv_virtq_pop(v, RXQ, e) <= 0) break;
+            if (hv_virtq_pop_ok(v, RXQ, e) <= 0) break;
             uint32_t stream = UINT32_MAX;
             hv_virtq_read(v, e, 0, &stream, 4);
             uint32_t room = hv_virtq_writable(e), frame = d->capture.frame_bytes;
@@ -372,7 +372,9 @@ void hv_virtio_snd_poll(HvVirtioSnd *d) {
         hv_virtq_write(v, e, d->capture.offset, pcm, frames * bytes);
         d->capture.offset += frames * bytes;
         d->capture.delivered += frames;
-        if (d->capture.offset == room - 8) {
+        /* No room for another frame: done. Not "== room - 8": a buffer queued before the format changed (S16 to S32)
+           need not hold whole frames, and would get 0 frames here forever, looping under capture_mu. */
+        if (room - 8 - d->capture.offset < bytes) {
             uint32_t st[2] = {S_OK, (uint32_t)(d->capture.written - d->capture.consumed) * bytes};
             hv_virtq_write(v, e, room - 8, st, 8);
             hv_virtq_push(v, RXQ, e, room);
@@ -441,7 +443,7 @@ static void notify(HvVirtio *v, int q) {
     static HvVirtqElem e;
     if (q == CTLQ) {
         int any = 0;
-        while (hv_virtq_pop(v, q, &e) > 0) {
+        while (hv_virtq_pop_ok(v, q, &e) > 0) {
             hv_virtq_push(v, q, &e, control(d, &e));
             any = 1;
         }

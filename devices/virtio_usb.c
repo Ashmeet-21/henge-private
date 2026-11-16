@@ -64,7 +64,7 @@ static void drain_responses(HvVirtioUsb *d) {
     HvVirtio *v = &d->vio;
     static HvVirtqElem e;
     int any = 0;
-    while (hv_virtq_pop(v, RSPQ, &e) > 0) {
+    while (hv_virtq_pop_ok(v, RSPQ, &e) > 0) {
         uint32_t total = 0;
         for (int s = 0; s < e.nseg; s++)
             if (!e.seg[s].write) total += e.seg[s].len;
@@ -90,13 +90,14 @@ static void deliver_requests(HvVirtioUsb *d) {
     pthread_mutex_lock(&d->mu);
     while (d->out_head != d->out_tail) {
         HvVusbMsg *m = &d->out[d->out_head % HV_VUSB_RING];
-        int r = hv_virtq_pop(v, REQQ, &e);
+        int r = hv_virtq_pop_ok(v, REQQ, &e);
         if (r <= 0) break;
         uint32_t room = hv_virtq_writable(&e), payload = m->data ? m->len : 0;
         if (room < 6 + payload) {
             /* The guest sizes its buffers for the largest transfer it takes;
-               a request that does not fit would be cut, so say so loudly. */
-            fprintf(stderr, "virtio-usb: request ep %#x len %u does not fit a %u-byte buffer\n", m->ep, m->len, room);
+               a request that does not fit would be cut, so say so (first 20 times, not every request). */
+            static int said;
+            if (said++ < 20) fprintf(stderr, "virtio-usb: request ep %#x len %u does not fit a %u-byte buffer\n", m->ep, m->len, room);
         }
         uint8_t hdr[6];
         memcpy(hdr, &m->len, 4);

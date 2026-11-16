@@ -144,7 +144,7 @@ struct SettingsView: View {
                 .listRowBackground(Desk.card)
                 Section("Mac Apps") {
                     Toggle("Mac apps without macOS", isOn: $macApps)
-                    Text("Bring in a .dmg or an .app (the + button on Home) and run it inside Henge through its own translation layer, without starting a Mac. Programs without windows run today; apps with windows don't yet. Experimental.")
+                    Text("Bring in a .dmg or an .app (the + button on Home) and run it inside Henge through its own translation layer, without starting a Mac. Command-line programs and some apps with windows run; many apps still fail. Experimental.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 .listRowBackground(Desk.card)

@@ -92,14 +92,16 @@ static int handle(HvVirtioBlk *b, HvVirtqElem *e, uint32_t *written) {
     if (wlen < 1 || hv_virtq_read(v, e, 0, &hdr, sizeof hdr) != sizeof hdr) return -1;
     uint32_t data = wlen - 1; /* the status byte is the last writable one */
     uint8_t status = S_OK;
+    /* sector * 512 must not wrap: a wrapped offset passes the disk's bounds check and lands somewhere else */
+    int wraps = hdr.sector > UINT64_MAX / 512;
     switch (hdr.type) {
     case T_IN:
-        if (seg_io(b, e, 1, 0, hdr.sector * 512, data) != 0) status = S_IOERR;
+        if (wraps || seg_io(b, e, 1, 0, hdr.sector * 512, data) != 0) status = S_IOERR;
         else *written = data;
         break;
     case T_OUT: {
         uint32_t rlen = readable(e);
-        if (rlen < sizeof hdr || seg_io(b, e, 0, sizeof hdr, hdr.sector * 512, rlen - (uint32_t)sizeof hdr) != 0)
+        if (wraps || rlen < sizeof hdr || seg_io(b, e, 0, sizeof hdr, hdr.sector * 512, rlen - (uint32_t)sizeof hdr) != 0)
             status = S_IOERR;
         break;
     }

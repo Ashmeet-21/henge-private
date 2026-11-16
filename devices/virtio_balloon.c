@@ -49,7 +49,10 @@ static void handle(HvVirtioBalloon *b, const HvVirtqElem *e, int inflate) {
     uint32_t n = bytes / 4;
     int whole_pages = 1; /* every page number is the first quarter of a host page */
     for (uint32_t i = 0; i < n; i++)
-        if (pfn[i] & 3) { whole_pages = 0; break; }
+        if (pfn[i] & 3) { whole_pages = 0; b->saw_quarters = 1; break; }
+    /* A short list of 4 KB numbers can be all quarter 0 by chance: giving back the whole 16 KB page would wipe
+       three quarters the guest still uses. So trust it only with 4+ numbers and no 4 KB list seen before. */
+    if (n < 4 || b->saw_quarters) whole_pages = 0;
     if (!b->told_pattern && n) {
         b->told_pattern = 1;
         fprintf(stderr, "hengevm: balloon: the guest lists %s (first %u: %x %x %x %x)\n",
@@ -88,7 +91,7 @@ static void notify(HvVirtio *v, int q) {
     if (q != INFLATEQ && q != DEFLATEQ) return;
     static HvVirtqElem e;
     int any = 0, r;
-    while ((r = hv_virtq_pop(v, q, &e)) > 0) {
+    while ((r = hv_virtq_pop_ok(v, q, &e)) > 0) {
         handle(b, &e, q == INFLATEQ);
         hv_virtq_push(v, q, &e, 0);
         any = 1;

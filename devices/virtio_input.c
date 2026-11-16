@@ -86,11 +86,13 @@ static void config_write(HvVirtio *v, uint32_t off, uint64_t val, unsigned size)
 
 /* The status queue carries LED changes: hand the buffers straight back. */
 static void notify(HvVirtio *v, int q) {
-    if (getenv("HV_INPUT_LOG")) fprintf(stderr, "virtio-input %s: notify queue %d\n", ((HvVirtioInput *)v->dev)->kind == HV_VINPUT_KEYBOARD ? "keyboard" : "mouse", q);
+    static int log = -1; /* read once: this runs on every buffer the guest posts */
+    if (log < 0) log = getenv("HV_INPUT_LOG") != NULL;
+    if (log) fprintf(stderr, "virtio-input %s: notify queue %d\n", ((HvVirtioInput *)v->dev)->kind == HV_VINPUT_KEYBOARD ? "keyboard" : "mouse", q);
     if (q != STATUSQ) return; /* new event buffers: delivered at the next poll */
     static HvVirtqElem e;
     int any = 0;
-    while (hv_virtq_pop(v, q, &e) > 0) {
+    while (hv_virtq_pop_ok(v, q, &e) > 0) {
         hv_virtq_push(v, q, &e, 0);
         any = 1;
     }
@@ -120,14 +122,13 @@ void hv_virtio_input_poll(HvVirtioInput *d) {
     int any = 0;
     pthread_mutex_lock(&d->mu);
     while (d->head != d->tail) {
-        if (hv_virtq_pop(v, EVENTQ, &e) <= 0) break; /* no buffer posted: keep it for later */
+        if (hv_virtq_pop_ok(v, EVENTQ, &e) <= 0) break; /* no buffer posted: keep it for later */
         uint32_t i = d->head++ % HV_VINPUT_RING;
         uint8_t ev[8];
         memcpy(ev, &d->ring[i].type, 2);
         memcpy(ev + 2, &d->ring[i].code, 2);
         memcpy(ev + 4, &d->ring[i].value, 4);
-        hv_virtq_write(v, &e, 0, ev, 8);
-        hv_virtq_push(v, EVENTQ, &e, 8);
+        hv_virtq_push(v, EVENTQ, &e, hv_virtq_write(v, &e, 0, ev, 8)); /* bytes really written */
         d->delivered++;
         any = 1;
     }
@@ -137,6 +138,7 @@ void hv_virtio_input_poll(HvVirtioInput *d) {
 
 HvVirtioInput *hv_virtio_input_create(HvMachine *m, HvPcie *bus, int kind) {
     HvVirtioInput *d = calloc(1, sizeof *d);
+    if (!d) return NULL;
     HvVirtio *v = &d->vio;
     hv_virtio_init(v, m, 18, 0x098000, 2, 0); /* input device, "other" subclass */
     v->dev = d;

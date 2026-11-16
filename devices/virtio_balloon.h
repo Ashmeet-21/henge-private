@@ -21,6 +21,7 @@ typedef struct HvVirtioBalloon {
     /* Counters (16 KB host pages unless said otherwise) */
     uint64_t inflated_pfns, deflated_pfns, given_back, taken_back, partial, out_of_ram, failed;
     int told_pattern;
+    int saw_quarters; /* some list had a 4 KB quarter other than 0: the guest thinks in 4 KB pages */
 } HvVirtioBalloon;
 
 /* ram_fd: the guest RAM's file, or -1 for anonymous memory. */

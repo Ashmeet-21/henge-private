@@ -443,15 +443,15 @@ static void test_virtio_balloon(void) {
     check("given-back page's end reads zero", rd32(pages + 0x3ffc), 0);
     check("kept page keeps its bytes", rd8(pages + 0x4000), 0x5a);
     check("third page reads zero", rd32(pages + 0x8000), 0);
-    /* a driver that lists one page number per 16 KB page (quarter 0 only) */
+    /* quarter-0 numbers from a driver already seen listing 4 KB pages: they may be lone 4 KB pages, so kept */
     memset(ram(pages + 0xc000), 0x77, 2 * 0x4000);
     uint32_t whole[2] = {p0 + 12, p0 + 16};
     put_pfns(list, whole, 2);
     put_desc(inq, 1, list, 8, 0, 0);
     offer(inq, 1);
     wr16(bar + 0x3000, 0);
-    check("one number per 16 KB page: both given back", b->given_back, 4);
-    check("...and read zero", rd8(pages + 0x10000) | rd8(pages + 0xc000), 0);
+    check("4 KB driver, quarter-0 numbers: nothing more given back", b->given_back, 2);
+    check("...and the bytes stay", rd8(pages + 0x10000) & rd8(pages + 0xc000), 0x77);
     /* the driver says how much it holds */
     wr32(bar + 0x2000 + 4, 256);
     check("actual read back", hv_virtio_balloon_actual(b), 1 << 20);
@@ -469,11 +469,18 @@ static void test_virtio_balloon(void) {
     int aslot = (int)find_slot(0x1af4, 0x1045, 1);
     uint64_t abar = VMAPPLE_PCIE_MMIO + 0x380000;
     uint64_t aring = setup_virtio(aslot, abar, VMAPPLE_MEM + 0x1100000);
-    put_pfns(list + 0x1000, pfn, 4);
+    /* a fresh driver listing one number per 16 KB page (4+ numbers, quarter 0 only): all given back */
+    uint32_t per16[4] = {p0 + 12, p0 + 16, p0 + 20, p0 + 24};
+    put_pfns(list + 0x1000, per16, 4);
     put_desc(aring, 0, list + 0x1000, 16, 0, 0);
     offer(aring, 0);
     wr16(abar + 0x3000, 0);
-    check("anonymous: page given back", a->given_back, 1);
+    check("one number per 16 KB page: all four given back", a->given_back, 4);
+    put_pfns(list + 0x1000, pfn, 4);
+    put_desc(aring, 1, list + 0x1000, 16, 0, 0);
+    offer(aring, 1);
+    wr16(abar + 0x3000, 0);
+    check("anonymous: page given back", a->given_back, 5);
     check("anonymous: madvise did not fail", a->failed, 0);
 }
 
