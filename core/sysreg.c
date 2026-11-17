@@ -371,8 +371,10 @@ void hv_tlbi_apply(HvCpu *cpu, uint32_t op1, uint32_t crn, uint32_t crm, uint32_
             }
         } else {
             uint64_t first = va & ~((1ull << HV_TLB_PAGE_BITS) - 1);
-            for (uint64_t p = first; p < va + len; p += 1ull << HV_TLB_PAGE_BITS)
-                hv_tlb_flush_va_asid(cpu, p, all_asids ? -1 : (int)(xt >> 48));
+            /* Counted, not "p < va + len": a range ending at the top of the VA space wraps va + len to 0. */
+            uint64_t n = ((va + len - 1 - first) >> HV_TLB_PAGE_BITS) + 1;
+            for (uint64_t i = 0; i < n; i++)
+                hv_tlb_flush_va_asid(cpu, first + (i << HV_TLB_PAGE_BITS), all_asids ? -1 : (int)(xt >> 48));
         }
         return;
     }

@@ -244,14 +244,14 @@ final class HIDPPMouse {
     /// The root feature (index 0), function 0: a feature's index, 0 when the mouse lacks it.
     private func feature(_ id: Feature, then: @escaping (UInt8) -> Void) {
         request(0, 0, [UInt8(id.rawValue >> 8), UInt8(id.rawValue & 0xFF)]) { reply in
-            then(reply.map { $0[0] } ?? 0)
+            then(reply?.first ?? 0)
         }
     }
 
     private func listControls() {
         guard reprogIndex != 0 else { return setUpWheels() }
         request(reprogIndex, 0, []) { [self] reply in
-            let count = Int(reply?[0] ?? 0)
+            let count = Int(reply?.first ?? 0)
             controls.removeAll()
             readControl(0, of: count)
         }

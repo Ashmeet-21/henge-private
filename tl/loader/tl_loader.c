@@ -213,6 +213,7 @@ static uint64_t missing_stub(const char *name) {
     char *copy = strdup(name);
     if (g_nmissing < (int)(sizeof g_missing / sizeof *g_missing)) g_missing[g_nmissing++] = copy;
     TlMissing *rec = calloc(1, sizeof *rec);
+    if (!rec) return 0;
     rec->name = copy;
     uint32_t *p = stub_alloc(32);
     if (!p) return 0;
@@ -268,10 +269,12 @@ static int pick_slice(TlImage *im, char *err, size_t errlen) {
         int swap = magic == FAT_CIGAM || magic == FAT_CIGAM_64, wide = magic == FAT_CIGAM_64 || magic == FAT_MAGIC_64;
         const struct fat_header *fh = (const void *)m;
         uint32_t n = swap ? OSSwapInt32(fh->nfat_arch) : fh->nfat_arch;
+        size_t arch_size = wide ? sizeof(struct fat_arch_64) : sizeof(struct fat_arch);
         int saw_arm64e = 0, saw_x86 = 0;
         for (uint32_t i = 0; i < n; i++) {
             uint32_t cpu, sub;
             uint64_t off, size;
+            if (sizeof *fh + (uint64_t)(i + 1) * arch_size > im->maplen) break; /* the arch table runs past the file */
             if (wide) {
                 const struct fat_arch_64 *a = (const void *)(m + sizeof *fh + i * sizeof(struct fat_arch_64));
                 cpu = swap ? OSSwapInt32(a->cputype) : a->cputype;
@@ -322,6 +325,12 @@ static int pick_slice(TlImage *im, char *err, size_t errlen) {
 static int parse(TlImage *im, char *err, size_t errlen) {
     if (pick_slice(im, err, errlen)) return -1;
     im->fmh = (const void *)im->slice;
+    /* The header and its load commands must lie inside the slice (a fat slice is not checked for its magic above). */
+    if (im->slicelen < sizeof(struct mach_header_64) || im->fmh->magic != MH_MAGIC_64 ||
+        sizeof(struct mach_header_64) + (uint64_t)im->fmh->sizeofcmds > im->slicelen) {
+        set_err(err, errlen, "%s: damaged Mach-O header", im->path);
+        return -1;
+    }
     if (im->fmh->filetype != MH_EXECUTE && im->fmh->filetype != MH_DYLIB && im->fmh->filetype != MH_BUNDLE) {
         set_err(err, errlen, "%s: unsupported Mach-O type %u", im->path, im->fmh->filetype);
         return -1;
@@ -2941,11 +2950,11 @@ static void *rt_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t 
     }
     /* TL_ROOM_ONLY=1 (a test switch for Mac runs): no room for large reservations outside the held room, as on the
        phone once Chromium has started. */
-    int room_only = g_host && g_host->high_rooms && getenv("TL_ROOM_ONLY") && len >= ((size_t)256 << 20) && prot == PROT_NONE &&
-                    (flags & MAP_ANON) && !(flags & MAP_FIXED);
+    int room_only = g_host && g_host->high_rooms && len >= ((size_t)256 << 20) && prot == PROT_NONE &&
+                    (flags & MAP_ANON) && !(flags & MAP_FIXED) && getenv("TL_ROOM_ONLY");
     /* ... and, as iOS does, no mapping hinted past the end of the 64 GB (the lowest held block + 64 GB). */
-    int past_end = g_host && g_host->high_rooms && getenv("TL_ROOM_ONLY") && addr && !(flags & MAP_FIXED) &&
-                   (uint8_t *)addr >= (uint8_t *)g_host->high_room[0] + ((size_t)64 << 30);
+    int past_end = g_host && g_host->high_rooms && addr && !(flags & MAP_FIXED) &&
+                   (uint8_t *)addr >= (uint8_t *)g_host->high_room[0] + ((size_t)64 << 30) && getenv("TL_ROOM_ONLY");
     void *r = room_only || past_end ? (errno = ENOMEM, MAP_FAILED) : mmap(addr, len, prot, flags, fd, off);
     if (r == MAP_FAILED && addr && !(flags & MAP_FIXED) && errno == ENOMEM && !room_only) {
         /* A hint is only a hint (macOS places the mapping elsewhere); iOS fails a mapping hinted past its 64 GB, and

@@ -41,7 +41,7 @@ void hv_flush_blocks(HvMachine *m) {
     if (m->main_ram && m->main_ram->code_hash) hv_code_check_all(m);
     m->stats.block_flushes++;
     __atomic_add_fetch(&m->jit_gen, 1, __ATOMIC_SEQ_CST);
-    reset_retrans();
+    if (m->stats_interval) reset_retrans(); /* only --stats fills them; 4 MB of BSS otherwise left untouched */
     for (int i = 0; i < m->ncpus; i++)
         if (m->cpus[i]) {
             hv_ijc_reset(m->cpus[i], 0);
@@ -88,7 +88,7 @@ void hv_evict_blocks(HvMachine *m) {
     const uint32_t *lo = r->base + (size_t)seg * r->seg_words, *hi = lo + r->seg_words;
 #define GONE(p) ((const uint32_t *)(uintptr_t)(p) >= lo && (const uint32_t *)(uintptr_t)(p) < hi)
     m->stats.evictions++;
-    reset_retrans();
+    if (m->stats_interval) reset_retrans();
     for (int i = 0; i < m->ncpus; i++)
         if (m->cpus[i]) {
             hv_ijc_reset(m->cpus[i], 0);
@@ -667,7 +667,7 @@ static void follow_qos(void) {
    if nothing happened. */
 static int wait_for_interrupt(HvCpu *cpu) {
     HvMachine *m = cpu->m;
-    uint64_t deadline = m->tick ? m->tick(m, cpu) : 0;
+    uint64_t deadline = m->tick ? (cpu->timer_due = m->tick(m, cpu)) : 0; /* as the run loop's ticks do */
     HvPerCpu *p = cpu->pc_state;
     if (p->irq_line || p->fiq_line) return 0;
     if (!m->tick) return -1; /* nothing could ever wake us */
@@ -712,7 +712,9 @@ static int wait_for_interrupt(HvCpu *cpu) {
     hv_big_lock(m);
     m->stats.wfi++;
     m->stats.wfi_ticks += mach_absolute_time() - t0;
-    m->tick(m, cpu);
+    /* Keep the deadline: a stale, passed one made fast_resume refuse and the run loop tick again (on CPU 0, the
+       device lock and every device poll) until its next tick. */
+    cpu->timer_due = m->tick(m, cpu);
     return 0;
 }
 

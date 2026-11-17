@@ -98,16 +98,16 @@ int hv_vm_boot_display(HvBootDisplay *d) {
                 if (h[0] < 2 || h[0] > 3 || h[1] < 1 || h[1] > 3) continue; /* boot_args: revision, version */
                 if (q[1] >> 40 != 0xfffffe || q[2] < VMAPPLE_MEM || q[2] >= VMAPPLE_MEM + size || q[3] == 0 || q[3] > size) continue;
                 uint64_t base = q[5], row = q[7], w = q[8], hh = q[9], depth = q[10];
-                if (w < 320 || w > 8192 || hh < 200 || hh > 8192 || row < w * 4 || (depth & 0xff) != 32) continue;
-                if (base < VMAPPLE_MEM || base - VMAPPLE_MEM + row * hh > size) continue;
+                if (w < 320 || w > 8192 || hh < 200 || hh > 8192 || row < w * 4 || row > 65536 || (depth & 0xff) != 32) continue;
+                if (base < VMAPPLE_MEM || base - VMAPPLE_MEM > size || base - VMAPPLE_MEM + row * hh > size) continue;
                 boot_args_offset = off;
             }
         }
         if (!boot_args_offset) return -1;
         const uint64_t *q = (const uint64_t *)(ram + boot_args_offset);
         uint64_t base = q[5], row = q[7], w = q[8], hh = q[9];
-        if (q[1] >> 40 == 0xfffffe && w >= 320 && w <= 8192 && hh >= 200 && hh <= 8192 && base >= VMAPPLE_MEM &&
-            base - VMAPPLE_MEM + row * hh <= size) {
+        if (q[1] >> 40 == 0xfffffe && w >= 320 && w <= 8192 && hh >= 200 && hh <= 8192 && row >= w * 4 && row <= 65536 &&
+            base >= VMAPPLE_MEM && base - VMAPPLE_MEM <= size && base - VMAPPLE_MEM + row * hh <= size) {
             d->pixels = ram + (base - VMAPPLE_MEM);
             d->width = (uint32_t)w, d->height = (uint32_t)hh, d->stride = (uint32_t)row;
             return 0;
@@ -472,6 +472,8 @@ void hv_vm_destroy(void) {
     atomic_store_explicit(&display_pvg, NULL, memory_order_release);
     os_unfair_lock_unlock(&display_lock);
     stop_pointer();
+    hv_dt_fixup_join(); /* the scan thread reads guest RAM: done before the board frees it */
+    dt_fixup_on = 0;
     hv_net_detach();
     net_on = 0;
     hv_audio_detach();

@@ -270,6 +270,7 @@ static const uint8_t *chunk_data(TlDisk *d, long index) {
     for (int i = 1; i < CACHE_SLOTS; i++)
         if (d->cache[i].used < d->cache[slot].used) slot = i;
     const Chunk *c = &d->chunks[index];
+    if (c->count > ((uint64_t)256 << 20) / 512) return NULL; /* real compressed chunks are about 1 MB; a damaged count would overflow */
     size_t need = (size_t)c->count * 512;
     if (d->cache[slot].cap < need) {
         free(d->cache[slot].data);

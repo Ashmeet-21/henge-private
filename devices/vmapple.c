@@ -247,6 +247,12 @@ static uint64_t tick(HvMachine *m, HvCpu *cpu) {
     return deadline;
 }
 
+/* A guest timer register write: only that CPU's timer needs updating (the GIC's lock, as CPUs 1-3 already do).
+   The device polls stay on the run loop's ticks, not on every timer write. */
+static uint64_t timer_tick(HvMachine *m, HvCpu *cpu) {
+    return hv_timer_update(((HvVmapple *)m->tick_opaque)->gic, cpu);
+}
+
 int hv_vmapple_create(HvVmapple *b, HvMachine *m, HvCpu *cpu, uint64_t ram_size, HvDisk *root, HvDisk *aux,
                       const HvCfgParams *cfg, const uint8_t mac[6]) {
     memset(b, 0, sizeof *b);
@@ -333,6 +339,8 @@ int hv_vmapple_create(HvVmapple *b, HvMachine *m, HvCpu *cpu, uint64_t ram_size,
     }
 
     m->tick = tick;
+    const char *tf = getenv("HV_TIMER_FAST"); /* HV_TIMER_FAST=0: every timer write polls the devices again (old way) */
+    if (!tf || strcmp(tf, "0")) m->timer_tick = timer_tick;
     m->tick_opaque = b;
     cpu->m = m;
     return 0;

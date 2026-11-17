@@ -59,7 +59,7 @@ static int read_block(TlVolume *vol, uint64_t block, uint8_t *buf) {
 typedef struct Node {
     uint16_t flags, level;
     uint32_t nkeys;
-    const uint8_t *toc, *keys, *vals_end;
+    const uint8_t *toc, *keys, *vals_end, *end;
     int fixed;
 } Node;
 
@@ -70,22 +70,28 @@ static int parse_node(Apfs *a, const uint8_t *b, Node *n) {
     n->keys = b + 56 + toff + tlen;
     n->vals_end = b + a->bs - ((n->flags & 1) ? 40 : 0); /* a root node ends with btree_info */
     n->fixed = (n->flags & 4) != 0;
+    n->end = b + a->bs;
     if (56 + (uint32_t)toff + tlen > a->bs) return -1;
+    if (n->nkeys > tlen / (n->fixed ? 4u : 8u)) return -1; /* the table of contents holds every key's entry */
     return 0;
 }
 
-static void node_kv(const Node *n, uint32_t i, const uint8_t **k, uint16_t *klen, const uint8_t **v, uint16_t *vlen) {
+/* 0, or -1 when the key or the value lies outside the block (a damaged node). */
+static int node_kv(const Node *n, uint32_t i, const uint8_t **k, uint16_t *klen, const uint8_t **v, uint16_t *vlen) {
     if (n->fixed) {
         const uint8_t *e = n->toc + 4 * i;
         *k = n->keys + le16(e), *klen = 16;
         uint16_t vo = le16(e + 2);
-        *v = vo == 0xffff ? NULL : n->vals_end - vo, *vlen = 16;
+        *v = vo == 0xffff ? NULL : n->vals_end - vo, *vlen = n->level ? 8 : 16; /* index values are a child's oid */
     } else {
         const uint8_t *e = n->toc + 8 * i;
         *k = n->keys + le16(e), *klen = le16(e + 2);
         uint16_t vo = le16(e + 4);
         *v = vo == 0xffff ? NULL : n->vals_end - vo, *vlen = le16(e + 6);
     }
+    if ((uint64_t)(*k - n->keys) + *klen > (uint64_t)(n->end - n->keys)) return -1;
+    if (*v && (*v < n->keys || *v > n->vals_end || (uint64_t)(n->end - *v) < *vlen)) return -1;
+    return 0;
 }
 
 /* Object map: a virtual object id to its block, as of the newest transaction. */
@@ -102,7 +108,7 @@ static uint64_t omap_lookup(TlVolume *vol, uint64_t tree, uint64_t oid) {
         for (uint32_t i = 0; i < n.nkeys; i++) {
             const uint8_t *k, *v;
             uint16_t kl, vl;
-            node_kv(&n, i, &k, &kl, &v, &vl);
+            if (node_kv(&n, i, &k, &kl, &v, &vl)) break;
             uint64_t koid = le64(k), kxid = le64(k + 8);
             if (koid < oid || (koid == oid && kxid <= a->xid)) best = i;
             else break;
@@ -110,8 +116,7 @@ static uint64_t omap_lookup(TlVolume *vol, uint64_t tree, uint64_t oid) {
         if (best < 0) break;
         const uint8_t *k, *v;
         uint16_t kl, vl;
-        node_kv(&n, (uint32_t)best, &k, &kl, &v, &vl);
-        if (!v) break;
+        if (node_kv(&n, (uint32_t)best, &k, &kl, &v, &vl) || !v) break;
         if (n.level == 0) {
             if (le64(k) == oid) found = le64(v + 8);
             break;
@@ -125,6 +130,7 @@ static uint64_t omap_lookup(TlVolume *vol, uint64_t tree, uint64_t oid) {
 #define PUSH(arr, n, cap) ((n) == (cap) ? ((arr) = realloc((arr), ((cap) = (cap) ? (cap) * 2 : 256) * sizeof *(arr))) : 0, &(arr)[(n)++])
 
 static void add_record(Apfs *a, const uint8_t *k, uint16_t klen, const uint8_t *v, uint16_t vlen) {
+    if (klen < 8) return;
     uint64_t hdr = le64(k);
     uint64_t oid = hdr & 0x0fffffffffffffffull;
     int type = (int)(hdr >> 60);
@@ -139,38 +145,43 @@ static void add_record(Apfs *a, const uint8_t *k, uint16_t klen, const uint8_t *
         /* Extended fields: the data stream's size. */
         if (vlen >= 96) {
             uint16_t nx = le16(v + 92);
+            if (96 + 4 * (uint32_t)nx > vlen) nx = 0; /* the field table inside the value */
             const uint8_t *desc = v + 96, *data = v + 96 + 4 * nx;
             for (uint16_t i = 0; i < nx && data < v + vlen; i++) {
                 uint8_t xt = desc[4 * i];
                 uint16_t xs = le16(desc + 4 * i + 2);
-                if (xt == 8 /* INO_EXT_TYPE_DSTREAM */ && xs >= 8) in->size = le64(data);
+                if (xt == 8 /* INO_EXT_TYPE_DSTREAM */ && xs >= 8 && data + 8 <= v + vlen) in->size = le64(data);
                 data += (xs + 7) & ~7u;
             }
         }
         if (!S_ISDIR(in->mode)) in->nlink = in->nlink ? in->nlink : 1;
         else in->nlink = 1;
-    } else if (type == J_DREC) {
+    } else if (type == J_DREC && vlen >= 8 && klen >= (a->hashed_names ? 12 : 10)) {
         Drec *d = PUSH(a->drecs, a->ndrecs, a->capd);
         const char *name;
         size_t nlen;
         if (a->hashed_names) nlen = le32(k + 8) & 0x3ff, name = (const char *)k + 12;
         else nlen = le16(k + 8), name = (const char *)k + 10;
+        if (nlen > (size_t)(k + klen - (const uint8_t *)name)) nlen = (size_t)(k + klen - (const uint8_t *)name); /* inside the key */
         d->parent = oid;
         d->name = strndup(name, nlen);
         d->file_id = le64(v);
-    } else if (type == J_EXTENT && vlen >= 16) {
+    } else if (type == J_EXTENT && vlen >= 16 && klen >= 16) {
         Ext *e = PUSH(a->exts, a->nexts, a->cape);
         e->owner = oid;
         e->logical = le64(k + 8);
         e->len = le64(v) & 0x00ffffffffffffffull;
         e->phys = le64(v + 8);
-    } else if (type == J_XATTR && vlen >= 4) {
+    } else if (type == J_XATTR && vlen >= 4 && klen >= 10) {
         Xattr *x = PUSH(a->xattrs, a->nxattrs, a->capx);
         memset(x, 0, sizeof *x);
         x->owner = oid;
-        x->name = strndup((const char *)k + 10, le16(k + 8));
+        uint16_t name_len = le16(k + 8);
+        if (name_len > klen - 10) name_len = (uint16_t)(klen - 10); /* inside the key */
+        x->name = strndup((const char *)k + 10, name_len);
         x->flags = le16(v);
         uint16_t dl = le16(v + 2);
+        if (dl > vlen - 4) dl = (uint16_t)(vlen - 4); /* inside the value */
         if (x->flags & 2) { /* embedded */
             x->data = malloc(dl ? dl : 1);
             memcpy(x->data, v + 4, dl);
@@ -193,11 +204,11 @@ static int walk_fs_tree(TlVolume *vol, uint64_t block, int depth) {
     for (uint32_t i = 0; i < n.nkeys && !rc; i++) {
         const uint8_t *k, *v;
         uint16_t kl, vl;
-        node_kv(&n, i, &k, &kl, &v, &vl);
-        if (!v) continue;
+        if (node_kv(&n, i, &k, &kl, &v, &vl) || !v) continue;
         if (n.level == 0) {
             add_record(a, k, kl, v, vl);
         } else {
+            if (vl < 8) continue;
             uint64_t child = omap_lookup(vol, a->volume_omap_tree, le64(v));
             rc = child ? walk_fs_tree(vol, child, depth + 1) : -1;
         }

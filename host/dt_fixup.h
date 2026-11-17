@@ -33,6 +33,8 @@ int hv_dt_fixup_tree(uint64_t offset, uint64_t len);
 /* The guest's GPU has drawn: the kernel has the tree in its registry now.
    Logs what became of the rewrite. */
 void hv_dt_fixup_stop(void);
+/* Stops the scan thread and waits for it, before the guest's RAM goes away. */
+void hv_dt_fixup_join(void);
 /* Rewrites one blob in place; returns how many strings changed. (Also tests.) */
 int hv_dt_fixup_blob(uint8_t *blob, uint64_t avail);
 

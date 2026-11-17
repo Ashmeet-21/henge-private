@@ -247,7 +247,7 @@ int henge_tl_run(const char *path, const char *out_path, char *err, size_t errle
     HengeDualMapping *jit = henge_ios_jit_get_mapping();
     if (!jit || !jit->rw_addr || !jit->rx_addr) return snprintf(err, errlen, "Turn on JIT first."), -1;
     if (jit->size < 4 * (size_t)TL_REGION) return snprintf(err, errlen, "The JIT region is too small."), -1;
-    TlHost host;
+    static TlHost host; /* the loader keeps pointing at it after we return (threads the program left running) */
     memset(&host, 0, sizeof host);
     size_t at = jit->size - TL_REGION;
     tl_host_init_region(&host, jit->rx_addr + at, jit->rw_addr + at, TL_REGION);

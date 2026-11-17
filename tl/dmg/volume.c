@@ -160,12 +160,13 @@ static int decompress_whole(TlVolume *vol, const TlNode *node) {
         uint64_t nblocks = (h.size + 0xffff) / 0x10000;
         if (h.type == 4) {
             /* A classic resource fork: data at 256, then a count and (offset, size) pairs from 260. */
-            if (rlen < 260 + 4) rc = -1;
             const uint8_t *tbl = r + 260;
-            uint32_t count;
-            memcpy(&count, tbl, 4);
+            uint32_t count = 0;
+            if (rlen < 260 + 4) rc = -1;
+            else memcpy(&count, tbl, 4);
             for (uint32_t i = 0; rc == 0 && i < count && i < nblocks; i++) {
                 uint32_t bo, bs;
+                if (260 + 4 + 8 * ((uint64_t)i + 1) > rlen) { rc = -1; break; } /* the table runs past the fork */
                 memcpy(&bo, tbl + 4 + 8 * i, 4);
                 memcpy(&bs, tbl + 8 + 8 * i, 4);
                 uint64_t ulen = h.size - i * 0x10000ull < 0x10000 ? h.size - i * 0x10000ull : 0x10000;

@@ -213,12 +213,18 @@ final class Machines: ObservableObject {
             let fm = FileManager.default
             try fm.createDirectory(at: dest, withIntermediateDirectories: true)
             excludeFromBackup()
-            for name in ["AVPBooter.vmapple2.bin", "auxiliary.bin", "machine.json", "disk.img"] {
-                let from = folder.appendingPathComponent(name)
-                guard fm.fileExists(atPath: from.path) else { continue }
-                if move { try fm.moveItem(at: from, to: dest.appendingPathComponent(name)) }
-                else { try fm.copyItem(at: from, to: dest.appendingPathComponent(name)) }
-            }
+            // Off the main thread: copying a disk image takes minutes. Only the disk is ever moved; the small files are
+            // copied, so a failure below (unpacking) can't take the ROM and aux storage away from the user's folder.
+            let files = ["AVPBooter.vmapple2.bin", "auxiliary.bin", "machine.json", "disk.img"]
+            try await Task.detached {
+                let fm = FileManager.default
+                for name in files {
+                    let from = folder.appendingPathComponent(name)
+                    guard fm.fileExists(atPath: from.path) else { continue }
+                    if move && name == "disk.img" { try fm.moveItem(at: from, to: dest.appendingPathComponent(name)) }
+                    else { try fm.copyItem(at: from, to: dest.appendingPathComponent(name)) }
+                }
+            }.value
             let packed = folder.appendingPathComponent(Self.packedDisk)
             if fm.fileExists(atPath: packed.path) {
                 // Off the main thread: unpacking tens of gigabytes takes minutes.
@@ -274,7 +280,6 @@ final class Machines: ObservableObject {
         // Not under its final name until it is whole, so a cut-short export can't be mistaken for a Mac.
         let partial = exports.appendingPathComponent(safeName + ".partial", isDirectory: true)
         try? fm.removeItem(at: partial)
-        try? fm.removeItem(at: final)
         let used = (try? mac.disk.resourceValues(forKeys: [.totalFileAllocatedSizeKey]))?.totalFileAllocatedSize ?? 0
         let free = (try? Self.root.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?.volumeAvailableCapacityForImportantUsage ?? 0
         let needed = Int64(used) + (256 << 20)
@@ -295,6 +300,7 @@ final class Machines: ObservableObject {
                 }, nil) == 0
             }.value
             guard ok else { throw message("The disk could not be written (not enough space?).") }
+            try? fm.removeItem(at: final) // the previous export goes only once this one is whole
             try fm.moveItem(at: partial, to: final)
         } catch {
             try? fm.removeItem(at: partial)
@@ -364,6 +370,12 @@ final class Machines: ObservableObject {
     }
 
     private func save() {
+        // The list on disk could not be read, so `all` is missing those Macs: writing it would drop them, and the next
+        // launch would then delete their folders as unreferenced (an imported Mac has no installed marker).
+        guard !listUnreadable else {
+            HengeLog.log("machines", "machines.json could not be read: not overwriting it")
+            return
+        }
         try? FileManager.default.createDirectory(at: Self.root, withIntermediateDirectories: true)
         excludeFromBackup()
         if let data = try? JSONEncoder().encode(all) { try? data.write(to: listURL, options: .atomic) }

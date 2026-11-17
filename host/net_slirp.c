@@ -121,9 +121,11 @@ void hv_net_install_default_fwds(void) {
 static int push(Queue *q, const uint8_t *data, uint32_t len) {
     pthread_mutex_lock(&q->mu);
     int ok = q->tail - q->head < QUEUE;
+    uint8_t *copy = ok ? malloc(len) : NULL;
+    if (!copy) ok = 0; /* out of memory: drop the frame, as when the queue is full */
     if (ok) {
         Frame *f = &q->f[q->tail % QUEUE];
-        f->data = malloc(len);
+        f->data = copy;
         memcpy(f->data, data, len);
         f->len = len;
         q->tail++;

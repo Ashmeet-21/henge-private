@@ -356,10 +356,13 @@ void hv_tlb_flush_kernel_range(HvCpu *cpu, uint64_t va, uint64_t len) {
     if (cpu->m && cpu->m->stats_interval) cpu->m->stats.kernel_ranges++;
     uint64_t first = va & ~(uint64_t)PAGE_MASK;
     if (len <= (4096ull << HV_TLB_PAGE_BITS)) {
-        for (uint64_t p = first; p < va + len; p += 1ull << HV_TLB_PAGE_BITS) hv_tlb_flush_va_asid(cpu, p, -1);
+        /* Counted, not "p < va + len": a range ending at the top of the VA space wraps va + len to 0. */
+        uint64_t n = ((va + len - 1 - first) >> HV_TLB_PAGE_BITS) + 1;
+        for (uint64_t i = 0; i < n; i++) hv_tlb_flush_va_asid(cpu, first + (i << HV_TLB_PAGE_BITS), -1);
         return;
     }
-    uint64_t lo = first & 0x00ffffffffffffffull, hi = (va + len) & 0x00ffffffffffffffull; /* tagged addresses: by the low 56 bits */
+    /* hi: the range's last byte (va + len itself wraps to 0 for a range ending at the top) */
+    uint64_t lo = first & 0x00ffffffffffffffull, hi = (va + len - 1) & 0x00ffffffffffffffull; /* tagged addresses: by the low 56 bits */
     for (int t = 0; t < 3; t++)
         for (uint32_t i = 0; i < HV_TLB_SIZE; i++) {
             HvTlbEntry *e = hv_tlb_ent(cpu, i, t);
@@ -367,7 +370,7 @@ void hv_tlb_flush_kernel_range(HvCpu *cpu, uint64_t va, uint64_t len) {
             uint64_t tag = e->read_tag != HV_TLB_INVALID ? e->read_tag + HV_TLB_ADJ : e->exec_tag != HV_TLB_INVALID ? hv_exec_key(e->exec_tag, e->addend) : e->write_tag + HV_TLB_ADJ;
             if (!((tag >> 55) & 1)) continue; /* a process's page */
             uint64_t pg = tag & 0x00ffffffffffffffull;
-            if (pg < hi && pg + PAGE_MASK + 1 > lo) memset(e, 0x80, sizeof *e);
+            if (pg <= hi && pg + PAGE_MASK + 1 > lo) memset(e, 0x80, sizeof *e);
         }
     hv_ijc_reset(cpu, 1);
 }

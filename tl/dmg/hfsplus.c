@@ -61,24 +61,34 @@ static int tree_load(TlVolume *vol, Hfs *h, Tree *t);
 static size_t fork_extents(TlVolume *vol, Hfs *h, const Fork *f, uint32_t file_id, int resource, Extent **out) {
     size_t n = 0, cap = 16;
     Extent *e = malloc(cap * sizeof *e);
+    if (!e) { *out = NULL; return 0; }
     uint32_t have = 0;
     for (int i = 0; i < 8 && f->ext[i].count; i++) e[n++] = f->ext[i], have += f->ext[i].count;
     if (have < f->blocks && file_id != 3 && h->extents.cache) {
         /* Overflow records: key (forkType, fileID, startBlock) -> 8 more extents. */
         Tree *t = &h->extents;
-        for (uint32_t node = t->first_leaf; node && have < f->blocks;) {
+        uint64_t guard = t->fork.size / t->node_size + 1; /* a damaged chain of nodes must not loop forever */
+        for (uint32_t node = t->first_leaf; node && have < f->blocks && guard--;) {
+            if (((uint64_t)node + 1) * t->node_size > t->fork.size) break;
             const uint8_t *nd = t->cache + (uint64_t)node * t->node_size;
             uint16_t nrec = be16(nd + 10);
+            if (14 + 2 * (uint32_t)nrec > t->node_size) nrec = 0; /* the offset table inside the node */
             for (uint16_t r = 0; r < nrec; r++) {
                 uint16_t off = be16(nd + t->node_size - 2 * (r + 1));
                 const uint8_t *k = nd + off;
+                if ((uint32_t)off + 2 > t->node_size) continue;
                 uint16_t klen = be16(k);
+                if ((uint32_t)off + 2 + klen + 64 > t->node_size) continue; /* key and its 8 extents inside the node */
                 if (k[2] != (resource ? 0xff : 0) || be32(k + 4) != file_id || be32(k + 8) != have) continue;
                 const uint8_t *rec = k + 2 + klen;
                 for (int i = 0; i < 8; i++) {
                     Extent x = {be32(rec + 8 * i), be32(rec + 4 + 8 * i)};
                     if (!x.count) break;
-                    if (n == cap) e = realloc(e, (cap *= 2) * sizeof *e);
+                    if (n == cap) {
+                        Extent *bigger = realloc(e, cap * 2 * sizeof *e);
+                        if (!bigger) break;
+                        e = bigger, cap *= 2;
+                    }
                     e[n++] = x, have += x.count;
                 }
             }
@@ -114,6 +124,7 @@ static ssize_t fork_read(TlVolume *vol, Hfs *h, const Fork *f, uint32_t file_id,
 
 static int tree_load(TlVolume *vol, Hfs *h, Tree *t) {
     if (!t->fork.size) return 0;
+    if (t->fork.size < 512) return -1; /* smaller than one node: the header below would be read past the end */
     t->cache = malloc(t->fork.size);
     if (!t->cache || fork_read(vol, h, &t->fork, t->file_id, 0, 0, t->cache, t->fork.size) != (ssize_t)t->fork.size) return -1;
     const uint8_t *hdr = t->cache + 14;
@@ -139,19 +150,24 @@ static int load_catalog(TlVolume *vol, Hfs *h) {
         const uint8_t *nd = t->cache + (uint64_t)node * t->node_size;
         if ((int8_t)nd[8] != -1) return -1;
         uint16_t nrec = be16(nd + 10);
+        if (14 + 2 * (uint32_t)nrec > t->node_size) nrec = 0; /* the offset table inside the node */
         for (uint16_t r = 0; r < nrec; r++) {
             uint16_t off = be16(nd + t->node_size - 2 * (r + 1));
             const uint8_t *k = nd + off;
+            if ((uint32_t)off + 2 > t->node_size) continue;
             uint16_t klen = be16(k);
+            if (klen < 6 || (uint32_t)off + 2 + klen + 2 > t->node_size) continue;
             const uint8_t *rec = k + 2 + klen;
             int16_t type = (int16_t)be16(rec);
             if (type != 1 && type != 2) continue;
+            if ((uint32_t)off + 2 + klen + (type == 2 ? 248 : 88) > t->node_size) continue; /* the record inside the node */
             if (h->nentries == cap) h->entries = realloc(h->entries, (cap *= 2) * sizeof *h->entries);
             Entry *e = &h->entries[h->nentries++];
             memset(e, 0, sizeof *e);
             e->parent = be32(k + 2);
             uint16_t nlen = be16(k + 6);
             if (nlen > 255) nlen = 255;
+            if (nlen > (klen - 6) / 2) nlen = (uint16_t)((klen - 6) / 2); /* the name inside its key */
             tl_utf16be_to_utf8(k + 8, nlen, e->name, sizeof e->name);
             e->type = type;
             e->id = be32(rec + 8);
@@ -249,25 +265,34 @@ static ssize_t hfs_get_xattr(TlVolume *vol, const TlNode *n, const char *name, v
     Hfs *h = vol->impl;
     Tree *t = &h->attributes;
     if (!t->cache) return -1;
-    for (uint32_t node = t->first_leaf; node;) {
+    uint64_t guard = t->fork.size / t->node_size + 1; /* a damaged chain of nodes must not loop forever */
+    for (uint32_t node = t->first_leaf; node && guard--;) {
+        if (((uint64_t)node + 1) * t->node_size > t->fork.size) break;
         const uint8_t *nd = t->cache + (uint64_t)node * t->node_size;
         uint16_t nrec = be16(nd + 10);
+        if (14 + 2 * (uint32_t)nrec > t->node_size) nrec = 0; /* the offset table inside the node */
         for (uint16_t r = 0; r < nrec; r++) {
             uint16_t off = be16(nd + t->node_size - 2 * (r + 1));
             const uint8_t *k = nd + off;
+            if ((uint32_t)off + 14 > t->node_size) continue;
             uint16_t klen = be16(k);
+            if ((uint32_t)off + 2 + klen + 16 > t->node_size) continue; /* key and record header inside the node */
             if (be32(k + 4) != (uint32_t)n->id) continue;
+            uint16_t units = be16(k + 12);
+            if (14 + 2 * (uint32_t)units > 2 + (uint32_t)klen) continue; /* the name inside its key */
             char aname[512];
-            tl_utf16be_to_utf8(k + 14, be16(k + 12), aname, sizeof aname);
+            tl_utf16be_to_utf8(k + 14, units, aname, sizeof aname);
             if (strcmp(aname, name)) continue;
             const uint8_t *rec = k + 2 + klen;
             uint32_t type = be32(rec);
             if (type == 0x10) { /* inline data */
                 uint32_t size = be32(rec + 12);
+                if ((uint64_t)(rec - nd) + 16 + size > t->node_size) return -1; /* the data inside the node */
                 if (buf) memcpy(buf, rec + 16, size < len ? size : len);
                 return size;
             }
             if (type == 0x20) { /* in a fork of its own */
+                if ((uint64_t)(rec - nd) + 8 + 80 > t->node_size) return -1;
                 Fork f;
                 read_fork_record(rec + 8, &f);
                 if (buf) {

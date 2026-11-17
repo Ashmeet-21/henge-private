@@ -286,6 +286,10 @@ int hv_dns_proxy_take(const uint8_t *p, uint32_t len, HvDnsSend send) {
     if ((dns[2] & 0xf8) != 0 || rd16(dns + 4) != 1 || rd16(dns + 6) || rd16(dns + 8) || rd16(dns + 10) > 1) return 0;
     Query *q = calloc(1, sizeof *q);
     if (!q) return 0;
+    if (14 + iplen > sizeof q->frame) { /* IP length past the UDP data (padding): too big to copy, libslirp's */
+        free(q);
+        return 0;
+    }
     int local = 0;
     uint32_t off = read_name(dns, dlen, 12, q->name, sizeof q->name, &local);
     if (!off || off + 4 > dlen || local) {

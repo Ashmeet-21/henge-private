@@ -422,9 +422,17 @@ static void *scan_thread(void *arg) {
     return NULL;
 }
 
+static pthread_t scan_tid;
+static int scan_joinable;
+
 void hv_dt_fixup_run(void) {
-    pthread_t t;
-    if (pthread_create(&t, NULL, scan_thread, NULL) == 0) pthread_detach(t);
+    scan_joinable = pthread_create(&scan_tid, NULL, scan_thread, NULL) == 0;
+}
+
+void hv_dt_fixup_join(void) {
+    active = 0;
+    if (scan_joinable) pthread_join(scan_tid, NULL);
+    scan_joinable = 0;
 }
 
 void hv_dt_fixup_stop(void) {

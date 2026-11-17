@@ -307,7 +307,12 @@ struct SessionView: View {
             if phase == .background && bootRAM > 0 { InstantResume.suspend(mac, ramMB: bootRAM, cpus: cpus) }
         }
         .onChange(of: showDetails) { showing in
-            if showing { HardwareKeys.releaseAll(); StickyKeys.shared.releaseAll() }
+            if showing {
+                HardwareKeys.releaseAll(); StickyKeys.shared.releaseAll()
+                log = Array(HengeLog.recentLines(200))
+                framesOut = henge_vm_net_frames(1)
+                framesIn = henge_vm_net_frames(0)
+            }
         }
         .onChange(of: confirmStop) { showing in
             if showing { HardwareKeys.releaseAll(); StickyKeys.shared.releaseAll() }
@@ -1069,13 +1074,18 @@ struct SessionView: View {
             cpusOn = henge_vm_cpus_on()
             userCode = userCode || henge_vm_guest_el0() != 0
             let now = Date(), blocks = henge_vm_blocks()
-            blocksPerSecond = Double(blocks &- lastBlocks) / max(now.timeIntervalSince(lastTime), 0.001)
+            let rate = Double(blocks &- lastBlocks) / max(now.timeIntervalSince(lastTime), 0.001)
             lastBlocks = blocks
             lastTime = now
-            framesOut = henge_vm_net_frames(1)
-            framesIn = henge_vm_net_frames(0)
+            let sent = henge_vm_net_frames(1), received = henge_vm_net_frames(0)
             helperRunning = Sharing.helperRunning
-            log = Array(HengeLog.recentLines(200))
+            // Shown only in Details: set while it is open, so the whole session view isn't redrawn every second.
+            if showDetails {
+                blocksPerSecond = rate
+                framesOut = sent
+                framesIn = received
+                log = Array(HengeLog.recentLines(200))
+            }
             let heat = ProcessInfo.processInfo.thermalState
             if Self.backOff(heat) != backingOff {
                 backingOff = Self.backOff(heat)
@@ -1111,8 +1121,8 @@ struct SessionView: View {
             tick += 1
             if tick % 10 == 0 {
                 let gpuFrames = henge_vm_gpu_frames()
-                HengeLog.log("perf", "blocks/s \(String(format: "%.0f", blocksPerSecond)), GPU frames/10s \(gpuFrames &- lastGPUFrames), "
-                             + "network tx \(framesOut), rx \(framesIn), dns \(henge_vm_dns(0)) answered \(henge_vm_dns(2)) unanswered, "
+                HengeLog.log("perf", "blocks/s \(String(format: "%.0f", rate)), GPU frames/10s \(gpuFrames &- lastGPUFrames), "
+                             + "network tx \(sent), rx \(received), dns \(henge_vm_dns(0)) answered \(henge_vm_dns(2)) unanswered, "
                              + "thermal \(Self.thermalLabel(heat))")
                 lastGPUFrames = gpuFrames
                 JITBootstrap.releaseLingeringDebugger()

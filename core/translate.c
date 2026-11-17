@@ -2280,6 +2280,9 @@ int hv_branch_retarget(uint32_t *w, int64_t off) {
         *w = (op & 0xfc000000) | (off & 0x3ffffff);
         return 1;
     }
+    /* TBZ/TBNZ: imm14 (32 KB) at bits 18..5, the bit number above it; the imm19 rewrite below would corrupt both.
+       Left to branch to its stub (only HV_K2's flat blocks ask for this). */
+    if ((op & 0x7e000000) == 0x36000000) return 0;
     if (off < -(1 << 18) || off >= (1 << 18)) return 0;
     *w = (op & ~(0x7ffffu << 5)) | (uint32_t)(off & 0x7ffff) << 5;
     return 1;

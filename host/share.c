@@ -110,8 +110,10 @@ typedef struct Text {
 
 static void add(Text *t, const char *s, size_t n) {
     if (t->len + n + 1 > t->cap) {
-        t->cap = (t->len + n + 1) * 2;
-        t->s = realloc(t->s, t->cap);
+        size_t cap = (t->len + n + 1) * 2;
+        char *s2 = realloc(t->s, cap);
+        if (!s2) return; /* out of memory: the text stays as it was */
+        t->s = s2, t->cap = cap;
     }
     memcpy(t->s + t->len, s, n);
     t->len += n;
@@ -697,7 +699,7 @@ typedef struct DavProp {
 /* The next tag at or after p: returns a pointer into a static buffer holding the tag's
    interior (between < and >), and sets *after past the >. NULL when no tag remains. */
 static const char *next_tag(const char *p, const char **after) {
-    static char tag[1024];
+    static __thread char tag[1024]; /* per thread: each connection has its own */
     const char *lt = strchr(p, '<');
     if (!lt) return NULL;
     if (lt[1] == '!' || lt[1] == '?') { /* comments, declarations, PIs: skip to > */
@@ -991,6 +993,11 @@ static int do_put(Conn *c, Request *r) {
     body_ready(c, r);
     static const size_t piece = 256 * 1024;
     char *buf = malloc(piece);
+    if (!buf) {
+        close(fd);
+        unlink(temp);
+        return -1;
+    }
     int full = 0;
     for (;;) {
         ssize_t got = body_read(c, r, buf, piece);
@@ -1486,7 +1493,7 @@ static int handle(Conn *c, Request *r) {
 static void *connection(void *arg) {
     Conn *c = arg;
     Request *r = malloc(sizeof *r);
-    for (;;) {
+    while (r) {
         int got = read_request(c, r);
         if (got <= 0) {
             if (got < 0) {
@@ -1526,6 +1533,10 @@ static void *listener(void *arg) {
         int on = 1;
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof on);
         Conn *c = calloc(1, sizeof *c);
+        if (!c) {
+            close(fd);
+            continue;
+        }
         c->fd = fd;
         pthread_t t;
         pthread_attr_t a;
@@ -1589,8 +1600,12 @@ int hv_share_start(const char *folder, const char *socket_path, const char *agen
         return -1;
     }
     chmod(socket_path, 0600);
+    if (pthread_create(&share_thread, NULL, listener, (void *)(intptr_t)server) != 0) {
+        close(server);
+        unlink(socket_path);
+        return -1;
+    }
     share_server_fd = server;
-    pthread_create(&share_thread, NULL, listener, (void *)(intptr_t)server);
     share_started = 1;
     return 0;
 }
