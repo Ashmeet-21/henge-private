@@ -74,14 +74,26 @@ struct MacSettingsView: View {
                 .padding(17)
                 .deskCard()
 
+                DeskHeading("Size of Things")
+                VStack(alignment: .leading, spacing: 12) {
+                    Picker("Size", selection: Binding(get: { mac.uiScale ?? 1 }, set: { mac.uiScale = $0 == 1 ? nil : $0; save() })) {
+                        ForEach(VirtualMac.uiScales, id: \.scale) { Text($0.name).tag($0.scale) }
+                    }
+                    .pickerStyle(.segmented)
+                    Text("\(mac.screen.width) × \(mac.screen.height). Large and Larger give macOS a smaller screen of the same shape, so text and buttons are bigger on this \(Device.name), and there is less for the Mac to draw. Changes apply the next time this Mac starts.")
+                        .font(.system(size: 13)).foregroundStyle(Desk.dim)
+                }
+                .padding(17)
+                .deskCard()
+
                 if Device.fittingScreen.height != 1080 {
                     DeskHeading("Screen")
                     VStack(alignment: .leading, spacing: 12) {
                         Picker("Screen", selection: Binding(get: {
                             if mac.isRetina { return "retina" }
-                            if mac.screen.width == Device.performanceScreen.width,
-                               mac.screen.height == Device.performanceScreen.height { return "performance" }
-                            if mac.screen.width == 1920, mac.screen.height == 1080 { return "wide" }
+                            if mac.baseScreen.width == Device.performanceScreen.width,
+                               mac.baseScreen.height == Device.performanceScreen.height { return "performance" }
+                            if mac.baseScreen.width == 1920, mac.baseScreen.height == 1080 { return "wide" }
                             return "fit"
                         }, set: { choice in
                             mac.retina = choice == "retina"

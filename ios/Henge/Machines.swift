@@ -24,8 +24,23 @@ struct VirtualMac: Identifiable, Codable, Hashable {
     /// With reportHostIdentity: also report the device's model identifier (hw.model).
     /// Experimental — it may bring the device's icon, and may confuse macOS.
     var reportHostModelID: Bool?
+    /// How big things look on the Mac: 1 (or none) is the full screen size; less gives macOS a smaller screen of the
+    /// same shape, which the device shows larger (and which takes less drawing). Applied at the next boot.
+    var uiScale: Double?
+    static let uiScales: [(name: String, scale: Double)] = [("Default", 1), ("Large", 0.8), ("Larger", 2.0 / 3)]
     var isRetina: Bool { Device.isPad && (retina ?? false) }
-    var screen: (width: Int, height: Int) { isRetina ? Device.retinaScreen : (screenWidth ?? 1920, screenHeight ?? 1080) }
+    /// The screen before uiScale: what the Screen choice asks for.
+    var baseScreen: (width: Int, height: Int) { isRetina ? Device.retinaScreen : (screenWidth ?? 1920, screenHeight ?? 1080) }
+    var screen: (width: Int, height: Int) {
+        let base = baseScreen, k = min(max(uiScale ?? 1, 0.5), 1)
+        guard k < 1 else { return base }
+        return (Int((Double(base.width) * k / 8).rounded()) * 8, Int((Double(base.height) * k / 8).rounded()) * 8)
+    }
+    /// The panel size macOS is told for a Retina screen: smaller with uiScale, so the density (and 2x drawing) stays.
+    var retinaMM: (width: Int, height: Int) {
+        let mm = Device.retinaMM, k = min(max(uiScale ?? 1, 0.5), 1)
+        return (Int((Double(mm.width) * k).rounded()), Int((Double(mm.height) * k).rounded()))
+    }
     var aspect: CGFloat { CGFloat(screen.width) / CGFloat(screen.height) }
 
     var directory: URL { Machines.directory(for: id) }
