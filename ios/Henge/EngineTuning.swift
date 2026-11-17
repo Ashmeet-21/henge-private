@@ -15,6 +15,8 @@ enum EngineTuning {
         "HV_HZ": "60",         // the refresh rate macOS is told its display has
         "HV_WFI_SPIN": "0",    // microseconds an idle CPU watches for work before sleeping
         "HV_FLUSH": "2",       // disk flush: F_BARRIERFSYNC, ordered but without a full fsync
+        // The memory balloon, asking for nothing: there for MemoryRelief when iOS runs short (KeepAlive.swift).
+        "HV_BALLOON": "0",
         "HV_STATS": "10",      // seconds between engine stats lines in the log; 0 = off
     ]
 

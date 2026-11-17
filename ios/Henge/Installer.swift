@@ -252,7 +252,8 @@ final class Installer: NSObject, ObservableObject {
         try? (mac.osName ?? "").write(to: mac.directory.appendingPathComponent(Machines.installedMarker), atomically: true, encoding: .utf8)
         Machines.shared.add(mac)
         HengeLog.log("install", "\(mac.name): restore finished, added to the Macs")
-        if henge_vm_state() == 1 { henge_vm_stop() }
+        // Off the main thread: a stop that takes long there is a hang to iOS, which closes apps that hang.
+        if henge_vm_state() == 1 { await Task.detached { henge_vm_stop() }.value }
         try? FileManager.default.removeItem(at: work)
     }
 

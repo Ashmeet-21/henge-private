@@ -52,6 +52,18 @@ enum InstantResume {
         }
     }
 
+    /// Henge is in the background and stays awake there (KeepAlive): the Mac waits, paused, until Henge is back,
+    /// using no CPU and no GPU (which is not Henge's in the background). With instant resume on, suspend() does
+    /// this and saves it too.
+    static func rest() {
+        guard !enabled, KeepAlive.enabled, henge_vm_state() == 1 else { return }
+        queue.async {
+            var buffer = [CChar](repeating: 0, count: 256)
+            let rc = henge_vm_pause(&buffer, buffer.count)
+            HengeLog.log("keepalive", rc == 0 ? "the Mac waits, paused, while Henge is in the background" : "the Mac was not paused: \(String(cString: buffer))")
+        }
+    }
+
     /// Henge is in the background: write the paused Mac out, in case iOS closes Henge. It stays paused.
     static func suspend(_ mac: VirtualMac, ramMB: UInt64, cpus: Int) {
         guard enabled, henge_vm_state() == 1 || henge_vm_state() == 4 else { return }

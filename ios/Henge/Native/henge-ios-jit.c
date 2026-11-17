@@ -220,6 +220,15 @@ void henge_ios_jit_log_footprint(const char *tag)
              info.phys_footprint / (1024.0 * 1024.0),
              info.resident_size  / (1024.0 * 1024.0),
              avail / (1024.0 * 1024.0));
+    /* What the footprint is made of, and what is resident beside it: internal is Henge's own memory (the code
+       cache, the translator's tables), compressed what iOS has squeezed of it, external the file-backed pages (a
+       Mac's RAM file: outside the footprint, but real memory all the same, which is what an 8 GB device runs out
+       of), graphics the GPU's (the Mac's surfaces and textures). */
+    if (count >= TASK_VM_INFO_COUNT)
+        HENGE_LOG("footprint[%s]: internal=%.0f compressed=%.0f external(file-backed)=%.0f graphics=%.0f peak=%.0f MiB",
+                 tag ? tag : "", info.internal / (1024.0 * 1024.0), info.compressed / (1024.0 * 1024.0),
+                 info.external / (1024.0 * 1024.0), info.ledger_tag_graphics_footprint / (1024.0 * 1024.0),
+                 info.ledger_phys_footprint_peak / (1024.0 * 1024.0));
 }
 
 size_t henge_ios_available_memory(void)

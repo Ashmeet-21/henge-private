@@ -65,8 +65,14 @@ enum JITBootstrap {
     /// where 1 GB and its records left a 2 GB Mac too little room in Setup, #70). A bigger cache fills and empties less
     /// often (macOS 27 filled 1 GB about once a minute) and costs more memory (its blocks' records come to about 0.75 of
     /// its size). Fixed for the launch: the region is claimed once.
-    static let defaultCodeCacheMB: Int = Entitlements.memoryLimitAtLaunch >= 5_500 << 20 ? 1536
-        : Entitlements.memoryLimitAtLaunch >= 3_500 << 20 ? 1024 : 512
+    /// The limit is not the whole story: an 8 GB iPad reports an 8 GB limit, but a Mac's 4 GB of RAM (outside the limit,
+    /// yet real memory), a 1.5 GB cache and its records leave iOS so little that it closes Henge. 1.5 GB only where the
+    /// device has more than 8 GB.
+    static let defaultCodeCacheMB: Int = {
+        let limit = Entitlements.memoryLimitAtLaunch, physical = ProcessInfo.processInfo.physicalMemory
+        if limit >= 5_500 << 20 { return physical > 9 << 30 ? 1536 : 1024 }
+        return limit >= 3_500 << 20 ? 1024 : 512
+    }()
     static let jitBytes: Int = {
         switch (UserDefaults.standard.object(forKey: codeCacheKey) as? Int) ?? defaultCodeCacheMB {
         case 1536: return 1536 << 20

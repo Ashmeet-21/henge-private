@@ -46,8 +46,13 @@ enum GuestMemory {
             .volumeAvailableCapacityForImportantUsage ?? 0
         let room = free > 0 ? UInt64(max(free - (2 << 30), 0)) >> 20 : UInt64.max
         let reach = henge_largest_mapping_mb()
-        let ram = min(UInt64(mac.ramMB), room, reach > 512 ? reach - 512 : 0) / 512 * 512
-        HengeLog.log("session", "guest RAM \(ram) MB (asked \(mac.ramMB), disk room \(room), largest mapping \(reach))")
+        // An 8 GB device cannot hold a 4 GB Mac beside the engine (its code cache and records come to 2.5 GB or
+        // more) and iOS: an iPad Pro M4 compressed 7 GB and then closed Henge four minutes in. 3 GB there; macOS
+        // makes up the difference with its own swap, on the Mac's disk, which iOS has none of.
+        let physical = ProcessInfo.processInfo.physicalMemory >> 20
+        let fits: UInt64 = physical <= 6700 ? 2048 : physical <= 8700 ? 3072 : UInt64.max
+        let ram = min(UInt64(mac.ramMB), room, reach > 512 ? reach - 512 : 0, fits) / 512 * 512
+        HengeLog.log("session", "guest RAM \(ram) MB (asked \(mac.ramMB), disk room \(room), largest mapping \(reach), this device fits \(fits == UInt64.max ? "any" : String(fits)))")
         return ram
     }
 }

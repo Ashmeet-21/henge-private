@@ -17,6 +17,7 @@ struct SettingsView: View {
     @AppStorage(JITBootstrap.codeCacheKey) private var codeCacheMB = JITBootstrap.defaultCodeCacheMB
     @AppStorage(DeskAppearance.key) private var appearance = DeskAppearance.system
     @AppStorage(InstantResume.key) private var instantResume = false
+    @AppStorage(KeepAlive.key) private var keepAlive = true
     @AppStorage(MacAppsFeature.key) private var macApps = false
 
     /// The second footer paragraph: how you click, given the selected input mode.
@@ -121,6 +122,12 @@ struct SettingsView: View {
                     Text("A bigger code cache empties less often and takes more memory (about 1.75 times its size); Henge picks one by its memory limit: 1.5 GB where there is plenty, 512 MB where there is little. Applies the next time Henge opens. If JIT stops turning on, or a Mac closes Henge during setup, choose a smaller one.")
                         .font(.footnote).foregroundStyle(.secondary)
                     Text("macOS draws a frame for every refresh: 30 Hz leaves the most of the emulated CPU to apps, at the cost of choppier animation; 60 Hz is smoother. Faster disk writes order them without waiting for a full sync; a sudden power loss could lose the last ones. Quicker wake keeps an idle CPU watching for work for 50 µs, at some battery cost. Superblocks let translated code run past conditional branches. Changes apply the next time a Mac starts.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                .listRowBackground(Desk.card)
+                Section("In the Background") {
+                    Toggle("Keep Henge awake", isOn: $keepAlive)
+                    Text("While a Mac is open or macOS is installing, Henge stays awake when you leave it or the screen locks, so iOS is much less likely to close it and an install goes on. A running Mac waits, paused, until you are back. Henge plays silence to do this; other apps' audio is not interrupted.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 .listRowBackground(Desk.card)

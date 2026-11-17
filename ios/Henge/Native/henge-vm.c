@@ -107,6 +107,9 @@ static int started(char *err, size_t errlen) {
     return 0;
 }
 
+static uint64_t booted_ram_mb;
+uint64_t henge_vm_ram_mb(void) { return booted_ram_mb; }
+
 static int boot_or_resume(const char *rom, const char *disk, const char *aux, uint64_t ecid, uint64_t seed, uint64_t ram_mb,
                           int cpus, const char *resume, const char *ident, char *err, size_t errlen);
 
@@ -190,6 +193,7 @@ static int boot_or_resume(const char *rom, const char *disk, const char *aux, ui
                           int cpus, const char *resume, const char *ident, char *err, size_t errlen) {
     { extern void hv_prof_ios_start(void); hv_prof_ios_start(); }
     if (begin_start(err, errlen)) return -1;
+    booted_ram_mb = ram_mb;
     HengeDualMapping *jit = henge_ios_jit_get_mapping();
     if (!jit || !jit->rw_addr) {
         snprintf(err, errlen, "Henge has no JIT region. Turn on JIT first.");

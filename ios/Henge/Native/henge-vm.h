@@ -60,6 +60,8 @@ int henge_vm_knob(const char *name, int value);
 /* The memory balloon (only with HV_BALLOON set before boot): asks the guest to hand over target_mb (when >= 0)
    and returns how many MB it has handed over, or -1 without a balloon. */
 long henge_vm_balloon(long target_mb);
+/* The RAM the Mac started last was given, in MB. */
+uint64_t henge_vm_ram_mb(void);
 
 /* Progress, for the session screen. */
 uint64_t henge_vm_blocks(void);            /* blocks the CPUs entered */
