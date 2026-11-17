@@ -146,7 +146,7 @@ void hv_tlb_flush(HvCpu *cpu) {
     hv_ijc_reset(cpu, 1);
     /* Only the entries filled since the last flush can be valid (both logs, unless one ran over). */
     uint32_t nu = cpu->nuser_fills, nk = cpu->nkernel_fills;
-    if (nu <= HV_USER_FILLS && nk <= HV_KERNEL_FILLS) {
+    if (!hv_knob[HV_K_FLUSHALL] && nu <= HV_USER_FILLS && nk <= HV_KERNEL_FILLS) {
         for (uint32_t k = 0; k < nu; k++) memset(&cpu->tlb[cpu->user_fills[k]], 0x80, sizeof cpu->tlb[0]);
         for (uint32_t k = 0; k < nk; k++) memset(&cpu->tlb[cpu->kernel_fills[k]], 0x80, sizeof cpu->tlb[0]);
     } else {
@@ -729,13 +729,33 @@ static int walks_elsewhere(HvCpu *target, uint32_t s1, uint32_t s2, uint64_t va,
     return 1;
 }
 
+static int ijc_fills_elsewhere(HvCpu *target, uint32_t c1, uint32_t c2, uint64_t va, uint64_t npages) {
+    if (c1 == c2 && !(c1 & 1)) return 1;
+    if (!hv_knob[HV_K_WALKLOG]) return 0;
+    HvPerCpu *p = target->pc_state;
+    uint32_t k1 = c1 >> 1, k2 = (c2 + 1) >> 1; /* fills k1 .. k2 - 1 */
+    if (k2 - k1 > WALK_LOG) return 0;
+    uint64_t lo = va & WALK_PAGE_BITS, span = npages << HV_TLB_PAGE_BITS;
+    const uint64_t page_sz = 1ull << HV_TLB_PAGE_BITS;
+    for (uint32_t k = k1; k != k2; k++) {
+        uint64_t pg = __atomic_load_n(&p->ijc_va[k & (WALK_LOG - 1)], __ATOMIC_RELAXED) & WALK_PAGE_BITS;
+        if (((pg - lo) & 0x00ffffffffffffffull) < span ||
+            (((pg + page_sz) - lo) & 0x00ffffffffffffffull) < span)
+            return 0;
+    }
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    uint32_t c3 = __atomic_load_n(&p->ijc_seq, __ATOMIC_SEQ_CST);
+    if ((c3 >> 1) - k1 >= WALK_LOG) return 0;
+    return 1;
+}
+
 int hv_tlbi_drop_remote_va(HvCpu *target, uint64_t va, int asid) {
     HvPerCpu *p = target->pc_state;
     uint32_t s1 = __atomic_load_n(&p->walk_seq, __ATOMIC_SEQ_CST);
     /* mid-walk: it may be about to fill from the old table, unless the walk is of another page (and not a switch's) */
     if ((s1 & 1) && !walks_elsewhere(target, s1, s1, va, 1)) { if (target->m->stats_interval) target->m->stats.race_kind[0]++; return 0; }
     uint32_t c1 = __atomic_load_n(&p->ijc_seq, __ATOMIC_SEQ_CST);
-    if (c1 & 1) { if (target->m->stats_interval) target->m->stats.race_kind[1]++; return 0; } /* caching a block it may have looked up through the old mapping */
+    if ((c1 & 1) && !ijc_fills_elsewhere(target, c1, c1, va, 1)) { if (target->m->stats_interval) target->m->stats.race_kind[1]++; return 0; } /* caching a block it may have looked up through the old mapping */
     if (!((va >> 55) & 1)) stash_drop_va(p, va, asid);
     uint32_t idx = (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1);
     int fetched = 0; /* the target may be running code from the page: it must leave and look again */
@@ -754,7 +774,7 @@ int hv_tlbi_drop_remote_va(HvCpu *target, uint64_t va, int asid) {
     if (!ijc_drop_va(target, va, asid, 1)) return -1; /* only target can do it: no use trying again */
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     int ok = walks_elsewhere(target, s1, __atomic_load_n(&p->walk_seq, __ATOMIC_SEQ_CST), va, 1) && /* no fill of it in between */
-             __atomic_load_n(&p->ijc_seq, __ATOMIC_SEQ_CST) == c1;
+             ijc_fills_elsewhere(target, c1, __atomic_load_n(&p->ijc_seq, __ATOMIC_SEQ_CST), va, 1);
     if (!ok) {
         if (target->m->stats_interval) target->m->stats.race_kind[2]++;
     } else if (fetched) {
@@ -773,7 +793,7 @@ int hv_tlbi_drop_remote_range(HvCpu *target, uint64_t va, uint64_t npages, int a
     uint32_t s1 = __atomic_load_n(&p->walk_seq, __ATOMIC_SEQ_CST);
     if ((s1 & 1) && !walks_elsewhere(target, s1, s1, va, npages)) { if (target->m->stats_interval) target->m->stats.race_kind[0]++; return 0; }
     uint32_t c1 = __atomic_load_n(&p->ijc_seq, __ATOMIC_SEQ_CST);
-    if (c1 & 1) { if (target->m->stats_interval) target->m->stats.race_kind[1]++; return 0; }
+    if ((c1 & 1) && !ijc_fills_elsewhere(target, c1, c1, va, npages)) { if (target->m->stats_interval) target->m->stats.race_kind[1]++; return 0; }
     if (!((va >> 55) & 1)) stash_drop_range(p, va, npages, asid);
     int fetched = 0;
     for (uint64_t i = 0; i < npages && i < HV_TLB_SIZE; i++) { /* past HV_TLB_SIZE pages the slots come round again */
@@ -796,7 +816,7 @@ int hv_tlbi_drop_remote_range(HvCpu *target, uint64_t va, uint64_t npages, int a
         if (!ijc_drop_va(target, va + (i << HV_TLB_PAGE_BITS), asid, 1)) return -1;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     int ok = walks_elsewhere(target, s1, __atomic_load_n(&p->walk_seq, __ATOMIC_SEQ_CST), va, npages) &&
-             __atomic_load_n(&p->ijc_seq, __ATOMIC_SEQ_CST) == c1;
+             ijc_fills_elsewhere(target, c1, __atomic_load_n(&p->ijc_seq, __ATOMIC_SEQ_CST), va, npages);
     if (!ok) {
         if (target->m->stats_interval) target->m->stats.race_kind[2]++;
     } else if (fetched) {
@@ -986,6 +1006,8 @@ int hv_ijc_fill_checked(HvCpu *cpu, HvBlock *b) {
         return 1;
     }
     if (!ijc_note_page(b)) return 0;
+    uint32_t ik = __atomic_load_n(&p->ijc_seq, __ATOMIC_RELAXED) >> 1;
+    __atomic_store_n(&p->ijc_va[ik & (WALK_LOG - 1)], b->va & ~(uint64_t)PAGE_MASK, __ATOMIC_RELEASE);
     __atomic_add_fetch(&p->ijc_seq, 1, __ATOMIC_SEQ_CST);
     int ok = tlb_maps_block(cpu, b);
     if (ok) hv_ijc_fill(cpu, b);

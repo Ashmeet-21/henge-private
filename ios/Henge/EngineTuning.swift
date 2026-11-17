@@ -8,6 +8,7 @@ enum EngineTuning {
     static let superblocksKey = "henge.perf.superblocks"
     static let wfiSpinKey = "henge.perf.wfiSpin"
     static let fastFlushKey = "henge.perf.fastFlush"
+    static let groupsKey = "henge.perf.groups"
 
     static let defaults: [String: String] = [
         // 60, not 120: every frame macOS draws is emulated and replayed, so 120 Hz
@@ -15,6 +16,10 @@ enum EngineTuning {
         "HV_HZ": "60",         // the refresh rate macOS is told its display has
         "HV_WFI_SPIN": "0",    // microseconds an idle CPU watches for work before sleeping
         "HV_FLUSH": "2",       // disk flush: F_BARRIERFSYNC, ordered but without a full fsync
+        // On for devices: an iPad measured 11% more frames with accesses grouped (one TLB check for several on one
+        // base register) and far fewer display freezes with the refresh event (issue #164). The Mac tool leaves both off.
+        "HV_GROUPS": "1",
+        "HV_PVG_VBLANK": "1",
         "HV_STATS": "10",      // seconds between engine stats lines in the log; 0 = off
     ]
 
@@ -23,6 +28,7 @@ enum EngineTuning {
         let d = UserDefaults.standard
         if [30, 120].contains(d.integer(forKey: refreshKey)) { env["HV_HZ"] = String(d.integer(forKey: refreshKey)) }
         if d.bool(forKey: superblocksKey) { env["HV_SUPERBLOCKS"] = "1" } else { unsetenv("HV_SUPERBLOCKS") }
+        if d.object(forKey: groupsKey) as? Bool == false { env["HV_GROUPS"] = "0" }
         if d.bool(forKey: wfiSpinKey) { env["HV_WFI_SPIN"] = "50" }
         if d.object(forKey: fastFlushKey) as? Bool == false { env["HV_FLUSH"] = "0" }
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
