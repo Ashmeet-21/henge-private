@@ -305,6 +305,7 @@ struct SessionView: View {
             henge_vm_mouse_button(2, 0)
             if phase == .inactive { InstantResume.pause() }
             if phase == .background && bootRAM > 0 { InstantResume.suspend(mac, ramMB: bootRAM, cpus: cpus) }
+            if phase == .background { InstantResume.rest() }
         }
         .onChange(of: showDetails) { showing in
             if showing {

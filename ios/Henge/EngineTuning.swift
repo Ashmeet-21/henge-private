@@ -21,6 +21,8 @@ enum EngineTuning {
         // base register) and far fewer display freezes with the refresh event (issue #164). The Mac tool leaves both off.
         "HV_GROUPS": "1",
         "HV_PVG_VBLANK": "1",
+        // The memory balloon, asking for nothing: there for MemoryRelief when iOS runs short (KeepAlive.swift).
+        "HV_BALLOON": "0",
         "HV_STATS": "10",      // seconds between engine stats lines in the log; 0 = off
     ]
 
