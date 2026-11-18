@@ -76,4 +76,10 @@ jobs:
             make "build/$t" >/dev/null && "./build/$t" 2>&1 | tail -15 && echo "PASS $t" || echo "::error::FAIL $t"
             echo "::endgroup::"
           done
+          # The app ships with superblocks on, so run the JIT tests that way too.
+          for t in test_jit test_exc test_mem; do
+            echo "::group::$t (HV_SUPERBLOCKS=1)"
+            HV_SUPERBLOCKS=1 "./build/$t" 2>&1 | tail -15 && echo "PASS $t superblocks" || echo "::error::FAIL $t superblocks"
+            echo "::endgroup::"
+          done
           python3 tests/test_jit_high_room.py && echo "PASS test_jit_high_room" || echo "::error::FAIL test_jit_high_room"
