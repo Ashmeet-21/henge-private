@@ -18,6 +18,7 @@ struct SettingsView: View {
     @AppStorage(EngineTuning.fastFlushKey) private var fastFlush = true
     @AppStorage(EngineTuning.wfiSpinKey) private var wfiSpin = false
     @AppStorage(EngineTuning.superblocksKey) private var superblocks = true
+    @AppStorage(EngineTuning.groupsKey) private var groups = true
     @AppStorage(JITBootstrap.codeCacheKey) private var codeCacheMB = JITBootstrap.defaultCodeCacheMB
     @AppStorage(DeskAppearance.key) private var appearance = DeskAppearance.system
     @AppStorage("henge.keyboardZoom") private var keyboardZoom = true
@@ -150,6 +151,7 @@ struct SettingsView: View {
                     .pickerStyle(.segmented)
                     Toggle("Faster disk writes", isOn: $fastFlush)
                     Toggle("Quicker wake from idle", isOn: $wfiSpin)
+                    Toggle("Grouped memory accesses", isOn: $groups)
                     Toggle("Superblocks (experimental)", isOn: $superblocks)
                     if Device.hasLittleMemory {
                         Text("Code cache: 512 MB, fixed on this \(Device.name): a bigger one and the Mac's memory together are more than iOS lets Henge have.")
@@ -162,7 +164,7 @@ struct SettingsView: View {
                         Text("A bigger code cache empties less often and takes more memory; Henge picks 1.5 GB where there is room for it. Applies the next time Henge opens. If JIT stops turning on, choose 1 GB.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
-                    Text("macOS draws a frame for every refresh: 30 Hz leaves the most of the emulated CPU to apps, at the cost of choppier animation; 60 Hz is smoother. Faster disk writes order them without waiting for a full sync; a sudden power loss could lose the last ones. Quicker wake keeps an idle CPU watching for work for 50 µs, at some battery cost. Superblocks let translated code run past conditional branches. Changes apply the next time a Mac starts.")
+                    Text("macOS draws a frame for every refresh: 30 Hz leaves the most of the emulated CPU to apps, at the cost of choppier animation; 60 Hz is smoother. Faster disk writes order them without waiting for a full sync; a sudden power loss could lose the last ones. Quicker wake keeps an idle CPU watching for work for 50 µs, at some battery cost. Grouped memory accesses check a page once for several accesses next to each other, at the cost of a little more code. Superblocks let translated code run past conditional branches. Changes apply the next time a Mac starts.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 .listRowBackground(Desk.card)
