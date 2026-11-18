@@ -1014,7 +1014,7 @@ struct SessionView: View {
         KeyboardSignals.shared.resetSession()
         henge_vm_set_display(UInt32(guest.width), UInt32(guest.height))
         if mac.isRetina {
-            henge_vm_set_display_mm(UInt32(Device.retinaMM.width), UInt32(Device.retinaMM.height))
+            henge_vm_set_display_mm(UInt32(mac.retinaMM.width), UInt32(mac.retinaMM.height))
         } else {
             henge_vm_set_display_mm(0, 0)
         }
