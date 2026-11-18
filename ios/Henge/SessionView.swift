@@ -1012,11 +1012,6 @@ struct SessionView: View {
         Trackpad.guestScreenHeight = guest.height
         KeyboardSignals.shared.resetSession()
         henge_vm_set_display(UInt32(guest.width), UInt32(guest.height))
-        // About This Mac's chip: this device's ("Apple A20 Pro"), where it said "Apple M1 (Virtual)". henge-env.txt can name another.
-        if getenv("HV_SOC_NAME") == nil, let chip = Device.chipName {
-            setenv("HV_SOC_NAME", String(chip.prefix(31)), 1)
-            HengeLog.log("session", "chip name for the Mac: \(chip)")
-        }
         if mac.isRetina {
             henge_vm_set_display_mm(UInt32(Device.retinaMM.width), UInt32(Device.retinaMM.height))
         } else {
@@ -1026,10 +1021,9 @@ struct SessionView: View {
         henge_vm_set_hot(Self.backOff(ProcessInfo.processInfo.thermalState) ? 1 : 0)
         InstantResume.bootScreen = "\(guest.width)x\(guest.height)"
         if mac.reportHostIdentity == true {
-            let modelID = Device.snappedModelIdentifier(forOS: mac.osName)
-            henge_vm_set_identity(Device.chipName, Device.marketingName,
-                                  mac.reportHostModelID == true ? modelID : nil)
-            HengeLog.log("session", "About This Mac reports \(Device.marketingName) (model \(modelID))")
+            // Name and chip only. The model identifier is never reported: macOS picks hardware paths from it (YouTube lag/crash).
+            henge_vm_set_identity(Device.chipName, Device.marketingName, nil)
+            HengeLog.log("session", "About This Mac reports \(Device.marketingName)")
         } else {
             henge_vm_set_identity(nil, nil, nil)
         }
