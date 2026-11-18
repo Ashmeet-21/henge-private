@@ -82,4 +82,10 @@ jobs:
             HV_SUPERBLOCKS=1 "./build/$t" 2>&1 | tail -15 && echo "PASS $t superblocks" || echo "::error::FAIL $t superblocks"
             echo "::endgroup::"
           done
+          # The Settings toggle "Fast system registers" turns HV_SYSREG_INLINE on: test it with superblocks too.
+          for t in test_jit test_exc test_mem; do
+            echo "::group::$t (HV_SYSREG_INLINE=1)"
+            HV_SYSREG_INLINE=1 HV_SUPERBLOCKS=1 "./build/$t" 2>&1 | tail -15 && echo "PASS $t sysreg-inline" || echo "::error::FAIL $t sysreg-inline"
+            echo "::endgroup::"
+          done
           python3 tests/test_jit_high_room.py && echo "PASS test_jit_high_room" || echo "::error::FAIL test_jit_high_room"

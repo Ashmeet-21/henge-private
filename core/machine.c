@@ -106,6 +106,7 @@ static int init_rest(HvMachine *m) {
     /* So the tests can run the translator these ways too (the iOS and --phone paths read them in knobs_init). */
     if (getenv("HV_SUPERBLOCKS")) hv_knob[HV_K_SUPERBLOCKS] = atoi(getenv("HV_SUPERBLOCKS"));
     if (getenv("HV_JIT_SEGMENTS")) hv_knob[HV_K_JITSEGS] = atoi(getenv("HV_JIT_SEGMENTS"));
+    if (getenv("HV_SYSREG_INLINE")) hv_knob[HV_K_SYSINLINE] = atoi(getenv("HV_SYSREG_INLINE"));
     if (getenv("HV_GROUPS")) hv_knob[HV_K_GROUPS] = atoi(getenv("HV_GROUPS"));
     /* The exact check for an access in a page's last 15 bytes, in the access's out-of-line path (code size only):
        on the phone, Golden Gate's boot and login send 80-240K such accesses a second to the helper without it. It

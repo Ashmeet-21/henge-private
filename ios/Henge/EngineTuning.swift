@@ -10,6 +10,7 @@ enum EngineTuning {
     static let fastFlushKey = "henge.perf.fastFlush"
     static let keyboardLayoutKey = "henge.keyboard.layout"
     static let groupsKey = "henge.perf.groups"
+    static let sysregInlineKey = "henge.perf.sysregInline"
 
     static let defaults: [String: String] = [
         // 60, not 120: every frame macOS draws is emulated and replayed, so 120 Hz
@@ -34,6 +35,8 @@ enum EngineTuning {
         // Superblocks default ON (ship posture): only an explicit stored off turns it off.
         if d.object(forKey: superblocksKey) == nil || d.bool(forKey: superblocksKey) { env["HV_SUPERBLOCKS"] = "1" } else { unsetenv("HV_SUPERBLOCKS") }
         if d.object(forKey: groupsKey) as? Bool == false { env["HV_GROUPS"] = "0" }
+        // Off by default: upstream #175 was never measured on a device. Settings toggle to try it.
+        if d.bool(forKey: sysregInlineKey) { env["HV_SYSREG_INLINE"] = "1" } else { unsetenv("HV_SYSREG_INLINE") }
         if d.bool(forKey: wfiSpinKey) { env["HV_WFI_SPIN"] = "50" }
         if d.object(forKey: fastFlushKey) as? Bool == false { env["HV_FLUSH"] = "0" }
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
