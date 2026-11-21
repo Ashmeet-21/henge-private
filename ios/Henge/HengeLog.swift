@@ -195,6 +195,7 @@ enum HengeLog {
         let t = Thread {
             var pending = Data()
             var buf = [UInt8](repeating: 0, count: 16 * 1024)
+            var idleWait: UInt32 = 40_000 // grows while nothing is written, so a quiet log costs few wakeups
             while true {
                 let n = read(pipeReadFD, &buf, buf.count)
                 if n < 0 {
@@ -205,9 +206,11 @@ enum HengeLog {
                 // more will arrive. A pipe blocked here; a file returns 0, so
                 // this is where the tail waits.
                 if n == 0 {
-                    usleep(40_000)
+                    usleep(idleWait)
+                    idleWait = min(idleWait * 2, 250_000)
                     continue
                 }
+                idleWait = 40_000
                 pending.append(contentsOf: buf[0..<n])
 
                 // Emit complete lines only, so a partial write never splits a
@@ -222,7 +225,7 @@ enum HengeLog {
             }
         }
         t.name = "com.henge.log.reader"
-        t.qualityOfService = .userInitiated
+        t.qualityOfService = .utility // logging must not take a fast core from the Mac's CPUs
         t.start()
     }
 

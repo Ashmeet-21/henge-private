@@ -910,7 +910,7 @@ static int do_get(Conn *c, Request *r) {
             from = r->range_from;
             if (r->range_to >= 0 && r->range_to < to) to = r->range_to;
         }
-        if (from >= st.st_size && st.st_size > 0) {
+        if ((from >= st.st_size && st.st_size > 0) || (to < from && st.st_size > 0)) { /* past the end, or backwards (bytes=10-5) */
             close(fd);
             char h[80];
             snprintf(h, sizeof h, "Content-Range: bytes */%lld\r\n", (long long)st.st_size);
